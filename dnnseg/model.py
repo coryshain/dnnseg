@@ -113,7 +113,7 @@ class UnsupervisedWordClassifier(object):
         self._initialize_objective(n_train)
         sys.stderr.write('Initializing EMA...\n')
         self._initialize_ema()
-        sys.stderr.write('Initializing save...\n')
+        sys.stderr.write('Initializing saver...\n')
         self._initialize_saver()
         self._initialize_logging()
         sys.stderr.write('Loading checkpoint...\n')
@@ -336,6 +336,8 @@ class UnsupervisedWordClassifier(object):
             with self.sess.graph.as_default():
                 self.saver = tf.train.Saver()
 
+                self.check_numerics_ops = [tf.check_numerics(v, 'Numerics check failed') for v in tf.trainable_variables()]
+
     def _initialize_ema(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
@@ -391,6 +393,12 @@ class UnsupervisedWordClassifier(object):
 
     def minibatch_scale(self, n):
         return float(n) / self.minibatch_size
+
+    def check_numerics(self):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                for op in self.check_numerics_ops:
+                    self.sess.run(op)
 
     def run_train_step(self, feed_dict, return_losses=True, return_reconstructions=False, return_labels=False):
         return NotImplementedError
@@ -479,72 +487,84 @@ class UnsupervisedWordClassifier(object):
                     self.sess.run(self.incr_global_step)
 
                     if self.save_freq > 0 and self.global_step.eval(session=self.sess) % self.save_freq == 0:
-                        sys.stderr.write('Saving model...\n')
-                        self.save()
+                        try:
+                            self.check_numerics()
+                            numerics_passed = True
+                        except:
+                            numerics_passed = False
 
-                        self.set_predict_mode(True)
+                        if numerics_passed:
+                            sys.stderr.write('Saving model...\n')
 
-                        sys.stderr.write('Extracting predictions...\n')
-                        reconst = []
-                        labels_pred = []
-                        for i in range(0, len(X_cv), self.eval_minibatch_size):
-                            reconst_batch, labels_pred_batch = self.sess.run(
-                                [self.reconst, self.labels],
-                                feed_dict={
-                                    self.X: X_cv[i:i+self.eval_minibatch_size],
-                                    self.X_mask: X_mask_cv[i:i+self.eval_minibatch_size],
-                                    self.y: y_cv[i:i+self.eval_minibatch_size],
-                                    self.y_mask: y_mask_cv[i:i+self.eval_minibatch_size]
-                                }
+                            self.save()
+
+                            self.set_predict_mode(True)
+
+                            sys.stderr.write('Extracting predictions...\n')
+                            reconst = []
+                            labels_pred = []
+                            for i in range(0, len(X_cv), self.eval_minibatch_size):
+                                reconst_batch, labels_pred_batch = self.sess.run(
+                                    [self.reconst, self.labels],
+                                    feed_dict={
+                                        self.X: X_cv[i:i+self.eval_minibatch_size],
+                                        self.X_mask: X_mask_cv[i:i+self.eval_minibatch_size],
+                                        self.y: y_cv[i:i+self.eval_minibatch_size],
+                                        self.y_mask: y_mask_cv[i:i+self.eval_minibatch_size]
+                                    }
+                                )
+                                reconst.append(reconst_batch)
+                                labels_pred.append(labels_pred_batch)
+
+                            reconst = np.concatenate(reconst, axis=0)
+                            labels_pred = np.concatenate(labels_pred, axis=0)
+
+                            sys.stderr.write('Plotting...\n')
+                            self.plot_reconstructions(
+                                X_cv[self.plot_ix],
+                                y_cv[self.plot_ix],
+                                reconst[self.plot_ix]
                             )
-                            reconst.append(reconst_batch)
-                            labels_pred.append(labels_pred_batch)
 
-                        reconst = np.concatenate(reconst, axis=0)
-                        labels_pred = np.concatenate(labels_pred, axis=0)
+                            self.plot_label_histogram(labels_pred)
+                            homogeneity = homogeneity_score(labels_cv, labels_pred)
+                            completeness = completeness_score(labels_cv, labels_pred)
+                            v_measure = v_measure_score(labels_cv, labels_pred)
 
-                        sys.stderr.write('Plotting...\n')
-                        self.plot_reconstructions(
-                            X_cv[self.plot_ix],
-                            y_cv[self.plot_ix],
-                            reconst[self.plot_ix]
-                        )
+                            sys.stderr.write('Labeling scores (predictions):\n')
+                            sys.stderr.write('  Homogeneity: %s\n' %homogeneity)
+                            sys.stderr.write('  Completeness: %s\n' %completeness)
+                            sys.stderr.write('  V-measure: %s\n\n' %v_measure)
 
-                        self.plot_label_histogram(labels_pred)
-                        homogeneity = homogeneity_score(labels_cv, labels_pred)
-                        completeness = completeness_score(labels_cv, labels_pred)
-                        v_measure = v_measure_score(labels_cv, labels_pred)
+                            sys.stderr.write('Labeling scores (random uniform):\n')
 
-                        sys.stderr.write('Labeling scores (predictions):\n')
-                        sys.stderr.write('  Homogeneity: %s\n' %homogeneity)
-                        sys.stderr.write('  Completeness: %s\n' %completeness)
-                        sys.stderr.write('  V-measure: %s\n\n' %v_measure)
-
-                        sys.stderr.write('Labeling scores (random uniform):\n')
-
-                        if self.binary_classifier or not self.k:
-                            if not self.k:
-                                k = 2 ** self.emb_dim
+                            if self.binary_classifier or not self.k:
+                                if not self.k:
+                                    k = 2 ** self.emb_dim
+                                else:
+                                    k = 2 ** self.k
                             else:
-                                k = 2 ** self.k
+                                k = self.k
+
+                            labels_rand = np.random.randint(0, k, labels_pred.shape)
+                            sys.stderr.write('  Homogeneity: %s\n' % homogeneity_score(labels_cv, labels_rand))
+                            sys.stderr.write('  Completeness: %s\n' % completeness_score(labels_cv, labels_rand))
+                            sys.stderr.write('  V-measure: %s\n\n' % v_measure_score(labels_cv, labels_rand))
+
+                            fd_summary = {
+                                self.loss_summary: loss_total,
+                                self.homogeneity: homogeneity,
+                                self.completeness: completeness,
+                                self.v_measure: v_measure
+                            }
+                            summary_metrics = self.sess.run(self.summary_metrics, feed_dict=fd_summary)
+                            self.writer.add_summary(summary_metrics, self.global_step.eval(session=self.sess))
+
+                            self.set_predict_mode(False)
+
                         else:
-                            k = self.k
-
-                        labels_rand = np.random.randint(0, k, labels_pred.shape)
-                        sys.stderr.write('  Homogeneity: %s\n' % homogeneity_score(labels_cv, labels_rand))
-                        sys.stderr.write('  Completeness: %s\n' % completeness_score(labels_cv, labels_rand))
-                        sys.stderr.write('  V-measure: %s\n\n' % v_measure_score(labels_cv, labels_rand))
-
-                        fd_summary = {
-                            self.loss_summary: loss_total,
-                            self.homogeneity: homogeneity,
-                            self.completeness: completeness,
-                            self.v_measure: v_measure
-                        }
-                        summary_metrics = self.sess.run(self.summary_metrics, feed_dict=fd_summary)
-                        self.writer.add_summary(summary_metrics, self.global_step.eval(session=self.sess))
-
-                        self.set_predict_mode(False)
+                            sys.stderr.write('Numerics check failed. Aborting save and reloading from previous checkpoint...\n')
+                            self.load()
 
                     t1_iter = time.time()
                     sys.stderr.write('Iteration time: %.2fs\n' % (t1_iter - t0_iter))
