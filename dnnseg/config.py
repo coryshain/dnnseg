@@ -4,6 +4,9 @@ import shutil
 import numpy as np
 import configparser
 
+from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
+
+
 
 class Config(object):
     def __init__(self, path):
@@ -17,11 +20,8 @@ class Config(object):
         self.dev_data_dir = data.get('dev_data_dir', './')
         self.test_data_dir = data.get('test_data_dir', './')
         self.n_coef = data.getint('n_coef', 13)
-        self.order = data.get('order', None)
-        if self.order is None or self.order == 'None':
-            self.order = [1, 2]
-        else:
-            self.order = sorted(list(set([int(x) for x in self.order.split()])))
+        self.order = data.getint('order', 2)
+        self.save_preprocessed_data = data.getboolean('save_preprocessed_data', True)
 
         # SETTINGS
         # Output directory
@@ -36,89 +36,56 @@ class Config(object):
         if os.path.realpath(path) != os.path.realpath(self.outdir + '/config.ini'):
             shutil.copy2(path, self.outdir + '/config.ini')
 
-        # Model hyperparameters
-        self.k = settings.getint('k', 128)
-        self.temp = settings.getfloat('temp', 1.)
-        self.trainable_temp = settings.getboolean('trainable_temp', False)
-        self.binary_classifier = settings.getboolean('binary_classifier', False)
-        self.emb_dim = settings.get('emb_dim', None)
-        if self.emb_dim in [None, 'None']:
-            self.emb_dim = None
+        # Process config settings
+        self.model_settings = self.build_unsupervised_word_classifier_settings(settings)
+        max_len = settings.get('max_len', None)
+        if max_len in [None, 'None']:
+            max_len = None
         else:
             try:
-                self.emb_dim = int(self.emb_dim)
+                max_len = int(max_len)
             except:
-                raise ValueError('emb_dim parameter invalid: %s' %self.emb_dim)
-        self.encoder_type = settings.get('encoder_type', 'rnn')
-        self.decoder_type = settings.get('decoder_type', 'rnn')
-        self.dense_n_layers = settings.getint('dense_n_layers', 1)
-        self.conv_n_filters = settings.getint('conv_n_filters', 16)
-        self.conv_kernel_size = settings.getint('conv_kernel_size', 3)
-        self.output_scale = settings.get('output_scale', None)
-        if self.output_scale in [None, 'None']:
-            self.output_scale = None
+                raise ValueError('max_len parameter invalid: %s' % max_len)
+        self.model_settings['max_len'] = max_len
+        self.model_settings['n_iter'] = settings.getint('n_iter', 1000)
+        gpu_frac = settings.get('gpu_frac', None)
+        if gpu_frac in [None, 'None']:
+            gpu_frac = None
         else:
             try:
-                self.output_scale = float(self.output_scale)
+                gpu_frac = float(gpu_frac)
             except:
-                raise ValueError('output_scale parameter invalid: %s' %self.output_scale)
-        self.unroll_rnn = settings.getboolean('unroll_rnn', False)
-        self.reconstruct_deltas = settings.getboolean('reconstruct_deltas', False)
-
-        # Optimizer
-        self.optim = settings.get('optim', 'Adam')
-        if self.optim == 'None':
-            self.optim = None
-        self.learning_rate = settings.getfloat('learning_rate', 0.001)
-        self.learning_rate_min = settings.get('learning_rate_min', 1e-5)
-        if self.learning_rate_min in [None, 'None', '-inf']:
-            self.learning_rate_min = -np.inf
-        else:
-            try:
-                self.learning_rate_min = float(self.learning_rate_min)
-            except:
-                raise ValueError('learning_rate_min parameter invalid: %s' % self.learning_rate_min)
-        self.lr_decay_family = settings.get('lr_decay_family', None)
-        if self.lr_decay_family == 'None':
-            self.lr_decay_family = None
-        self.lr_decay_steps = settings.getint('lr_decay_steps', 100)
-        self.lr_decay_rate = settings.getfloat('lr_decay_rate', .5)
-        self.lr_decay_staircase = settings.getboolean('lr_decay_staircase', False)
-        self.max_global_gradient_norm = settings.get('max_global_gradient_norm', None)
-        if self.max_global_gradient_norm in [None, 'None', 'inf']:
-            self.max_global_gradient_norm = None
-        else:
-            try:
-                self.max_global_gradient_norm = float(self.max_global_gradient_norm)
-            except:
-                raise ValueError('max_global_gradient_norm parameter invalid: %s' % self.max_global_gradient_norm)
-        self.init_sd = settings.getfloat('init_sd', 1.)
-        self.ema_decay = settings.getfloat('ema_decay', 0.999)
-
-        # Implementation
-        self.gpu_frac = settings.get('gpu_frac', None)
-        if self.gpu_frac is not None and self.gpu_frac != 'None':
-            self.gpu_frac = float(self.gpu_frac)
-        self.use_gpu_if_available = settings.getboolean('use_gpu_if_available', True)
-        self.float_type = settings.get('float_type', 'float32')
-        self.int_type = settings.get('int_type', 'int32')
-        self.save_preprocessed_data = settings.getboolean('save_preprocessed_data', True)
-        self.n_iter = settings.getint('n_iter', 1000)
-        self.n_samples = settings.getint('n_samples', 2)
-        self.minibatch_size = settings.getint('minibatch_size', 128)
-        self.eval_minibatch_size = settings.getint('eval_minibatch_size', 100000)
-        self.log_freq = settings.getint('log_freq', 1)
-        self.save_freq = settings.getint('save_freq', 1)
+                raise ValueError('gpu_frac parameter invalid: %s' % gpu_frac)
+        self.model_settings['gpu_frac'] = gpu_frac
+        self.model_settings['use_gpu_if_available'] = settings.getboolean('use_gpu_if_available', True)
 
 
+    def __getitem__(self, item):
+            return self.model_settings[item]
 
+    def build_unsupervised_word_classifier_settings(self, settings):
+        out = {}
 
+        # Core fields
+        out['network_type'] = settings.get('network_type', 'bayes')
 
+        # Parent class initialization keyword arguments
+        out['k'] = settings.getint('k', 128)
+        out['outdir'] = self.outdir
+        out['n_coef'] = self.n_coef
+        out['order'] = self.order
+        for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
+            if kwarg not in ['n_coef', 'order']:
+                out[kwarg.key] = kwarg.kwarg_from_config(settings)
 
-    def __str__(self):
-        out = ''
-        V = vars(self)
-        for x in V:
-            out += '%s: %s\n' %(x, V[x])
+        # MLE initialization keyword arguments
+        for kwarg in UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS:
+            out[kwarg.key] = kwarg.kwarg_from_config(settings)
+
+        # Bayes initialization keyword arguments
+        for kwarg in UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS:
+            out[kwarg.key] = kwarg.kwarg_from_config(settings)
+
         return out
+
 

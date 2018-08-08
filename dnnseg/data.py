@@ -144,8 +144,9 @@ class AcousticDataset(object):
             offset = 10,
             window_len = 25,
             n_coef = 13,
-            order = None,
+            order = 2,
             clip_timesteps=None,
+            normalize=True,
             verbose=True
     ):
         assert sr % 1000 == 0, 'Must use a sampling rate that is a multiple of 1000'
@@ -155,12 +156,9 @@ class AcousticDataset(object):
         self.offset = offset
         self.window_len = window_len
         self.n_coef = n_coef
-        if order is None:
-            order = [1, 2]
-        elif not isinstance(order, list):
-            order = [order]
-        self.order = sorted(list(set(order)))
+        self.order = order
         self.clip_timesteps = clip_timesteps
+        self.normalize = normalize
 
         self.data = {}
 
@@ -199,7 +197,8 @@ class AcousticDataset(object):
                 window_len=window_len,
                 n_coef=n_coef,
                 order=order,
-                clip_timesteps=clip_timesteps
+                clip_timesteps=clip_timesteps,
+                normalize=normalize
             )
             self.data[new_data.ID] = new_data
             t1 = time.time()
@@ -220,7 +219,7 @@ class AcousticDataset(object):
         self.phn_perm = None
         self.phn_perm_inv = None
 
-    def segment_and_stack(self, segmentations='vad'):
+    def segment_and_stack(self, segmentations='vad', max_len=None):
         if segmentations not in ['vad', 'wrd', 'phn']:
             assert isinstance(segmentations, dict) and sorted(list(segmentations.keys())) == self.fileIDs, 'Segmentations must either be in ["vad", "wrd", "phn"] or be of type dict with exactly one entry for each file in the dataset'
         feats = []
@@ -230,7 +229,7 @@ class AcousticDataset(object):
                 f_segmentations = segmentations
             else:
                 f_segmentations = segmentations[f]
-            new_feats, new_mask = self.data[f].segment_and_stack(segmentations=f_segmentations)
+            new_feats, new_mask = self.data[f].segment_and_stack(segmentations=f_segmentations, max_len=max_len)
             feats.append(new_feats)
             mask.append(new_mask)
         max_len = 0
@@ -240,19 +239,17 @@ class AcousticDataset(object):
             feats[i] = repad_acoustic_features(feats[i], max_len)
         for i, f in enumerate(mask):
             mask[i] = np.squeeze(repad_acoustic_features(mask[i][...,None], max_len), -1)
-        return np.concatenate(feats, axis=0), np.concatenate(mask, axis=0)
 
-    def inputs(self):
-        return self.segment_and_stack(segmentations='vad')
+        feats = np.concatenate(feats, axis=0)
+        mask = np.concatenate(mask, axis=0)
 
-    def words(self):
-        return self.segment_and_stack(segmentations='wrd')
+        return feats, mask
 
-    def phones(self):
-        return self.segment_and_stack(segmentations='phn')
+    def inputs(self, segment_type='vad', max_len=None):
+        return self.segment_and_stack(segmentations=segment_type, max_len=max_len)
 
-    def targets(self, reverse=True, with_deltas=False, segment_type='vad'):
-        targets, mask = self.segment_and_stack(segmentations=segment_type)
+    def targets(self, reverse=True, with_deltas=False, segment_type='vad', max_len=None):
+        targets, mask = self.segment_and_stack(segmentations=segment_type, max_len=max_len)
         if not with_deltas:
             targets = targets[...,:self.n_coef]
         if reverse:
@@ -393,8 +390,9 @@ class AcousticDatafile(object):
             offset = 10,
             window_len = 25,
             n_coef = 13,
-            order = None,
-            clip_timesteps=None
+            order = 2,
+            clip_timesteps=None,
+            normalize=True
     ):
         assert path.endswith('.wav') or path.endswith('.WAV'), 'Input file "%s" was not .wav.' %path
         assert sr % 1000 == 0, 'Must use a sampling rate that is a multiple of 1000'
@@ -403,14 +401,10 @@ class AcousticDatafile(object):
         self.offset = offset
         self.window_len = window_len
         self.n_coef = n_coef
-
-        if order is None:
-            order = [1, 2]
-        elif not isinstance(order, list):
-            order = [order]
-        self.order = sorted(list(set(order)))
+        self.order = order
 
         self.clip_timesteps = clip_timesteps
+        self.normalize = normalize
 
         feats = wav_to_mfcc(
             path,
@@ -423,6 +417,12 @@ class AcousticDatafile(object):
         feats = np.transpose(feats, [1, 0])
         if self.clip_timesteps is not None:
             feats = feats[:, :clip_timesteps]
+
+        if self.normalize:
+            maximum = feats.max()
+            minimum = feats.min()
+            range = maximum - minimum
+            feats = (feats - minimum) / range
 
         self.feats = feats
         self.shape = self.feats.shape
@@ -492,7 +492,7 @@ class AcousticDatafile(object):
     def __len__(self):
         return self.len
 
-    def segment_and_stack(self, segmentations='vad'):
+    def segment_and_stack(self, segmentations='vad', max_len=None):
         if segmentations == 'vad':
             segmentations = self.vad_segments
         elif segmentations == 'wrd':
@@ -505,10 +505,18 @@ class AcousticDatafile(object):
             dtype=np.int32
         )
         feats_split = []
+        mask_split = []
         for i in range(len(bounds)):
-            feats_split.append(self.feats[bounds[i, 0]:bounds[i, 1], :])
+            s = bounds[i, 0]
+            e = bounds[i, 1]
+            if max_len is not None:
+                e = min(e, s + max_len)
+            feats_split.append(self.feats[s:e, :])
+            length = e - s
+            mask_split.append(np.ones(length))
+
         feats = pad_sequence(feats_split)
-        mask = np.all(np.logical_not(np.isclose(feats, 0.)), axis=2)
+        mask = pad_sequence(mask_split)
 
         return feats, mask
 
