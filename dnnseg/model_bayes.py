@@ -2,10 +2,10 @@ import sys
 import os
 import tensorflow as tf
 import edward as ed
-from edward.models import OneHotCategorical, RelaxedOneHotCategorical, Bernoulli, RelaxedBernoulli, Normal, MultivariateNormalTriL
+from edward.models import OneHotCategorical, RelaxedOneHotCategorical, Bernoulli, RelaxedBernoulli, Normal, MultivariateNormalTriL, TransformedDistribution
 
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
-from .model import UnsupervisedWordClassifier
+from .model import dense_layer, dense_residual_layer, UnsupervisedWordClassifier
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -41,6 +41,8 @@ class UnsupervisedWordClassifierBayes(UnsupervisedWordClassifier):
             if kwarg_key not in kwarg_keys:
                 raise TypeError('__init__() got an unexpected keyword argument %s' % kwarg_key)
 
+        assert self.declare_priors or self.relaxed, 'Priors must be explicitly declared unless relaxed==True'
+
         self._initialize_metadata()
 
     def _initialize_metadata(self):
@@ -69,48 +71,38 @@ class UnsupervisedWordClassifierBayes(UnsupervisedWordClassifier):
     def _initialize_classifier(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                if self.k:
-                    if self.trainable_temp:
-                        temp = tf.Variable(self.temp, name='temp')
-                    else:
-                        temp = self.temp
-                    if self.binary_classifier:
-                        if self.relaxed:
-                            self.label_q = RelaxedBernoulli(temp, logits = self.encoder[:,:self.k])
-                        else:
-                            self.label_q = Bernoulli(logits = self.encoder[:,:self.k], dtype=self.FLOAT_TF)
-                        if self.declare_priors:
-                            if self.relaxed:
-                                self.label = RelaxedBernoulli(temp, probs = tf.ones([tf.shape(self.y)[0], self.k]) * 0.5)
-                            else:
-                                self.label = Bernoulli(probs = tf.ones([tf.shape(self.y)[0], self.k]) * 0.5, dtype=self.FLOAT_TF)
-                            if self.k:
-                                self.inference_map[self.label] = self.label_q
-                        else:
-                            self.label = self.label_q
-                    else:
-                        if self.relaxed:
-                            self.label_q = RelaxedOneHotCategorical(temp, logits = self.encoder[:,:self.k])
-                        else:
-                            self.label_q = OneHotCategorical(logits = self.encoder[:,:self.k], dtype=self.FLOAT_TF)
-                        if self.declare_priors:
-                            if self.relaxed:
-                                self.label = RelaxedOneHotCategorical(temp, probs = tf.ones([tf.shape(self.y)[0], self.k]) / self.k)
-                            else:
-                                self.label = OneHotCategorical(probs = tf.ones([tf.shape(self.y)[0], self.k]) / self.k, dtype=self.FLOAT_TF)
-                            if self.k:
-                                self.inference_map[self.label] = self.label_q
-                        else:
-                            self.label = self.label_q
-
-                if self.emb_dim:
-                    self.emb = tf.nn.elu(self.encoder[:,self.k:])
-                    if self.k:
-                        self.encoding = tf.concat([self.label, self.emb], axis=1)
-                    else:
-                        self.encoding = self.emb
+                if self.trainable_temp:
+                    temp = tf.Variable(self.temp, name='temp')
                 else:
-                    self.encoding = self.label
+                    temp = self.temp
+                if self.binary_classifier:
+                    if self.relaxed:
+                        self.encoding_q = RelaxedBernoulli(temp, logits = self.encoder[:,:self.k])
+                    else:
+                        self.encoding_q = Bernoulli(logits = self.encoder[:,:self.k], dtype=self.FLOAT_TF)
+                    if self.declare_priors:
+                        if self.relaxed:
+                            self.encoding = RelaxedBernoulli(temp, probs = tf.ones([tf.shape(self.y)[0], self.k]) * 0.5)
+                        else:
+                            self.encoding = Bernoulli(probs = tf.ones([tf.shape(self.y)[0], self.k]) * 0.5, dtype=self.FLOAT_TF)
+                        if self.k:
+                            self.inference_map[self.encoding] = self.encoding_q
+                    else:
+                        self.encoding = self.encoding_q
+                else:
+                    if self.relaxed:
+                        self.encoding_q = RelaxedOneHotCategorical(temp, logits = self.encoder[:,:self.k])
+                    else:
+                        self.encoding_q = OneHotCategorical(logits = self.encoder[:,:self.k], dtype=self.FLOAT_TF)
+                    if self.declare_priors:
+                        if self.relaxed:
+                            self.encoding = RelaxedOneHotCategorical(temp, probs = tf.ones([tf.shape(self.y)[0], self.k]) / self.k)
+                        else:
+                            self.encoding = OneHotCategorical(probs = tf.ones([tf.shape(self.y)[0], self.k]) / self.k, dtype=self.FLOAT_TF)
+                        if self.k:
+                            self.inference_map[self.encoding] = self.encoding_q
+                    else:
+                        self.encoding = self.encoding_q
 
     def _initialize_decoder_scale(self):
         with self.sess.as_default():
@@ -131,35 +123,96 @@ class UnsupervisedWordClassifierBayes(UnsupervisedWordClassifier):
                 elif self.decoder_type == 'cnn':
                     assert self.n_timesteps is not None, 'n_timesteps must be defined when decoder_type == "cnn"'
 
-                    decoder_scale = tf.layers.dense(self.encoding, self.n_timesteps * self.frame_dim)[..., None]
+                    decoder_scale = tf.layers.dense(self.decoder_in, self.n_timesteps * self.frame_dim)[..., None]
                     decoder_scale = tf.reshape(decoder_scale, (self.batch_len, self.n_timesteps, self.frame_dim, 1))
                     decoder_scale = tf.keras.layers.Conv2D(self.conv_n_filters, self.conv_kernel_size, padding='same', activation='elu')(decoder_scale)
                     decoder_scale = tf.keras.layers.Conv2D(1, self.conv_kernel_size, padding='same', activation='linear')(decoder_scale)
                     decoder_scale = tf.squeeze(decoder_scale, axis=-1)
 
-                elif self.decoder_type == 'dense':
-                    decoder_scale = self.encoding
+                elif self.decoder_type in ['dense', 'dense_resnet']:
+                    n_classes = int(2 ** self.k) if self.binary_classifier else int(self.k)
 
-                    if self.mv:
-                        n_scale = int(dim * (dim + 1) / 2)
+                    # First layer
+                    if self.per_class_decoder:
+                        if self.extra_dims is not None:
+                            decoder_scale = tf.tile(
+                                self.extra_dims[:, None, :],
+                                [1, n_classes, 1]
+                            )
 
-                        decoder_scale = tf.layers.dense(decoder_scale,n_scale)
-
+                            decoder_scale = dense_layer(
+                                decoder_scale,
+                                self.n_timesteps * self.frame_dim,
+                                self.training,
+                                activation=tf.nn.elu,
+                                batch_normalize=self.batch_normalize,
+                                session=self.sess
+                            )
+                        else:
+                            decoder_scale = tf.Variable(
+                                tf.random_uniform(shape=[1, n_classes, self.n_timesteps * self.frame_dim]),
+                                dtype=self.FLOAT_TF
+                            )
                     else:
-                        n_scale = dim
-                        for _ in range(self.n_layers - 1):
-                            decoder_scale = tf.layers.dense(decoder_scale, n_scale, activation=tf.nn.elu)
-                        decoder_scale = tf.layers.dense(decoder_scale, n_scale, activation=tf.nn.softplus)
-                        decoder_scale = tf.reshape(decoder_scale, (self.batch_len, self.n_timesteps, self.frame_dim))
+                        decoder_scale = dense_layer(
+                            self.decoder_in,
+                            self.n_timesteps * self.frame_dim,
+                            self.training,
+                            activation=tf.nn.elu,
+                            batch_normalize=self.batch_normalize,
+                            session=self.sess
+                        )
+
+                    # Intermediate layers
+                    if self.decoder_type == 'dense':
+                        for i in range(1, self.n_layers_decoder - 1):
+                            decoder_scale = dense_layer(
+                                decoder_scale,
+                                self.n_timesteps * self.frame_dim,
+                                self.training,
+                                activation=tf.nn.elu,
+                                batch_normalize=self.batch_normalize,
+                                session=self.sess
+                            )
+                    else: # self.decoder_type = 'dense_resnet'
+                        for i in range(1, self.n_layers_decoder - 1):
+                            decoder_scale = dense_residual_layer(
+                                decoder_scale,
+                                self.training,
+                                units=self.n_timesteps * self.frame_dim,
+                                layers_inner=self.resnet_n_layers_inner,
+                                activation_inner=tf.nn.elu,
+                                activation_outer=None,
+                                batch_normalize=self.batch_normalize,
+                                session=self.sess
+                            )
+
+                    # Last layer
+                    if self.n_layers_decoder > 1:
+                        decoder_scale = dense_layer(
+                            decoder_scale,
+                            self.n_timesteps * self.frame_dim,
+                            self.training,
+                            activation=None,
+                            batch_normalize=False,
+                            session=self.sess
+                        )
+
+                    # Weight sum of class outputs, if applicable
+                    if self.per_class_decoder:
+                        decoder_scale = decoder_scale * self.label_probs[..., None]
+                        decoder_scale = tf.reduce_sum(
+                            decoder_scale,
+                            axis=1
+                        )
+
+                    # Reshape
+                    decoder_scale = tf.reshape(decoder_scale, (self.batch_len, self.n_timesteps, self.frame_dim))
 
                 else:
                     raise ValueError('Decoder type "%s" not supported at this time' %self.decoder_type)
 
-                if self.mv:
-                    decoder_scale = tf.contrib.distributions.fill_triangular(decoder_scale)
-                    decoder_scale += tf.eye(dim)
-
-                self.decoder_scale = decoder_scale
+                self.decoder_scale = tf.nn.softplus(decoder_scale) + self.epsilon
 
     # Override this method to include scale params for output distribution
     def _initialize_decoder(self):
@@ -184,6 +237,11 @@ class UnsupervisedWordClassifierBayes(UnsupervisedWordClassifier):
                         loc=self.decoder,
                         scale = output_scale
                     )
+                if self.normalize_data and self.constrain_output:
+                    self.out = TransformedDistribution(
+                        self.out,
+                        bijector=tf.contrib.distributions.bijectors.Sigmoid()
+                    )
 
 
     def _initialize_objective(self, n_train):
@@ -206,47 +264,59 @@ class UnsupervisedWordClassifierBayes(UnsupervisedWordClassifier):
                     self.out_post = self.out
                 if self.mv:
                     self.reconst = tf.reshape(self.out_post * y_mask, [-1, self.n_timesteps, self.frame_dim])
-                    self.reconst_mean = tf.reshape(self.out_post.mean() * y_mask, [-1, self.n_timesteps, self.frame_dim])
+                    # self.reconst_mean = tf.reshape(self.out_post.mean() * y_mask, [-1, self.n_timesteps, self.frame_dim])
                 else:
                     self.reconst = self.out_post * y_mask[..., None]
-                    self.reconst_mean = self.out_post.mean() * y_mask[..., None]
-
-                if self.binary_classifier or not self.k:
-                    if not self.k:
-                        label_probs = self.encoding
-                    else:
-                        label_probs = self.label
-                    labels = self._binary2integer(tf.round(label_probs))
-                    label_probs = self._bernoulli2categorical(label_probs)
-                else:
-                    label_probs = self.label
-                    labels = tf.argmax(label_probs, axis=1)
+                    # self.reconst_mean = self.out_post.mean() * y_mask[..., None]
 
                 if len(self.inference_map) > 0:
-                    self.labels = ed.copy(labels, self.inference_map)
-                    self.label_probs = ed.copy(label_probs, self.inference_map)
+                    self.encoding_post = ed.copy(self.encoding, self.inference_map)
+                    self.labels_post = ed.copy(self.labels, self.inference_map)
+                    self.label_probs_post = ed.copy(self.label_probs, self.inference_map)
                 else:
-                    self.labels = labels
-                    self.label_probs = label_probs
+                    self.encoding_post = self.encoding
+                    self.labels_post = self.labels
+                    self.label_probs_post = self.label_probs
 
                 self.llprior = self.out.log_prob(y)
                 self.ll_post = self.out_post.log_prob(y)
 
                 self.optim = self._initialize_optimizer(self.optim_name)
                 if self.variational():
-                    self.inference = getattr(ed,self.inference_name)(self.inference_map, data={self.out: y})
-                    self.inference.initialize(
-                        n_samples=self.n_samples,
-                        n_iter=n_train_minibatch * self.n_iter,
-                        # n_print=n_train_minibatch * self.log_freq,
-                        n_print=0,
-                        logdir=self.outdir + '/tensorboard/edward',
-                        log_timestamp=False,
-                        scale={self.out: y_mask[...,None] * minibatch_scale},
-                        optimizer=self.optim
-                    )
+                    self.inference = getattr(ed, self.inference_name)(self.inference_map, data={self.out: y})
+                    if self.mask_padding:
+                        self.inference.initialize(
+                            n_samples=self.n_samples,
+                            n_iter=n_train_minibatch * self.n_iter,
+                            # n_print=n_train_minibatch * self.log_freq,
+                            n_print=0,
+                            logdir=self.outdir + '/tensorboard/edward',
+                            log_timestamp=False,
+                            scale={self.out: y_mask[...,None] * minibatch_scale},
+                            optimizer=self.optim
+                        )
+                    else:
+                        self.inference.initialize(
+                            n_samples=self.n_samples,
+                            n_iter=n_train_minibatch * self.n_iter,
+                            # n_print=n_train_minibatch * self.log_freq,
+                            n_print=0,
+                            logdir=self.outdir + '/tensorboard/edward',
+                            log_timestamp=False,
+                            scale={self.out: minibatch_scale},
+                            optimizer=self.optim
+                        )
                 else:
                     raise ValueError('Only variational inferences are supported at this time')
+
+    def set_output_scale(self, output_scale, trainable=False):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                if trainable:
+                    self.output_scale = tf.Variable(output_scale, dtype=self.FLOAT_TF)
+                    self.sess.run(tf.variables_initializer(self.output_scale))
+                else:
+                    self.output_scale = tf.constant(output_scale, dtype=self.FLOAT_TF)
 
 
     def run_train_step(self, feed_dict, return_loss=True, return_reconstructions=False, return_labels=False, return_label_probs=False):
@@ -263,10 +333,10 @@ class UnsupervisedWordClassifierBayes(UnsupervisedWordClassifier):
                 to_run.append(self.out_post)
                 to_run_names.append('reconst')
             if return_labels:
-                to_run.append(self.labels)
+                to_run.append(self.labels_post)
                 to_run_names.append('labels')
             if return_label_probs:
-                to_run.append(self.label_probs)
+                to_run.append(self.label_probs_post)
                 to_run_names.append('label_probs')
 
             output = self.sess.run(to_run, feed_dict=feed_dict)

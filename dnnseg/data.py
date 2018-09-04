@@ -2,6 +2,7 @@ import sys
 import os
 import time
 import numpy as np
+import scipy.signal
 import pandas as pd
 from .audio import wav_to_mfcc
 
@@ -219,7 +220,7 @@ class AcousticDataset(object):
         self.phn_perm = None
         self.phn_perm_inv = None
 
-    def segment_and_stack(self, segmentations='vad', max_len=None):
+    def segment_and_stack(self, segmentations='vad', max_len=None, resample=None):
         if segmentations not in ['vad', 'wrd', 'phn']:
             assert isinstance(segmentations, dict) and sorted(list(segmentations.keys())) == self.fileIDs, 'Segmentations must either be in ["vad", "wrd", "phn"] or be of type dict with exactly one entry for each file in the dataset'
         feats = []
@@ -229,7 +230,7 @@ class AcousticDataset(object):
                 f_segmentations = segmentations
             else:
                 f_segmentations = segmentations[f]
-            new_feats, new_mask = self.data[f].segment_and_stack(segmentations=f_segmentations, max_len=max_len)
+            new_feats, new_mask = self.data[f].segment_and_stack(segmentations=f_segmentations, max_len=max_len, resample=resample)
             feats.append(new_feats)
             mask.append(new_mask)
         max_len = 0
@@ -245,11 +246,11 @@ class AcousticDataset(object):
 
         return feats, mask
 
-    def inputs(self, segment_type='vad', max_len=None):
-        return self.segment_and_stack(segmentations=segment_type, max_len=max_len)
+    def inputs(self, segment_type='vad', max_len=None, resample=None):
+        return self.segment_and_stack(segmentations=segment_type, max_len=max_len, resample=resample)
 
-    def targets(self, reverse=True, with_deltas=False, segment_type='vad', max_len=None):
-        targets, mask = self.segment_and_stack(segmentations=segment_type, max_len=max_len)
+    def targets(self, reverse=True, with_deltas=False, segment_type='vad', max_len=None, resample=None):
+        targets, mask = self.segment_and_stack(segmentations=segment_type, max_len=max_len, resample=resample)
         if not with_deltas:
             targets = targets[...,:self.n_coef]
         if reverse:
@@ -264,7 +265,7 @@ class AcousticDataset(object):
         if segment_type == 'phn':
             return pd.concat([self.data[f].phn_segments for f in self.fileIDs], axis=0)
 
-    def classes(self, segment_type='wrd'):
+    def ix2label(self, segment_type='wrd'):
         assert segment_type in ['phn', 'wrd'], 'Only segment types "phn" and "wrd" are supported for label extraction'
 
         labels = self.segments(segment_type=segment_type).label
@@ -272,16 +273,29 @@ class AcousticDataset(object):
 
         return ix2label
 
+    def label2ix(self, segment_type='wrd'):
+        assert segment_type in ['phn', 'wrd'], 'Only segment types "phn" and "wrd" are supported for label extraction'
+
+        ix2label = self.ix2label(segment_type=segment_type)
+
+        label2ix = {}
+        for ix in range(len(ix2label)):
+            label2ix[ix2label[ix]] = ix
+
     def n_classes(self, segment_type='wrd'):
         assert segment_type in ['phn', 'wrd'], 'Only segment types "phn" and "wrd" are supported for label extraction'
 
-        return len(self.classes(segment_type=segment_type))
+        return len(self.ix2label(segment_type=segment_type))
 
-    def labels(self, one_hot=True, segment_type='wrd'):
+    def labels(self, one_hot=True, segment_type='wrd', segments=None):
         assert segment_type in ['phn', 'wrd'], 'Only segment types "phn" and "wrd" are supported for label extraction'
 
-        labels = self.segments(segment_type=segment_type).label
-        ix2label = self.classes(segment_type=segment_type)
+        if segments is None:
+            segments = self.segments(segment_type=segment_type)
+
+        labels = segments.label
+
+        ix2label = self.ix2label(segment_type=segment_type)
 
         label2ix = {}
         for ix in range(len(ix2label)):
@@ -492,16 +506,16 @@ class AcousticDatafile(object):
     def __len__(self):
         return self.len
 
-    def segment_and_stack(self, segmentations='vad', max_len=None):
+    def segment_and_stack(self, segmentations='vad', max_len=None, resample=None):
         if segmentations == 'vad':
-            segmentations = self.vad_segments
+            segmentations_arr = self.vad_segments
         elif segmentations == 'wrd':
-            segmentations = self.wrd_segments
+            segmentations_arr = self.wrd_segments
         elif segmentations == 'phn':
-            segmentations = self.phn_segments
+            segmentations_arr = self.phn_segments
 
         bounds = np.array(
-            np.rint((segmentations[['start', 'end']] * 100)),
+            np.rint((segmentations_arr[['start', 'end']] * 100)),
             dtype=np.int32
         )
         feats_split = []
@@ -511,8 +525,12 @@ class AcousticDatafile(object):
             e = bounds[i, 1]
             if max_len is not None:
                 e = min(e, s + max_len)
-            feats_split.append(self.feats[s:e, :])
+            new_feats = self.feats[s:e, :]
             length = e - s
+            if resample and new_feats.shape[0] > 0:
+                length = resample
+                new_feats = scipy.signal.resample(new_feats, resample, axis=0)
+            feats_split.append(new_feats)
             mask_split.append(np.ones(length))
 
         feats = pad_sequence(feats_split)

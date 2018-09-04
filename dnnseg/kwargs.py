@@ -156,6 +156,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Append **emb_dim** ELU-activated pass-through channels to the classifier output for capturing category-internal variation. If ``None`` or ``0``, the encoding consists exclusively of the classifier output."
     ),
     Kwarg(
+        'utt_len_emb_dim',
+        None,
+        [int, None],
+        "Append **utt_len_emb_dim** embedding of utterance length (number of non-padding characters) to the classifier output for capturing temporal dilation. If ``None`` or ``0``, the encoding consists exclusively of the classifier output."
+    ),
+    Kwarg(
         'encoder_type',
         'rnn',
         str,
@@ -168,10 +174,16 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Decoder network to use. One of ``dense``, ``cnn``, or ``rnn``."
     ),
     Kwarg(
-        'n_layers',
+        'n_layers_encoder',
         2,
         int,
-        "Number of layers to use, only applicable to dense encoders and/or decoders."
+        "Number of layers to use for encoder. Ignored if **encoder_type** is not ``dense``."
+    ),
+    Kwarg(
+        'n_layers_decoder',
+        2,
+        int,
+        "Number of layers to use for decoder. Ignored if **decoder_type** is not ``dense``."
     ),
     Kwarg(
         'unroll',
@@ -183,13 +195,25 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'conv_n_filters',
         16,
         int,
-        "Number of filters to use in any convolutional layers"
+        "Number of filters to use in convolutional layers. Ignored if no residual layers in the model."
     ),
     Kwarg(
         'conv_kernel_size',
         3,
         int,
-        "Size of kernel to use in any convolutional layers"
+        "Size of kernel to use in convolutional layers. Ignored if no residual layers in the model."
+    ),
+    Kwarg(
+        'resnet_n_layers_inner',
+        2,
+        int,
+        "Number of internal layers to use in residual layers. Ignored if no residual layers in the model."
+    ),
+    Kwarg(
+        'batch_normalize',
+        True,
+        bool,
+        "Apply batch normalization where appropriate."
     ),
     Kwarg(
         'n_coef',
@@ -204,10 +228,28 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Maximum order of derivatives present in the input data. All lower orders must also be included."
     ),
     Kwarg(
+        'resample',
+        None,
+        [int, None],
+        "Resample inputs and targets to fixed length **resample** timesteps. If ``None``, no resampling."
+    ),
+    Kwarg(
         'reconstruct_deltas',
         False,
         bool,
         "Include derivatives in the reconstruction targets."
+    ),
+    Kwarg(
+        'normalize_data',
+        True,
+        bool,
+        "Normalize utterances to the range :math:`[0, 1]`"
+    ),
+    Kwarg(
+        'constrain_output',
+        True,
+        bool,
+        "Use an output model constrained to :math:`[0, 1]` (sigmoid if MLE and LogitNormal if Bayesian). Otherwise, use linear/normal output. Requires **normalize_data* to be ``True``."
     ),
     Kwarg(
         'n_timesteps',
@@ -216,10 +258,34 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of timesteps present in the input data. If ``None``, inferred from data, possibly with different values between batches."
     ),
     Kwarg(
+        'mask_padding',
+        True,
+        bool,
+        "Mask padding frames in reconstruction targets so that they are ignored in gradient updates."
+    ),
+    Kwarg(
         'decoder_use_input_means',
         False,
         bool,
         "In addition to classifier's encoding, provide mean activations across the spectral and time dimensions to the decoder."
+    ),
+    Kwarg(
+        'decoder_use_input_length',
+        False,
+        bool,
+        "Explicitly pass number of non-padding frames in input as feature to the decoder."
+    ),
+    Kwarg(
+        'residual_decoder',
+        False,
+        bool,
+        "Compute the decoding as a sum of the network outputs and the mean activations of all cells in the training data."
+    ),
+    Kwarg(
+        'per_class_decoder',
+        False,
+        bool,
+        "Use separate decoders for each class and merge their outputs as a sum weighted by the class probability."
     ),
     Kwarg(
         'optim_name',
@@ -236,6 +302,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
             - ``'RMSProp'``
             - ``'Nadam'``
             - ``None`` (DTSRBayes only; uses the default optimizer defined by Edward, which currently includes steep learning rate decay and is therefore not recommended in the general case)"""
+    ),
+    Kwarg(
+        'epsilon',
+        1e-5,
+        float,
+        "Epsilon to avoid boundary violations."
     ),
     Kwarg(
         'optim_epsilon',

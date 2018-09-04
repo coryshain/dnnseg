@@ -29,48 +29,73 @@ if __name__ == '__main__':
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
     t0 = time.time()
-    if not args.preprocess and os.path.exists(p.outdir + '/data_train.gz'):
+    if p['normalize_data']:
+        data_name = 'data_f%s_d%s_normalized.obj' %(p['n_coef'], p['order'])
+    else:
+        data_name = 'data_f%s_d%s_unnormalized.obj' %(p['n_coef'], p['order'])
+    if not args.preprocess and os.path.exists(p.train_data_dir + '/' + data_name):
         sys.stderr.write('Loading saved training data...\n')
         sys.stderr.flush()
-        with open(p.outdir + '/data_train.gz', 'rb') as f:
+        with open(p.train_data_dir + '/' + data_name, 'rb') as f:
             train_data = pickle.load(f)
     else:
-        train_data = AcousticDataset(p.train_data_dir, n_coef=p.n_coef)
+        train_data = AcousticDataset(
+            p.train_data_dir,
+            n_coef=p['n_coef'],
+            order=p['order'],
+            normalize=p['normalize_data']
+        )
         if p.save_preprocessed_data:
             sys.stderr.write('Saving preprocessed training data...\n')
-            with open(p.outdir + '/data_train.gz', 'wb') as f:
+            with open(p.train_data_dir + '/' + data_name, 'wb') as f:
                 pickle.dump(train_data, f, protocol=2)
 
-    if not args.preprocess and os.path.exists(p.outdir + '/data_dev.gz'):
-        sys.stderr.write('Loading saved dev data...\n')
-        sys.stderr.flush()
-        with open(p.outdir + '/data_dev.gz', 'rb') as f:
-            dev_data = pickle.load(f)
+    if p.train_data_dir == p.dev_data_dir:
+        dev_data = train_data
     else:
-        dev_data = AcousticDataset(p.dev_data_dir, n_coef=p.n_coef)
-        if p.save_preprocessed_data:
-            sys.stderr.write('Saving preprocessed dev data...\n')
-            with open(p.outdir + '/data_dev.gz', 'wb') as f:
-                pickle.dump(dev_data, f, protocol=2)
+        if not args.preprocess and os.path.exists(p.dev_data_dir + '/' + data_name):
+            sys.stderr.write('Loading saved dev data...\n')
+            sys.stderr.flush()
+            with open(p.dev_data_dir + '/' + data_name, 'rb') as f:
+                dev_data = pickle.load(f)
+        else:
+            dev_data = AcousticDataset(
+                p.dev_data_dir,
+                n_coef=p['n_coef'],
+                order=p['order'],
+                normalize=p['normalize_data']
+            )
+            if p.save_preprocessed_data:
+                sys.stderr.write('Saving preprocessed dev data...\n')
+                with open(p.dev_data_dir + '/' + data_name, 'wb') as f:
+                    pickle.dump(dev_data, f, protocol=2)
 
     t1 = time.time()
 
     sys.stderr.write('Data loaded in %ds\n\n' %(t1-t0))
     sys.stderr.flush()
 
-    sys.stderr.write('Computing training inputs...\n')
-    train_inputs, train_inputs_mask = train_data.inputs(segment_type=args.segtype, max_len=p['max_len'])
-    sys.stderr.write('Computing training targets...\n')
-    train_targets, train_targets_mask = train_data.targets(segment_type=args.segtype, max_len=p['max_len'])
-    sys.stderr.write('Computing training labels...\n')
+    sys.stderr.write('Extracting training and cross-validation data...\n')
+    t0 = time.time()
+    train_inputs, train_inputs_mask = train_data.inputs(segment_type=args.segtype, max_len=p['max_len'], resample=p['resample'])
+    train_targets, train_targets_mask = train_data.targets(segment_type=args.segtype, max_len=p['max_len'], resample=p['resample'])
     train_labels = train_data.labels(one_hot=False, segment_type=args.segtype)
 
-    sys.stderr.write('Computing dev inputs...\n')
-    dev_inputs, dev_inputs_mask = dev_data.inputs(segment_type=args.segtype, max_len=p['max_len'])
-    sys.stderr.write('Computing dev targets...\n')
-    dev_targets, dev_targets_mask = dev_data.targets(segment_type=args.segtype, max_len=p['max_len'])
-    sys.stderr.write('Computing dev labels...\n')
-    dev_labels = dev_data.labels(one_hot=False, segment_type=args.segtype)
+    if p.train_data_dir == p.dev_data_dir:
+        dev_inputs = train_inputs
+        dev_inputs_mask = train_inputs_mask
+        dev_targets = train_targets
+        dev_targets_mask = train_targets_mask
+        dev_labels = train_labels
+    else:
+        dev_inputs, dev_inputs_mask = dev_data.inputs(segment_type=args.segtype, max_len=p['max_len'], resample=p['resample'])
+        dev_targets, dev_targets_mask = dev_data.targets(segment_type=args.segtype, max_len=p['max_len'], resample=p['resample'])
+        dev_labels = train_data.labels(one_hot=False, segment_type=args.segtype, segments=dev_data.segments(args.segtype))
+    t1 = time.time()
+
+    sys.stderr.write('Training and cross-validation data extracted in %ds\n\n' %(t1-t0))
+    sys.stderr.flush()
+
 
     sys.stderr.write('Initializing unsupervised word classifier...\n\n')
 
@@ -119,5 +144,6 @@ if __name__ == '__main__':
         y_cv=dev_targets,
         y_mask_cv=dev_targets_mask,
         labels_cv=dev_labels,
-        n_iter=p['n_iter']
+        n_iter=p['n_iter'],
+        ix2label=train_data.ix2label(args.segtype),
     )

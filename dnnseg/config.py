@@ -19,7 +19,6 @@ class Config(object):
         self.train_data_dir = data.get('train_data_dir', './')
         self.dev_data_dir = data.get('dev_data_dir', './')
         self.test_data_dir = data.get('test_data_dir', './')
-        self.n_coef = data.getint('n_coef', 13)
         self.order = data.getint('order', 2)
         self.save_preprocessed_data = data.getboolean('save_preprocessed_data', True)
 
@@ -72,11 +71,8 @@ class Config(object):
         # Parent class initialization keyword arguments
         out['k'] = settings.getint('k', 128)
         out['outdir'] = self.outdir
-        out['n_coef'] = self.n_coef
-        out['order'] = self.order
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
-            if kwarg not in ['n_coef', 'order']:
-                out[kwarg.key] = kwarg.kwarg_from_config(settings)
+            out[kwarg.key] = kwarg.kwarg_from_config(settings)
 
         # MLE initialization keyword arguments
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS:

@@ -9,12 +9,79 @@ from sklearn.metrics import homogeneity_score, completeness_score, v_measure_sco
 
 from .data import get_random_permutation
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
-from .plot import plot_acoustic_features, plot_label_histogram
+from .plot import plot_acoustic_features, plot_label_histogram, plot_label_heatmap, plot_binary_unit_heatmap
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 tf_config = tf.ConfigProto()
 tf_config.gpu_options.allow_growth = True
+
+
+def dense_layer(
+        inputs,
+        units,
+        training,
+        activation=None,
+        batch_normalize=True,
+        use_bias=True,
+        session=None
+):
+    if session is None:
+        session = tf.get_default_session()
+    with session.as_default():
+        with session.graph.as_default():
+            x = inputs
+
+            H = tf.layers.dense(x, units, use_bias=use_bias)
+            if batch_normalize:
+                H = tf.layers.batch_normalization(H, training=training)
+            if activation is not None:
+                H = activation(H)
+
+            return H
+
+
+def dense_residual_layer(
+        inputs,
+        training,
+        units=None,
+        layers_inner=2,
+        activation_inner=tf.nn.elu,
+        activation_outer=None,
+        batch_normalize=True,
+        use_bias=True,
+        session=None
+):
+    if session is None:
+        session = tf.get_default_session()
+    with session.as_default():
+        with session.graph.as_default():
+            if units is None:
+                units = inputs.shape[-1]
+            if units == inputs.shape[-1]:
+                x = inputs
+            else:
+                x = tf.layers.dense(inputs, units)
+
+            F = x
+            for i in range(layers_inner - 1):
+                F = tf.layers.dense(F, units)
+                if batch_normalize:
+                    F = tf.layers.batch_normalization(F, training=training)
+                if activation_inner is not None:
+                    F = activation_inner(F)
+
+            F = tf.layers.dense(F, units, use_bias=use_bias)
+            if batch_normalize:
+                F = tf.layers.batch_normalization(F, training=training)
+            # if activation_inner is not None:
+            #     F = activation_inner(F)
+
+            H = F + x
+            if activation_outer is not None:
+                H = activation_outer(H)
+
+            return H
 
 
 class UnsupervisedWordClassifier(object):
@@ -52,8 +119,8 @@ class UnsupervisedWordClassifier(object):
         assert not (self.encoder_type == 'cnn' and self.n_timesteps is None), 'Number of timesteps must be prespecified for a CNN encoder'
         assert not (self.decoder_type == 'dense' and self.n_timesteps is None), 'Number of timesteps must be prespecified for a dense decoder'
         assert not (self.decoder_type == 'cnn' and self.n_timesteps is None), 'Number of timesteps must be prespecified for a CNN decoder'
-        assert self.encoder_type in ['rnn', 'cnn', 'dense'], 'Currently supported encoder types are "rnn", "cnn", and "dense"'
-        assert self.decoder_type in ['rnn', 'cnn', 'dense'], 'Currently supported decoder types are "rnn", "cnn", and "dense"'
+        assert self.encoder_type in ['rnn', 'cnn', 'dense', 'dense_resnet'], 'Currently supported encoder types are "rnn", "cnn", "dense", and "dense_resnet"'
+        assert self.decoder_type in ['rnn', 'cnn', 'dense', 'dense_resnet'], 'Currently supported decoder types are "rnn", "cnn", "dense", and "dense_resnet"'
 
         self.plot_ix = None
 
@@ -99,24 +166,16 @@ class UnsupervisedWordClassifier(object):
         else:
             self.outdir = outdir
 
-        sys.stderr.write('Initializing inputs...\n')
         self._initialize_inputs()
-        sys.stderr.write('Initializing encoder...\n')
         self._initialize_encoder()
-        sys.stderr.write('Initializing classifier...\n')
         self._initialize_classifier()
-        sys.stderr.write('Initializing decoder...\n')
+        self._augment_encoding()
         self._initialize_decoder()
-        sys.stderr.write('Initializing output model...\n')
         self._initialize_output_model()
-        sys.stderr.write('Initializing objective...\n')
         self._initialize_objective(n_train)
-        sys.stderr.write('Initializing EMA...\n')
         self._initialize_ema()
-        sys.stderr.write('Initializing saver...\n')
         self._initialize_saver()
         self._initialize_logging()
-        sys.stderr.write('Loading checkpoint...\n')
         self.load(restore=restore)
 
     def _initialize_inputs(self):
@@ -157,6 +216,11 @@ class UnsupervisedWordClassifier(object):
                 self.completeness = tf.placeholder(tf.float32, name='completeness')
                 self.v_measure = tf.placeholder(tf.float32, name='v_measure')
 
+                self.training_src = tf.Variable(1, dtype=self.INT_TF, trainable=False, name='training')
+                self.training = tf.cast(self.training_src, dtype=tf.bool)
+                self.training_on = tf.assign(self.training_src, 1)
+                self.training_off = tf.assign(self.training_src, 0)
+
     def _initialize_encoder(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
@@ -165,50 +229,130 @@ class UnsupervisedWordClassifier(object):
                     units += self.emb_dim
 
                 if self.encoder_type == 'rnn':
-                    self.encoder = tf.keras.layers.LSTM(
+                    encoder = self.X
+                    for i in range(self.n_layers_encoder - 1):
+                        encoder = tf.keras.layers.GRU(
+                            units,
+                            return_sequences=True,
+                            unroll=self.unroll,
+                            recurrent_activation=tf.tanh,
+                            activation=tf.sigmoid
+                        )(encoder)
+                    encoder = tf.keras.layers.GRU(
                         units,
-                        recurrent_activation=tf.sigmoid,
                         return_sequences=False,
-                        unroll=self.unroll
-                    )(self.X)
+                        unroll=self.unroll,
+                        recurrent_activation=tf.tanh
+                    )(encoder)
 
                 elif self.encoder_type == 'cnn':
                     encoder = tf.keras.layers.Conv2D(self.conv_n_filters, self.conv_kernel_size, strides=2, padding='same', activation='elu')(self.X[...,None])
                     encoder = tf.keras.layers.Conv2D(self.conv_n_filters * 2, self.conv_kernel_size, strides=2, padding='same', activation='elu')(encoder)
                     encoder = tf.layers.dense(tf.layers.Flatten()(encoder), self.k)
-                    self.encoder = encoder
 
                 elif self.encoder_type == 'dense':
                     encoder = tf.layers.Flatten()(self.X)
-                    for _ in range(self.n_layers - 1):
+                    for _ in range(self.n_layers_encoder - 1):
                         encoder = tf.layers.dense(encoder, self.n_timesteps * self.frame_dim, activation=tf.nn.elu)
                     encoder = tf.layers.dense(encoder, units)
-                    self.encoder = encoder
+
+                elif self.encoder_type == 'dense_resnet':
+                    encoder = tf.layers.Flatten()(self.X)
+                    for i in range(self.n_layers_encoder - 1):
+                        if i == 0:
+                            encoder = dense_layer(
+                                encoder,
+                                self.n_timesteps * self.frame_dim,
+                                self.training,
+                                activation=tf.nn.elu,
+                                batch_normalize=self.batch_normalize,
+                                session=self.sess
+                            )
+                        else:
+                            encoder = dense_residual_layer(
+                                encoder,
+                                self.training,
+                                units=self.n_timesteps * self.frame_dim,
+                                layers_inner=self.resnet_n_layers_inner,
+                                activation_inner=tf.nn.elu,
+                                activation_outer=None,
+                                batch_normalize=self.batch_normalize,
+                                session=self.sess
+                            )
+                    encoder = tf.layers.dense(encoder, units)
+
+                self.encoder = encoder
 
     def _initialize_classifier(self):
         self.encoding = None
         raise NotImplementedError
 
+    def _augment_encoding(self):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+
+                if self.binary_classifier:
+                    self.labels = self._binary2integer(tf.round(self.encoding))
+                    self.label_probs = self._bernoulli2categorical(self.encoding)
+                else:
+                    self.labels = tf.argmax(self.encoding, axis=-1)
+                    self.label_probs = self.encoding
+
+                extra_dims = None
+
+                if self.emb_dim:
+                    extra_dims = tf.nn.elu(self.encoder[:,self.k:])
+
+                if self.decoder_use_input_length or self.utt_len_emb_dim:
+                    utt_len = tf.reduce_sum(self.y_mask, axis=1, keepdims=True)
+                    if self.decoder_use_input_length:
+                        if extra_dims is None:
+                            extra_dims = utt_len
+                        else:
+                            extra_dims = tf.concat(
+                            [extra_dims, utt_len],
+                            axis=1
+                        )
+
+                    if self.utt_len_emb_dim:
+                        self.utt_len_emb_mat = tf.identity(
+                            tf.Variable(
+                                tf.random_uniform([int(self.y_mask.shape[1]) + 1, self.utt_len_emb_dim], -1., 1.),
+                                dtype=self.FLOAT_TF
+                            )
+                        )
+
+                        if self.optim_name == 'Nadam':
+                            # Nadam breaks with sparse gradients, have to use matmul
+                            utt_len_emb = tf.one_hot(tf.cast(utt_len[:, 0], dtype=self.INT_TF), int(self.y_mask.shape[1]) + 1)
+                            utt_len_emb = tf.matmul(utt_len_emb, self.utt_len_emb_mat)
+                        else:
+                            utt_len_emb = tf.gather(self.utt_len_emb_mat, tf.cast(utt_len[:, 0], dtype=self.INT_TF), axis=0)
+
+                        if extra_dims is None:
+                            extra_dims = utt_len_emb
+                        else:
+                            extra_dims = tf.concat(
+                                [extra_dims,
+                                 utt_len_emb],
+                                axis=1
+                            )
+
+                self.extra_dims = extra_dims
+
+                if self.extra_dims is not None:
+                    self.decoder_in = tf.concat([self.encoding, self.extra_dims], axis=1)
+                else:
+                    self.decoder_in = self.encoding
+
     def _initialize_decoder(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if self.decoder_type == 'rnn':
-                    if self.decoder_use_input_means:
-                        self.decoder_in = tf.concat(
-                            [
-                                self.X_time_mean[..., None],
-                                tf.tile(
-                                    tf.concat([self.encoding, self.X_feat_mean], axis=1)[..., None, :],
-                                    [1, tf.shape(self.y)[1], 1]
-                                )
-                            ],
-                            axis=2
-                        ) * self.y_mask[...,None]
-                    else:
-                        self.decoder_in = tf.tile(
-                            self.encoding[..., None, :],
-                            [1, tf.shape(self.y)[1], 1]
-                        ) * self.y_mask[...,None]
+                    self.decoder_in = tf.tile(
+                        self.decoder_in[..., None, :],
+                        [1, tf.shape(self.y)[1], 1]
+                    ) * self.y_mask[...,None]
 
                     decoder = tf.keras.layers.LSTM(
                         self.y.shape[-1],
@@ -220,17 +364,90 @@ class UnsupervisedWordClassifier(object):
                 elif self.decoder_type == 'cnn':
                     assert self.n_timesteps is not None, 'n_timesteps must be defined when decoder_type == "cnn"'
 
-                    decoder = tf.layers.dense(self.encoding, self.n_timesteps * self.frame_dim)[..., None]
+                    decoder = tf.layers.dense(self.decoder_in, self.n_timesteps * self.frame_dim)[..., None]
                     decoder = tf.reshape(decoder, (self.batch_len, self.n_timesteps, self.frame_dim, 1))
                     decoder = tf.keras.layers.Conv2D(self.conv_n_filters, self.conv_kernel_size, padding='same', activation='elu')(decoder)
                     decoder = tf.keras.layers.Conv2D(1, self.conv_kernel_size, padding='same', activation='linear')(decoder)
                     decoder = tf.squeeze(decoder, axis=-1)
 
-                elif self.decoder_type == 'dense':
-                    decoder = self.encoding
-                    for _ in range(self.n_layers - 1):
-                        decoder = tf.layers.dense(decoder, self.n_timesteps * self.frame_dim, activation=tf.nn.sigmoid)
-                    decoder = tf.layers.dense(decoder, self.n_timesteps * self.frame_dim)
+                elif self.decoder_type in ['dense', 'dense_resnet']:
+                    n_classes = int(2 ** self.k) if self.binary_classifier else int(self.k)
+
+                    # First layer
+                    if self.per_class_decoder:
+                        if self.extra_dims is not None:
+                            decoder = tf.tile(
+                                self.extra_dims[:, None, :],
+                                [1, n_classes, 1]
+                            )
+
+                            decoder = dense_layer(
+                                decoder,
+                                self.n_timesteps * self.frame_dim,
+                                self.training,
+                                activation=tf.nn.elu,
+                                batch_normalize=self.batch_normalize,
+                                session=self.sess
+                            )
+                        else:
+                            decoder = tf.Variable(
+                                tf.random_uniform(shape=[1, n_classes, self.n_timesteps * self.frame_dim]),
+                                dtype=self.FLOAT_TF
+                            )
+                    else:
+                        decoder = dense_layer(
+                            self.decoder_in,
+                            self.n_timesteps * self.frame_dim,
+                            self.training,
+                            activation=tf.nn.elu,
+                            batch_normalize=self.batch_normalize,
+                            session=self.sess
+                        )
+
+                    # Intermediate layers
+                    if self.decoder_type == 'dense':
+                        for i in range(1, self.n_layers_decoder - 1):
+                            decoder = dense_layer(
+                                decoder,
+                                self.n_timesteps * self.frame_dim,
+                                self.training,
+                                activation=tf.nn.elu,
+                                batch_normalize=self.batch_normalize,
+                                session=self.sess
+                            )
+                    else: # self.decoder_type = 'dense_resnet'
+                        for i in range(1, self.n_layers_decoder - 1):
+                            decoder = dense_residual_layer(
+                                decoder,
+                                self.training,
+                                units=self.n_timesteps * self.frame_dim,
+                                layers_inner=self.resnet_n_layers_inner,
+                                activation_inner=tf.nn.elu,
+                                activation_outer=None,
+                                batch_normalize=self.batch_normalize,
+                                session=self.sess
+                            )
+
+                    # Last layer
+                    if self.n_layers_decoder > 1:
+                        decoder = dense_layer(
+                            decoder,
+                            self.n_timesteps * self.frame_dim,
+                            self.training,
+                            activation=None,
+                            batch_normalize=False,
+                            session=self.sess
+                        )
+
+                    # Weight sum of class outputs, if applicable
+                    if self.per_class_decoder:
+                        decoder = decoder * self.label_probs[..., None]
+                        decoder = tf.reduce_sum(
+                            decoder,
+                            axis=1
+                        )
+
+                    # Reshape
                     decoder = tf.reshape(decoder, (self.batch_len, self.n_timesteps, self.frame_dim))
 
                 else:
@@ -244,8 +461,11 @@ class UnsupervisedWordClassifier(object):
 
     def _initialize_objective(self, n_train):
         self.reconst = None
+        self.encoding_post = None
         self.labels = None
+        self.labels_post = None
         self.label_probs = None
+        self.label_probs_post = None
         raise NotImplementedError
 
     def _initialize_optimizer(self, name):
@@ -403,6 +623,115 @@ class UnsupervisedWordClassifier(object):
     def run_train_step(self, feed_dict, return_losses=True, return_reconstructions=False, return_labels=False):
         return NotImplementedError
 
+    def run_incremental_evaluation(
+            self,
+            X_cv,
+            X_mask_cv,
+            y_cv,
+            y_mask_cv,
+            labels_cv,
+            n_plot=10,
+            ix2label=None,
+            y_means_cv=None,
+            verbose=True
+    ):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                self.set_predict_mode(True)
+
+                if verbose:
+                    sys.stderr.write('Extracting predictions...\n')
+                reconst = []
+                labels_pred = []
+                to_run = [self.reconst, self.labels_post]
+                if self.binary_classifier:
+                    encoding = []
+                    to_run.append(self.encoding_post)
+                for i in range(0, len(X_cv), self.eval_minibatch_size):
+                    out = self.sess.run(
+                        to_run,
+                        feed_dict={
+                            self.X: X_cv[i:i + self.eval_minibatch_size],
+                            self.X_mask: X_mask_cv[i:i + self.eval_minibatch_size],
+                            self.y: y_cv[i:i + self.eval_minibatch_size],
+                            self.y_mask: y_mask_cv[i:i + self.eval_minibatch_size],
+                        }
+                    )
+                    if self.binary_classifier:
+                        reconst_batch, labels_pred_batch, encoding_batch = out
+                        encoding.append(encoding_batch)
+                    else:
+                        reconst_batch, labels_pred_batch = out
+                    reconst.append(reconst_batch)
+                    labels_pred.append(labels_pred_batch)
+
+                reconst = np.concatenate(reconst, axis=0)
+                labels_pred = np.concatenate(labels_pred, axis=0)
+                if self.binary_classifier:
+                    encoding = np.concatenate(encoding, axis=0)
+
+                if verbose:
+                    sys.stderr.write('Plotting...\n')
+
+                if ix2label is not None:
+                    labels_string = np.vectorize(lambda x: ix2label[x])(labels_cv.astype('int'))
+                    titles = labels_string[self.plot_ix]
+
+                    plot_label_heatmap(
+                        labels_string,
+                        labels_pred.astype('int'),
+                        dir=self.outdir
+                    )
+                    if self.binary_classifier:
+                        plot_binary_unit_heatmap(
+                            labels_string,
+                            encoding,
+                            dir=self.outdir
+                        )
+
+                else:
+                    titles = [None] * n_plot
+
+                self.plot_reconstructions(
+                    X_cv[self.plot_ix],
+                    (y_cv[self.plot_ix] * y_mask_cv[self.plot_ix][..., None]) if self.normalize_data else y_cv[self.plot_ix],
+                    reconst[self.plot_ix],
+                    titles=titles,
+                    target_means=y_means_cv[self.plot_ix] if self.residual_decoder else None
+                )
+
+                self.plot_label_histogram(labels_pred)
+                homogeneity = homogeneity_score(labels_cv, labels_pred)
+                completeness = completeness_score(labels_cv, labels_pred)
+                v_measure = v_measure_score(labels_cv, labels_pred)
+
+                if verbose:
+                    sys.stderr.write('Labeling scores (predictions):\n')
+                    sys.stderr.write('  Homogeneity:  %s\n' % homogeneity)
+                    sys.stderr.write('  Completeness: %s\n' % completeness)
+                    sys.stderr.write('  V-measure:    %s\n\n' % v_measure)
+
+
+                if self.binary_classifier or not self.k:
+                    if not self.k:
+                        k = 2 ** self.emb_dim
+                    else:
+                        k = 2 ** self.k
+                else:
+                    k = self.k
+
+                labels_rand = np.random.randint(0, k, labels_pred.shape)
+
+                if verbose:
+                    sys.stderr.write('Labeling scores (random uniform):\n')
+                    sys.stderr.write('  Homogeneity:  %s\n' % homogeneity_score(labels_cv, labels_rand))
+                    sys.stderr.write('  Completeness: %s\n' % completeness_score(labels_cv, labels_rand))
+                    sys.stderr.write('  V-measure:    %s\n\n' % v_measure_score(labels_cv, labels_rand))
+
+                self.set_predict_mode(False)
+
+                return homogeneity, completeness, v_measure
+
     def fit(
             self,
             X,
@@ -416,12 +745,9 @@ class UnsupervisedWordClassifier(object):
             y_mask_cv=None,
             labels_cv=None,
             n_iter=None,
+            ix2label=None,
             n_plot=10
     ):
-        sys.stderr.write('*' * 100 + '\n')
-        sys.stderr.write(self.report_settings())
-        sys.stderr.write('*' * 100 + '\n\n')
-
         usingGPU = tf.test.is_gpu_available()
         sys.stderr.write('Using GPU: %s\n' % usingGPU)
 
@@ -437,9 +763,32 @@ class UnsupervisedWordClassifier(object):
             if self.plot_ix is None or len(self.plot_ix) != n_plot:
                 self.plot_ix = np.random.choice(np.arange(len(X_cv)), size=n_plot)
 
+        if self.residual_decoder:
+            mean_axes = (0, 1)
+            y_means = y.mean(axis=mean_axes, keepdims=True) * y_mask[..., None]
+            y_means_cv = y_cv.mean(axis=mean_axes, keepdims=True) * y_mask_cv[..., None]
+            y -= y_means
+            y_cv -= y_means_cv
+            if self.normalize_data:
+                y -= y.min()
+                y_cv -= y_cv.min()
+                y = y / (y.max() + 2 * self.epsilon)
+                y = y / (y.max() + 2 * self.epsilon)
+                y_cv = y_cv / (y_cv.max() + 2 * self.epsilon)
+                y *= y_mask[..., None]
+                y_cv *= y_mask_cv[..., None]
+                y += self.epsilon
+                y_cv += self.epsilon
+        else:
+            y_means = None
+            y_means_cv = None
+
         if n_iter is None:
             n_iter = self.n_iter
 
+        sys.stderr.write('*' * 100 + '\n')
+        sys.stderr.write(self.report_settings())
+        sys.stderr.write('*' * 100 + '\n\n')
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
@@ -471,6 +820,12 @@ class UnsupervisedWordClassifier(object):
                             self.y_mask: y_mask[indices],
                         }
 
+                        # variances = self.sess.run(self.decoder_scale, feed_dict=fd_minibatch)
+                        # print(variances)
+                        # print(variances.min())
+                        # print(variances.max())
+                        # print()
+
                         info_dict = self.run_train_step(fd_minibatch)
                         metric_cur = info_dict['loss']
 
@@ -498,58 +853,15 @@ class UnsupervisedWordClassifier(object):
 
                             self.save()
 
-                            self.set_predict_mode(True)
-
-                            sys.stderr.write('Extracting predictions...\n')
-                            reconst = []
-                            labels_pred = []
-                            for i in range(0, len(X_cv), self.eval_minibatch_size):
-                                reconst_batch, labels_pred_batch = self.sess.run(
-                                    [self.reconst, self.labels],
-                                    feed_dict={
-                                        self.X: X_cv[i:i+self.eval_minibatch_size],
-                                        self.X_mask: X_mask_cv[i:i+self.eval_minibatch_size],
-                                        self.y: y_cv[i:i+self.eval_minibatch_size],
-                                        self.y_mask: y_mask_cv[i:i+self.eval_minibatch_size]
-                                    }
-                                )
-                                reconst.append(reconst_batch)
-                                labels_pred.append(labels_pred_batch)
-
-                            reconst = np.concatenate(reconst, axis=0)
-                            labels_pred = np.concatenate(labels_pred, axis=0)
-
-                            sys.stderr.write('Plotting...\n')
-                            self.plot_reconstructions(
-                                X_cv[self.plot_ix],
-                                y_cv[self.plot_ix],
-                                reconst[self.plot_ix]
+                            homogeneity, completeness, v_measure = self.run_incremental_evaluation(
+                                X_cv,
+                                X_mask_cv,
+                                y_cv,
+                                y_mask_cv,
+                                labels_cv,
+                                ix2label=ix2label,
+                                y_means_cv=None if y_means_cv is None else y_means_cv
                             )
-
-                            self.plot_label_histogram(labels_pred)
-                            homogeneity = homogeneity_score(labels_cv, labels_pred)
-                            completeness = completeness_score(labels_cv, labels_pred)
-                            v_measure = v_measure_score(labels_cv, labels_pred)
-
-                            sys.stderr.write('Labeling scores (predictions):\n')
-                            sys.stderr.write('  Homogeneity: %s\n' %homogeneity)
-                            sys.stderr.write('  Completeness: %s\n' %completeness)
-                            sys.stderr.write('  V-measure: %s\n\n' %v_measure)
-
-                            sys.stderr.write('Labeling scores (random uniform):\n')
-
-                            if self.binary_classifier or not self.k:
-                                if not self.k:
-                                    k = 2 ** self.emb_dim
-                                else:
-                                    k = 2 ** self.k
-                            else:
-                                k = self.k
-
-                            labels_rand = np.random.randint(0, k, labels_pred.shape)
-                            sys.stderr.write('  Homogeneity: %s\n' % homogeneity_score(labels_cv, labels_rand))
-                            sys.stderr.write('  Completeness: %s\n' % completeness_score(labels_cv, labels_rand))
-                            sys.stderr.write('  V-measure: %s\n\n' % v_measure_score(labels_cv, labels_rand))
 
                             fd_summary = {
                                 self.loss_summary: loss_total,
@@ -560,8 +872,6 @@ class UnsupervisedWordClassifier(object):
                             summary_metrics = self.sess.run(self.summary_metrics, feed_dict=fd_summary)
                             self.writer.add_summary(summary_metrics, self.global_step.eval(session=self.sess))
 
-                            self.set_predict_mode(False)
-
                         else:
                             sys.stderr.write('Numerics check failed. Aborting save and reloading from previous checkpoint...\n')
                             self.load()
@@ -569,7 +879,7 @@ class UnsupervisedWordClassifier(object):
                     t1_iter = time.time()
                     sys.stderr.write('Iteration time: %.2fs\n' % (t1_iter - t0_iter))
 
-    def plot_reconstructions(self, inputs, targets, preds, dir=None):
+    def plot_reconstructions(self, inputs, targets, preds, titles=None, target_means=None, dir=None):
         if dir is None:
             dir = self.outdir
 
@@ -577,6 +887,8 @@ class UnsupervisedWordClassifier(object):
             inputs,
             targets,
             preds,
+            titles=titles,
+            target_means=target_means,
             dir=dir
         )
 
@@ -594,6 +906,16 @@ class UnsupervisedWordClassifier(object):
 
         if bins < 1000:
             plot_label_histogram(labels_pred, dir=dir, bins=bins)
+
+    def plot_label_heatmap(self, labels, preds, dir=None):
+        if dir is None:
+            dir = self.outdir
+
+        plot_label_heatmap(
+            labels,
+            preds,
+            dir=dir
+        )
 
 
     def save(self, dir=None):
@@ -645,10 +967,12 @@ class UnsupervisedWordClassifier(object):
     def set_predict_mode(self, mode):
         with self.sess.as_default():
             with self.sess.graph.as_default():
+                self.sess.run(self.training_on if mode else self.training_off)
                 self.load(predict=mode)
 
     def report_settings(self, indent=0):
         out = ' ' * indent + 'MODEL SETTINGS:\n'
+        out += ' ' * (indent + 2) + 'k: %s\n' %self.k
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
             val = getattr(self, kwarg.key)
             out += ' ' * (indent + 2) + '%s: %s\n' %(kwarg.key, "\"%s\"" %val if isinstance(val, str) else val)
@@ -710,21 +1034,17 @@ class UnsupervisedWordClassifierMLE(UnsupervisedWordClassifier):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if self.binary_classifier:
-                    encoding = tf.sigmoid(self.encoder)
+                    self.encoding = tf.sigmoid(self.encoder[:, :self.k])
                 else:
-                    encoding = tf.nn.softmax(self.encoder)
-
-                if self.emb_dim:
-                    self.emb = tf.nn.elu(self.encoder[:,self.k:])
-                    if self.k:
-                        encoding = tf.concat([encoding, self.emb], axis=1)
-                    else:
-                        encoding = self.emb
-
-                self.encoding = encoding
+                    self.encoding = tf.nn.softmax(self.encoder[:, :self.k])
 
     def _initialize_output_model(self):
-        self.out = self.decoder
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                if self.normalize_data and self.constrain_output:
+                    self.out = tf.sigmoid(self.decoder)
+                else:
+                    self.out = self.decoder
 
     def _initialize_objective(self, n_train):
         with self.sess.as_default():
@@ -734,14 +1054,20 @@ class UnsupervisedWordClassifierMLE(UnsupervisedWordClassifier):
                 self.reconst = self.out
                 self.reconst *= self.y_mask[..., None]
 
-                if self.binary_classifier:
-                    self.labels = self._binary2integer(tf.round(self.encoding))
-                    self.label_probs = self._bernoulli2categorical(self.encoding)
-                else:
-                    self.labels = tf.argmax(self.encoding, axis=-1)
-                    self.label_probs = self.encoding
+                self.encoding_post = self.encoding
+                self.labels_post = self.labels
+                self.label_probs_post = self.label_probs
 
-                loss = tf.losses.mean_squared_error(self.y, self.out, weights=self.y_mask[..., None])
+                if self.normalize_data and self.constrain_output:
+                    if self.mask_padding:
+                        loss = tf.losses.log_loss(self.y, self.out, weights=self.y_mask[..., None])
+                    else:
+                        loss = tf.losses.log_loss(self.y, self.out)
+                else:
+                    if self.mask_padding:
+                        loss = tf.losses.mean_squared_error(self.y, self.out, weights=self.y_mask[..., None])
+                    else:
+                        loss = tf.losses.mean_squared_error(self.y, self.out)
 
                 self.loss = loss
                 self.optim = self._initialize_optimizer(self.optim_name)
