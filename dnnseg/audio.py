@@ -27,4 +27,4 @@ def wav_to_mfcc(path, sr=16000, offset=10, window_len=25, n_coef=13, order=2):
 
     feats = np.concatenate([mfcc] + deltas, axis=0)
 
-    return feats
+    return feats, float(wav.shape[0]) / sr

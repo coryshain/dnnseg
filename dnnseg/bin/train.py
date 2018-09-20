@@ -10,7 +10,7 @@ import argparse
 sys.setrecursionlimit(2000)
 
 from dnnseg.config import Config
-from dnnseg.data import AcousticDataset, binary_segments_to_intervals
+from dnnseg.data import AcousticDataset, score_segs
 from dnnseg.kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
 
 if __name__ == '__main__':
@@ -29,10 +29,7 @@ if __name__ == '__main__':
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
     t0 = time.time()
-    if p['normalize_data']:
-        data_name = 'data_f%s_d%s_normalized.obj' %(p['n_coef'], p['order'])
-    else:
-        data_name = 'data_f%s_d%s_unnormalized.obj' %(p['n_coef'], p['order'])
+    data_name = 'data_f%s_d%s.obj' %(p['n_coef'], p['order'])
     if not args.preprocess and os.path.exists(p.train_data_dir + '/' + data_name):
         sys.stderr.write('Loading saved training data...\n')
         sys.stderr.flush()
@@ -43,7 +40,6 @@ if __name__ == '__main__':
             p.train_data_dir,
             n_coef=p['n_coef'],
             order=p['order'],
-            normalize=p['normalize_data']
         )
         if p.save_preprocessed_data:
             sys.stderr.write('Saving preprocessed training data...\n')
@@ -63,7 +59,6 @@ if __name__ == '__main__':
                 p.dev_data_dir,
                 n_coef=p['n_coef'],
                 order=p['order'],
-                normalize=p['normalize_data']
             )
             if p.save_preprocessed_data:
                 sys.stderr.write('Saving preprocessed dev data...\n')
@@ -75,10 +70,56 @@ if __name__ == '__main__':
     sys.stderr.write('Data loaded in %ds\n\n' %(t1-t0))
     sys.stderr.flush()
 
+    sys.stderr.write('=' * 50 + '\n')
+    sys.stderr.write('TRAINING DATA SUMMARY\n\n')
+    sys.stderr.write(train_data.summary(indent=2))
+    sys.stderr.write('=' * 50 + '\n\n')
+
+    sys.stderr.write('=' * 50 + '\n')
+    sys.stderr.write('CROSS-VALIDATION DATA SUMMARY\n\n')
+    sys.stderr.write(dev_data.summary(indent=2))
+    sys.stderr.write('=' * 50 + '\n\n')
+
+    if args.segtype == 'rnd':
+        train_data.initialize_random_segmentation(7.4153)
+
+    # print(score_segs(train_data.segments('phn'), train_data.segments('phn')))
+
+    if p['pad_seqs']:
+        if p['mask_padding'] and ('softhmlstm' in p['encoder_type'].lower() or 'rnn' in p['encoder_type'].lower()):
+            input_padding = 'post'
+        else:
+            input_padding = 'pre'
+        target_padding = 'post'
+    else:
+        input_padding = None
+        target_padding = None
+
+    print('Input padding')
+    print(input_padding)
+    print('Target padding')
+    print(target_padding)
+    print()
+
     sys.stderr.write('Extracting training and cross-validation data...\n')
     t0 = time.time()
-    train_inputs, train_inputs_mask = train_data.inputs(segment_type=args.segtype, max_len=p['max_len'], resample=p['resample'])
-    train_targets, train_targets_mask = train_data.targets(segment_type=args.segtype, max_len=p['max_len'], resample=p['resample'])
+    train_inputs, train_inputs_mask = train_data.inputs(
+        segmentation_type=args.segtype,
+        padding=input_padding,
+        max_len=p['max_len'],
+        normalize=p['normalize_data'],
+        center=p['center_data'],
+        resample=p['resample_inputs']
+    )
+    train_targets, train_targets_mask = train_data.targets(
+        segmentation_type=args.segtype,
+        padding=target_padding,
+        max_len=p['max_len'],
+        reverse=p['reverse_targets'],
+        normalize=p['normalize_data'],
+        center=p['center_data'],
+        resample=p['resample_outputs']
+    )
     train_labels = train_data.labels(one_hot=False, segment_type=args.segtype)
 
     if p.train_data_dir == p.dev_data_dir:
@@ -88,42 +129,67 @@ if __name__ == '__main__':
         dev_targets_mask = train_targets_mask
         dev_labels = train_labels
     else:
-        dev_inputs, dev_inputs_mask = dev_data.inputs(segment_type=args.segtype, max_len=p['max_len'], resample=p['resample'])
-        dev_targets, dev_targets_mask = dev_data.targets(segment_type=args.segtype, max_len=p['max_len'], resample=p['resample'])
-        dev_labels = train_data.labels(one_hot=False, segment_type=args.segtype, segments=dev_data.segments(args.segtype))
+        dev_inputs, dev_inputs_mask = dev_data.inputs(
+            segmentation_type=args.segtype,
+            padding=input_padding,
+            max_len=p['max_len'],
+            normalize=p['normalize_data'],
+            center=p['center_data'],
+            resample=p['resample_inputs']
+        )
+        dev_targets, dev_targets_mask = dev_data.targets(
+            segmentation_type=args.segtype,
+            padding=input_padding,
+            max_len=p['max_len'],
+            reverse=p['reverse_targets'],
+            normalize=p['normalize_data'],
+            center=p['center_data'],
+            resample=p['resample_outputs']
+        )
+        dev_labels = train_data.labels(one_hot=False, segment_type=args.segtype)
+
     t1 = time.time()
 
     sys.stderr.write('Training and cross-validation data extracted in %ds\n\n' %(t1-t0))
     sys.stderr.flush()
 
 
-    sys.stderr.write('Initializing unsupervised word classifier...\n\n')
+    sys.stderr.write('Initializing encoder-decoder...\n\n')
 
     if args.restart and os.path.exists(p.outdir + '/tensorboard'):
         shutil.rmtree(p.outdir + '/tensorboard')
 
-    kwargs = {'n_timesteps': train_inputs.shape[1]}
+    kwargs = {}
+
     for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
-        if kwarg.key != 'n_timesteps':
-            kwargs[kwarg.key] = p[kwarg.key]
+        kwargs[kwarg.key] = p[kwarg.key]
+
+    if p['pad_seqs']:
+        kwargs['n_timesteps_input'] = train_inputs.shape[1]
+        kwargs['n_timesteps_output'] = train_targets.shape[1]
+    else:
+        if p['resample_inputs']:
+            kwargs['n_timesteps_input'] = train_inputs[0].shape[1]
+        if p['resample_outputs']:
+            kwargs['n_timesteps_output'] = train_targets[0].shape[1]
 
     if p['network_type'] == 'mle':
-        from dnnseg.model import UnsupervisedWordClassifierMLE
+        from dnnseg.model import AcousticEncoderDecoderMLE
 
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS:
             kwargs[kwarg.key] = p[kwarg.key]
 
-        dnnseg_model = UnsupervisedWordClassifierMLE(
+        dnnseg_model = AcousticEncoderDecoderMLE(
             p['k'],
             **kwargs
         )
     else:
-        from dnnseg.model_bayes import UnsupervisedWordClassifierBayes
+        from dnnseg.model_bayes import AcousticEncoderDecoderBayes
 
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS:
             kwargs[kwarg.key] = p[kwarg.key]
 
-        dnnseg_model = UnsupervisedWordClassifierBayes(
+        dnnseg_model = AcousticEncoderDecoderBayes(
             p['k'],
             **kwargs
         )
@@ -131,7 +197,7 @@ if __name__ == '__main__':
     dnnseg_model.build(len(train_inputs), outdir=p.outdir, restore=not args.restart)
 
 
-    sys.stderr.write('Fitting unsupervised word classifier...\n\n')
+    sys.stderr.write('Fitting encoder-decoder...\n\n')
 
     dnnseg_model.fit(
         train_inputs,

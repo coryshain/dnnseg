@@ -144,6 +144,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Path to output directory, where logs and model parameters are saved."
     ),
     Kwarg(
+        'classify_utterance',
+        False,
+        bool,
+        "Whether to perform unsupervised classification at the utterance level. Encodes the utterance embedding as binary or categorical and scores classification at test time."
+    ),
+    Kwarg(
         'binary_classifier',
         False,
         bool,
@@ -168,16 +174,73 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Encoder network to use. One of ``dense``, ``cnn``, or ``rnn``."
     ),
     Kwarg(
+        'n_layers_encoder',
+        2,
+        int,
+        "Number of layers to use for encoder. Ignored if **encoder_type** is not ``dense``."
+    ),
+    Kwarg(
+        'n_units_encoder',
+        None,
+        [int, str, None],
+        "Number of units to use in non-final encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top, or ``None``, in which case the units will be equal to **k**."
+    ),
+    Kwarg(
+        'encoder_activation',
+        'tanh',
+        [str, None],
+        "Name of activation to use at the output of the encoder",
+    ),
+    Kwarg(
+        'encoder_inner_activation',
+        'tanh',
+        [str, None],
+        "Name of activation to use for any internal layers of the encoder",
+        aliases=['inner_activation']
+    ),
+    Kwarg(
+        'encoder_recurrent_activation',
+        'hard_sigmoid',
+        [str, None],
+        "Name of activation to use for recurrent activation in recurrent layers of the encoder. Ignored if encoder is not recurrent.",
+        aliases=['recurrent_activation']
+    ),
+    Kwarg(
+        'encoder_boundary_activation',
+        'hard_sigmoid',
+        [str, None],
+        "Name of activation to use for boundary activation in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM.",
+        aliases=['boundary_activation']
+    ),
+    Kwarg(
+        'boundary_power',
+        None,
+        [int, None],
+        "Power to raise boundary probabilities to for information flow in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM."
+    ),
+    Kwarg(
+        'encoder_weight_normalization',
+        False,
+        bool,
+        "Apply weight normalization to encoder. Ignored unless encoder is recurrent."
+    ),
+    Kwarg(
+        'encoder_layer_normalization',
+        False,
+        bool,
+        "Apply layer normalization to encoder. Ignored unless encoder is recurrent."
+    ),
+    Kwarg(
         'decoder_type',
         'rnn',
         str,
         "Decoder network to use. One of ``dense``, ``cnn``, or ``rnn``."
     ),
     Kwarg(
-        'n_layers_encoder',
-        2,
-        int,
-        "Number of layers to use for encoder. Ignored if **encoder_type** is not ``dense``."
+        'n_units_decoder',
+        None,
+        [int, str, None],
+        "Number of units to use in non-final decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom, or ``None``, in which case the units will be equal to **k**."
     ),
     Kwarg(
         'n_layers_decoder',
@@ -186,16 +249,24 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of layers to use for decoder. Ignored if **decoder_type** is not ``dense``."
     ),
     Kwarg(
-        'unroll',
-        True,
-        bool,
-        "Unroll any RNN layers."
+        'decoder_activation',
+        None,
+        [str, None],
+        "Name of activation to use at the output of the decoder"
     ),
     Kwarg(
-        'conv_n_filters',
-        16,
-        int,
-        "Number of filters to use in convolutional layers. Ignored if no residual layers in the model."
+        'decoder_inner_activation',
+        None,
+        [str, None],
+        "Name of activation to use for any internal layers of the decoder",
+        aliases=['inner_activation']
+    ),
+    Kwarg(
+        'decoder_recurrent_activation',
+        'hard_sigmoid',
+        [str, None],
+        "Name of activation to use for recurrent activation in recurrent layers of the decoder. Ignored if decoder is not recurrent.",
+        aliases=['recurrent_activation']
     ),
     Kwarg(
         'conv_kernel_size',
@@ -204,16 +275,44 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Size of kernel to use in convolutional layers. Ignored if no residual layers in the model."
     ),
     Kwarg(
-        'resnet_n_layers_inner',
-        2,
-        int,
-        "Number of internal layers to use in residual layers. Ignored if no residual layers in the model."
+        'encoder_resnet_n_layers_inner',
+        None,
+        [int, None],
+        "Implement internal encoder layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
+        aliases=['resnet_n_layers_inner']
     ),
     Kwarg(
-        'batch_normalize',
+        'decoder_resnet_n_layers_inner',
+        None,
+        [int, None],
+        "Implement internal decode layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
+        aliases=['resnet_n_layers_inner']
+    ),
+    Kwarg(
+        'batch_normalize_encodings',
+        False,
+        bool,
+        "Batch normalize latent segment encodings."
+    ),
+    Kwarg(
+        'encoder_batch_normalization_decay',
+        0.9,
+        [float, None],
+        "Decay rate to use for batch normalization in internal encoder layers. If ``None``, no batch normalization.",
+        aliases=['batch_normalization_decay']
+    ),
+    Kwarg(
+        'decoder_batch_normalization_decay',
+        0.9,
+        [float, None],
+        "Decay rate to use for batch normalization in internal decoder layers. If ``None``, no batch normalization.",
+        aliases=['batch_normalization_decay']
+    ),
+    Kwarg(
+        'pad_seqs',
         True,
         bool,
-        "Apply batch normalization where appropriate."
+        "Whether to pad inputs and targets out to a fixed temporal dimensionality. Necessary in order to use minibatches larger than 1. If ``True``, sequences are padded and submitted to the network as batch arrays. If ``False``, sequences are not padded and are submitted to the network as minibatches of 1."
     ),
     Kwarg(
         'n_coef',
@@ -228,10 +327,22 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Maximum order of derivatives present in the input data. All lower orders must also be included."
     ),
     Kwarg(
-        'resample',
+        'resample_inputs',
         None,
         [int, None],
-        "Resample inputs and targets to fixed length **resample** timesteps. If ``None``, no resampling."
+        "Resample inputs to fixed length **resample** timesteps. If ``None``, no input resampling."
+    ),
+    Kwarg(
+        'resample_outputs',
+        None,
+        [int, None],
+        "Resample targets to fixed length **resample** timesteps. If ``None``, no output resampling."
+    ),
+    Kwarg(
+        'reverse_targets',
+        True,
+        bool,
+        "Reverse the temporal dimension of the reconstruction targets."
     ),
     Kwarg(
         'reconstruct_deltas',
@@ -241,9 +352,15 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'normalize_data',
-        True,
+        False,
         bool,
-        "Normalize utterances to the range :math:`[0, 1]`"
+        "Normalize utterances to the range :math:`[0, 1]`. Mutually exclusive with **center_data**."
+    ),
+    Kwarg(
+        'center_data',
+        False,
+        bool,
+        "Center data about its mean. Mutually exclusive with **normalize_data**."
     ),
     Kwarg(
         'constrain_output',
@@ -252,10 +369,22 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Use an output model constrained to :math:`[0, 1]` (sigmoid if MLE and LogitNormal if Bayesian). Otherwise, use linear/normal output. Requires **normalize_data* to be ``True``."
     ),
     Kwarg(
-        'n_timesteps',
+        'dtw_gamma',
+        None,
+        [float, None],
+        "Smoothing parameter to use for soft-DTW objective. If ``Nonw``, do not use soft-DTW."
+    ),
+    Kwarg(
+        'n_timesteps_input',
         None,
         [int, None],
         "Number of timesteps present in the input data. If ``None``, inferred from data, possibly with different values between batches."
+    ),
+    Kwarg(
+        'n_timesteps_output',
+        None,
+        [int, None],
+        "Number of timesteps present in the target data. If ``None``, inferred from data, possibly with different values between batches."
     ),
     Kwarg(
         'mask_padding',
@@ -280,12 +409,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Compute the decoding as a sum of the network outputs and the mean activations of all cells in the training data."
-    ),
-    Kwarg(
-        'per_class_decoder',
-        False,
-        bool,
-        "Use separate decoders for each class and merge their outputs as a sum weighted by the class probability."
     ),
     Kwarg(
         'optim_name',
@@ -370,9 +493,27 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of global regularizer (ignored if ``regularizer_name==None``)."
     ),
     Kwarg(
+        'entropy_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer on classifier entropy. If ``None``, no entropy regularization."
+    ),
+    Kwarg(
+        'segment_encoding_correspondence_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer encouraging correspondence between segment encodings in the encoder and segment decodings in the decoder. Only used if the encoder and decoder have identical numbers of layers with identical numbers of units in each layer. If ``None``, no regularization for segment encoding correspondence."
+    ),
+    Kwarg(
+        'input_dropout_rate',
+        None,
+        [float, None],
+        "Rate at which to drop input data to the encoder. If ``None``, no input dropout."
+    ),
+    Kwarg(
         'ema_decay',
-        0.999,
-        float,
+        None,
+        [float, None],
         "Decay factor to use for exponential moving average for parameters (used in prediction)."
     ),
     Kwarg(
