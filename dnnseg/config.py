@@ -37,15 +37,6 @@ class Config(object):
 
         # Process config settings
         self.model_settings = self.build_unsupervised_word_classifier_settings(settings)
-        max_len = settings.get('max_len', None)
-        if max_len in [None, 'None']:
-            max_len = None
-        else:
-            try:
-                max_len = int(max_len)
-            except:
-                raise ValueError('max_len parameter invalid: %s' % max_len)
-        self.model_settings['max_len'] = max_len
         self.model_settings['n_iter'] = settings.getint('n_iter', 1000)
         gpu_frac = settings.get('gpu_frac', None)
         if gpu_frac in [None, 'None']:

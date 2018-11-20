@@ -5,12 +5,24 @@ import edward as ed
 from edward.models import OneHotCategorical, RelaxedOneHotCategorical, Bernoulli, RelaxedBernoulli, Normal, MultivariateNormalTriL, TransformedDistribution
 
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
-from .model import DenseLayer, DenseResidualLayer, AcousticEncoderDecoder
+from .model import DenseLayer, DenseResidualLayer, AcousticEncoderDecoder, get_session
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 tf_config = tf.ConfigProto()
 tf_config.gpu_options.allow_growth = True
+
+
+def bernoulli_rv(probs, inference_map, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            out = Bernoulli(probs=tf.ones_like(probs) * 00.5)
+            out_post = Bernoulli(probs=probs)
+            inference_map[out] = out_post
+            
+            return (out, inference_map)
+
 
 class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
     _INITIALIZATION_KWARGS = UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
@@ -27,9 +39,10 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                                      for x in _INITIALIZATION_KWARGS])
     __doc__ = _doc_header + _doc_args + _doc_kwargs
 
-    def __init__(self, k, **kwargs):
+    def __init__(self, k, train_data, **kwargs):
         super(AcousticEncoderDecoderBayes, self).__init__(
-            k=k,
+            k,
+            train_data,
             **kwargs
         )
 
@@ -136,7 +149,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                     decoder_scale = DenseLayer(
                         self.decoder_in,
                         self.n_timesteps_output * self.frame_dim,
-                        self.training_batch_norm,
+                        self.training,
                         activation=tf.nn.elu,
                         batch_normalize=self.batch_normalize,
                         session=self.sess
@@ -148,7 +161,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                             decoder_scale = DenseLayer(
                                 decoder_scale,
                                 self.n_timesteps_output * self.frame_dim,
-                                self.training_batch_norm,
+                                self.training,
                                 activation=tf.nn.elu,
                                 batch_normalize=self.batch_normalize,
                                 session=self.sess
@@ -157,7 +170,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                         for i in range(1, self.n_layers_decoder - 1):
                             decoder_scale = DenseResidualLayer(
                                 decoder_scale,
-                                self.training_batch_norm,
+                                self.training,
                                 units=self.n_timesteps_output * self.frame_dim,
                                 layers_inner=self.resnet_n_layers_inner,
                                 activation_inner=tf.nn.elu,
@@ -171,7 +184,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                         decoder_scale = DenseLayer(
                             decoder_scale,
                             self.n_timesteps_output * self.frame_dim,
-                            self.training_batch_norm,
+                            self.training,
                             activation=None,
                             batch_normalize=False,
                             session=self.sess

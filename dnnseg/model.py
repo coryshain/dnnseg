@@ -1,16 +1,18 @@
 import sys
 import os
+import re
 import math
 import time
 import pickle
 import numpy as np
+import pandas as pd
 import tensorflow as tf
-from tensorflow.python.ops import rnn_cell_impl
-from tensorflow.python.layers.utils import conv_output_length
-from sklearn.metrics import homogeneity_score, completeness_score, v_measure_score
+from sklearn.metrics import homogeneity_completeness_v_measure, adjusted_mutual_info_score, fowlkes_mallows_score
 
-from .data import get_random_permutation
+from .backend import *
+from .data import get_random_permutation, get_padded_lags, extract_segment_timestamps_batch, extract_states_at_timestamps_batch
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
+from .util import f_measure
 from .plot import plot_acoustic_features, plot_label_histogram, plot_label_heatmap, plot_binary_unit_heatmap
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -18,1315 +20,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 tf_config = tf.ConfigProto()
 tf_config.gpu_options.allow_growth = True
 
-if hasattr(rnn_cell_impl, 'LayerRNNCell'):
-    LayerRNNCell = rnn_cell_impl.LayerRNNCell
-else:
-    LayerRNNCell = rnn_cell_impl._LayerRNNCell
-
-
-
-def get_activation(activation):
-    if activation:
-        if activation == 'hard_sigmoid':
-            out = tf.keras.backend.hard_sigmoid
-        elif isinstance(activation, str):
-            out = getattr(tf.nn, activation)
-        else:
-            out = activation
-    else:
-        out = lambda x: x
-
-    return out
-
-
-class MultiLSTMCell(LayerRNNCell):
-    def __init__(
-            self,
-            num_units,
-            num_layers,
-            forget_bias=1.0,
-            activation=None,
-            inner_activation='tanh',
-            recurrent_activation='sigmoid',
-            kernel_initializer='glorot_uniform_initializer',
-            bias_initializer='zeros_initializer',
-            refeed_outputs=False,
-            reuse=None,
-            name=None,
-            dtype=None,
-            session=None
-    ):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                super(MultiLSTMCell, self).__init__(_reuse=reuse, name=name, dtype=dtype)
-
-                if not isinstance(num_units, list):
-                    self._num_units = [num_units] * num_layers
-                else:
-                    self._num_units = num_units
-
-                assert len(self._num_units) == num_layers, 'num_units must either be an integer or a list of integers of length num_layers'
-
-                self._num_layers = num_layers
-                self._forget_bias = forget_bias
-
-                self._activation = get_activation(activation)
-                self._inner_activation = get_activation(inner_activation)
-                self._recurrent_activation = get_activation(recurrent_activation)
-
-                self._kernel_initializer = self.get_initializer(kernel_initializer)
-                self._bias_initializer = self.get_initializer(bias_initializer)
-
-                self._refeed_outputs = refeed_outputs
-
-    @property
-    def state_size(self):
-        out = []
-        for l in range(self._num_layers):
-            size = (self._num_units[l], self._num_units[l])
-            out.append(size)
-
-        out = tuple(out)
-
-        return out
-
-    @property
-    def output_size(self):
-        out = self._num_units[-1]
-
-        return out
-
-    def build(self, inputs_shape):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                if inputs_shape[1].value is None:
-                    raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
-                                     % inputs_shape)
-
-                self._kernel = []
-                self._bias = []
-
-                for l in range(self._num_layers):
-                    if l == 0:
-                        bottom_up_dim = inputs_shape[1].value
-                    else:
-                        bottom_up_dim = self._num_units[l-1]
-
-                    recurrent_dim = self._num_units[l]
-                    output_dim = 4 * self._num_units[l]
-                    if self._refeed_outputs and l == 0:
-                        refeed_dim = self._num_units[-1]
-                    else:
-                        refeed_dim = 0
-
-                    kernel = self.add_variable(
-                        'kernel_%d' %l,
-                        shape=[bottom_up_dim + recurrent_dim + refeed_dim, output_dim],
-                        initializer=self._kernel_initializer
-                    )
-                    self._kernel.append(kernel)
-
-                    bias = self.add_variable(
-                        'bias_%d' %l,
-                        shape=[1, output_dim],
-                        initializer=self._bias_initializer
-                    )
-                    self._bias.append(bias)
-
-        self.built = True
-
-    def call(self, inputs, state):
-        with self.session.as_default():
-            new_state = []
-
-            h_below = inputs
-            for l, layer in enumerate(state):
-                c_behind, h_behind = layer
-
-                # Gather inputs
-                layer_inputs = [h_below, h_behind]
-
-                if self._refeed_outputs and l == 0:
-                    layer_inputs.append(state[-1][1])
-
-                # Compute gate pre-activations
-                s = tf.matmul(
-                    tf.concat(layer_inputs, axis=1),
-                    self._kernel[l]
-                )
-
-                # Add bias
-                s = s + self._bias[l]
-
-                # Alias useful variables
-                if l < self._num_layers - 1:
-                    # Use inner activation if non-final layer
-                    activation = self._inner_activation
-                else:
-                    # Use outer activation if final layer
-                    activation = self._activation
-                units = self._num_units[l]
-
-                # Forget gate
-                f = self._recurrent_activation(s[:, :units] + self._forget_bias)
-                # Input gate
-                i = self._recurrent_activation(s[:, units:units * 2])
-                # Output gate
-                o = self._recurrent_activation(s[:, units * 2:units * 3])
-                # Cell proposal
-                g = activation(s[:, units * 3:units * 4])
-
-                # Compute new cell state
-                c = f * c_behind + i * g
-
-                # Compute the gated output
-                h = o * activation(c)
-
-                new_state.append((c, h))
-
-                h_below = h
-
-            new_state = tuple(new_state)
-            new_output = new_state[-1][1]
-
-            return new_output, new_state
-
-    def get_initializer(self, initializer):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                if isinstance(initializer, str):
-                    out = getattr(tf, initializer)
-                else:
-                    out = initializer
-
-                if 'glorot' in initializer:
-                    out = out()
-
-                return out
-
-
-class SoftHMLSTMCell(LayerRNNCell):
-    def __init__(
-            self,
-            num_units,
-            num_layers,
-            forget_bias=1.0,
-            activation=None,
-            inner_activation='tanh',
-            recurrent_activation='sigmoid',
-            boundary_activation='hard_sigmoid',
-            bottomup_initializer='glorot_uniform_initializer',
-            recurrent_initializer='orthogonal_initializer',
-            topdown_initializer='glorot_uniform_initializer',
-            boundary_initializer='orthogonal_initializer',
-            bias_initializer='zeros_initializer',
-            weight_normalization=False,
-            layer_normalization=False,
-            power=None,
-            implementation=1,
-            reuse=None,
-            name=None,
-            dtype=None,
-            session=None
-    ):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                super(SoftHMLSTMCell, self).__init__(_reuse=reuse, name=name, dtype=dtype)
-
-                if not isinstance(num_units, list):
-                    self._num_units = [num_units] * num_layers
-                else:
-                    self._num_units = num_units
-
-                assert len(self._num_units) == num_layers, 'num_units must either be an integer or a list of integers of length num_layers'
-
-                self._num_layers = num_layers
-                self._forget_bias = forget_bias
-
-                self._activation = get_activation(activation)
-                self._inner_activation = get_activation(inner_activation)
-                self._recurrent_activation = get_activation(recurrent_activation)
-                self._boundary_activation = get_activation(boundary_activation)
-
-                self._bottomup_initializer = self.get_initializer(bottomup_initializer)
-                self._recurrent_initializer = self.get_initializer(recurrent_initializer)
-                self._topdown_initializer = self.get_initializer(topdown_initializer)
-                self._boundary_initializer = self.get_initializer(boundary_initializer)
-                self._bias_initializer = self.get_initializer(bias_initializer)
-
-                self.weight_normalization = weight_normalization
-                self.layer_normalization = layer_normalization
-                self.power = power
-                self.implementation = implementation
-
-                self.epsilon = 1e-8
-
-    @property
-    def state_size(self):
-        out = []
-        for l in range(self._num_layers):
-            if l < self._num_layers - 1:
-                size = (self._num_units[l], self._num_units[l], 1)
-            else:
-                size = (self._num_units[l], self._num_units[l])
-
-            out.append(size)
-
-        out = tuple(out)
-
-        return out
-
-    @property
-    def output_size(self):
-        out = []
-        for l in range(self._num_layers):
-            if l < self._num_layers - 1:
-                size = (self._num_units[l], 1)
-            else:
-                size = (self._num_units[l],)
-
-            out.append(size)
-
-        out = tuple(out)
-
-        return out
-
-    def norm(self, inputs, name):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                out = tf.contrib.layers.layer_norm(
-                    inputs,
-                    reuse=tf.AUTO_REUSE,
-                    scope=name
-                )
-
-                return out
-
-    def build(self, inputs_shape):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                if inputs_shape[1].value is None:
-                    raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
-                                     % inputs_shape)
-
-                self._kernel_bottomup = []
-                self._kernel_recurrent = []
-                self._kernel_topdown = []
-                if not self.layer_normalization:
-                    self._bias = []
-
-                if self.implementation == 2:
-                    self._kernel_boundary = []
-                    if not self.layer_normalization:
-                        self._bias_boundary = []
-
-                for l in range(self._num_layers):
-                    if l == 0:
-                        bottom_up_dim = inputs_shape[1].value
-                    else:
-                        bottom_up_dim = self._num_units[l-1]
-
-                    recurrent_dim = self._num_units[l]
-
-                    if self.implementation == 1:
-                        if l < self._num_layers - 1:
-                            output_dim = 4 * self._num_units[l] + 1
-                        else:
-                            output_dim = 4 * self._num_units[l]
-                    else:
-                        output_dim = 4 * self._num_units[l]
-
-                    kernel_bottomup = self.add_variable(
-                        'kernel_bottomup_%d' %l,
-                        shape=[bottom_up_dim, output_dim],
-                        initializer=self._bottomup_initializer
-                    )
-                    self._kernel_bottomup.append(kernel_bottomup)
-
-                    kernel_recurrent = self.add_variable(
-                        'kernel_recurrent_%d' %l,
-                        shape=[recurrent_dim, output_dim],
-                        initializer=self._recurrent_initializer
-                    )
-                    self._kernel_recurrent.append(kernel_recurrent)
-
-                    if l < self._num_layers - 1:
-                        top_down_dim = self._num_units[l+1]
-                        kernel_topdown = self.add_variable(
-                            'kernel_topdown_%d' %l,
-                            shape=[top_down_dim, output_dim],
-                            initializer=self._topdown_initializer
-                        )
-                        self._kernel_topdown.append(kernel_topdown)
-
-                    if not self.layer_normalization:
-                        bias = self.add_variable(
-                            'bias_%d' %l,
-                            shape=[1, output_dim],
-                            initializer=self._bias_initializer
-                        )
-                        self._bias.append(bias)
-
-                    if self.implementation == 2:
-                        kernel_boundary = self.add_variable(
-                            'kernel_boundary_%d' %l,
-                            shape=[self._num_units[l], 1],
-                            initializer=self._boundary_initializer
-                        )
-                        self._kernel_boundary.append(kernel_boundary)
-
-                        if not self.layer_normalization:
-                            bias_boundary = self.add_variable(
-                                'bias_boundary_%d' % l,
-                                shape=[1, 1],
-                                initializer=self._bias_initializer
-                            )
-                            self._bias_boundary.append(bias_boundary)
-        self.built = True
-
-    def call(self, inputs, state):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                new_output = []
-                new_state = []
-
-                h_below = inputs
-                z_below = None
-
-                if self.power:
-                    power = self.power
-                else:
-                    power = 1
-
-                for l, layer in enumerate(state):
-                    # EXTRACT DEPENDENCIES (c_behind, h_behind, h_below, h_above, z_behind, z_below):
-
-                    # c_behind: Previous cell state at current layer
-                    c_behind = layer[0]
-
-                    # h_behind: Previous hidden state at current layer
-                    h_behind = layer[1]
-
-                    # h_below: Incoming features, either inputs (if first layer) or hidden state (if not first layer)
-                    # z_below: Boundary probability of lower layer (implicitly 1 if first layer)
-                    if l > 0:
-                        h_below = new_output[-1][0]
-                        z_below = self._boundary_activation(new_output[-1][1])
-
-                    # h_above: hidden state of layer above at previous timestep (implicitly 0 if final layer)
-                    if l < self._num_layers - 1:
-                        h_above = state[l + 1][1]
-                    else:
-                        h_above = None
-
-                    # z_behind: Previous boundary probability at current layer (implicitly 1 if final layer)
-                    if l < self._num_layers - 1:
-                        z_behind = self._boundary_activation(layer[2])
-                    else:
-                        z_behind = None
-
-                    # Bottom-up features
-                    s_bottomup = tf.matmul(h_below, self._kernel_bottomup[l])
-                    if l > 0:
-                        s_bottomup = s_bottomup * (z_below ** power)
-
-                    # Recurrent features
-                    s_recurrent = tf.matmul(h_behind, self._kernel_recurrent[l])
-
-                    # Sum bottom-up and recurrent features
-                    s = s_bottomup + s_recurrent
-
-                    # Top-down features (if non-final layer)
-                    if l < self._num_layers - 1:
-                        # Compute top-down features
-                        s_topdown = tf.matmul(h_above, self._kernel_topdown[l]) * (z_behind ** power)
-                        # Add in top-down features
-                        s = s + s_topdown
-
-                    # Alias useful variables
-                    if l < self._num_layers - 1:
-                        # Use inner activation if non-final layer
-                        activation = self._inner_activation
-                    else:
-                        # Use outer activation if final layer
-                        activation = self._activation
-                    units = self._num_units[l]
-
-                    # Forget gate
-                    f = s[:, :units]
-                    if self.weight_normalization:
-                        f_g = tf.Variable(tf.ones([1, units]), name='f_g_%d' %l)
-                        f = f / (tf.norm(f, axis=0) + self.epsilon) * f_g
-                    if self.layer_normalization:
-                        f = self.norm(f, 'f_%d' %l)
-                    else:
-                        f = f + self._bias[l][:, units]
-                    f = self._recurrent_activation(f + self._forget_bias)
-
-                    # Input gate
-                    i = s[:, units:units*2]
-                    if self.weight_normalization:
-                        i_g = tf.Variable(tf.ones([1, units]), name='i_g_%d' %l)
-                        i = i / (tf.norm(i, axis=0) + self.epsilon) * i_g
-                    if self.layer_normalization:
-                        i = self.norm(i, 'i_%d' %l)
-                    else:
-                        i = i + self._bias[l][:, units:units*2]
-                    i = self._recurrent_activation(i)
-
-                    # Output gate
-                    o = s[:, units*2:units*3]
-                    if self.weight_normalization:
-                        o_g = tf.Variable(tf.ones([1, units]), name='o_g_%d' %l)
-                        o = o / (tf.norm(o, axis=0) + self.epsilon) * o_g
-                    if self.layer_normalization:
-                        o = self.norm(o, 'o_%d' %l)
-                    else:
-                        o = o + self._bias[l][:, units*2:units*3]
-                    o = self._recurrent_activation(o)
-
-                    # Cell proposal
-                    g = s[:, units*3:units*4]
-                    if self.weight_normalization:
-                        g_g = tf.Variable(tf.ones([1, units]), name='g_g_%d' %l)
-                        g = g / (tf.norm(g, axis=0) + self.epsilon) * g_g
-                    if self.layer_normalization:
-                        g = self.norm(g, 'g_%d' %l)
-                    else:
-                        g = g + self._bias[l][:, units*3:units*4]
-                    g = activation(g)
-
-                    # Cell state update (forget-gated previous cell plus input-gated cell proposal)
-                    c = f * c_behind + i * g
-                    if self.layer_normalization:
-                        c = self.norm(c, 'c_%d' %l)
-
-                    if l > 0:
-                        # If non-initial, current and hidden cell states proportionally to the boundary probability z_below.
-                        # If z_below is small, the cell state will mostly be copied from the previous timestep.
-                        # If z_below is large, the cell state will mostly be updated based on the inputs.
-                        c = z_below * c + (1 - z_below) * c_behind
-
-                    if l < self._num_layers - 1:
-                        # If non-final, delete cell state proportionally to boundary probability z_behind.
-                        # If z_behind is low, the cell state will mostly be retained.
-                        # If z_behind is high, the cell state will mostly be deleted (replaced with the gated cell-proposal vector)
-                        c =  z_behind * i * g + (1 - z_behind) * c
-
-                    # Compute the gated output
-                    h = o * activation(c)
-
-                    # Compute probability of a copy operation.
-                    # Equal to the joint probability of not z_behind and not z_below
-                    # (when both z_behind and z_below are zero, the state is completely copied forward).
-                    if z_behind is None:
-                        z_behind_tmp = 0
-                    else:
-                        z_behind_tmp = z_behind
-
-                    if z_below is None:
-                        z_below_tmp = 1
-                    else:
-                        z_below_tmp = z_below
-
-                    copy_prob = (1 - z_behind_tmp) * (1 - z_below_tmp)
-
-                    # Mix gated output with the previous hidden state proportionally to the copy probability
-                    h = copy_prob * h_behind + (1 - copy_prob) * h
-
-                    # Compute the current boundary probability
-                    if l < self._num_layers - 1:
-                        if self.implementation == 2:
-                            # In implementation 2, boundary is a function of the hidden state
-                            z = tf.matmul(h, self._kernel_boundary[l])
-                            if self.weight_normalization:
-                                z_g = tf.Variable(tf.ones([1, 1]), name='z_g_%d' % l)
-                                z = z / (tf.norm(z, axis=0) + self.epsilon) * z_g
-                            if self.layer_normalization:
-                                z = self.norm(z, 'z_%d' %l)
-                            else:
-                                z = z + self._bias_boundary[l]
-                        else:
-                            # In implementation 1, boundary has its own slice of the kernels
-                            z = s[:, units*4:]
-                            if self.weight_normalization:
-                                z_g = tf.Variable(tf.ones([1, 1]), name='z_g_%d' % l)
-                                z = z / (tf.norm(z, axis=0) + self.epsilon) * z_g
-                            if self.layer_normalization:
-                                z = self.norm(z, 'z_%d' %l)
-                            else:
-                                z = z + self._bias[l][:, units*4:]
-
-                    if l < self._num_layers - 1:
-                        output_l = (h, z)
-                        new_state_l = (c, h, z)
-                    else:
-                        output_l = (h,)
-                        new_state_l = (c, h,)
-
-                    # Append layer to output and state
-                    new_output.append(output_l)
-                    new_state.append(new_state_l)
-
-                    h_below = h
-                    if l < self._num_layers - 1:
-                        z_below = z
-                    else:
-                        z_below = None
-
-                # Create output and state tuples
-                new_output = tuple(new_output)
-                new_state = tuple(new_state)
-
-                return new_output, new_state
-
-    def get_initializer(self, initializer):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                if isinstance(initializer, str):
-                    out = getattr(tf, initializer)
-                else:
-                    out = initializer
-
-                if 'glorot' in initializer:
-                    out = out()
-
-                return out
-
-
-class SoftHMLSTMSegmenter(object):
-    def __init__(
-            self,
-            num_units,
-            num_layers,
-            forget_bias=1.0,
-            activation=None,
-            inner_activation='tanh',
-            recurrent_activation='sigmoid',
-            boundary_activation='hard_sigmoid',
-            bottomup_initializer='glorot_uniform_initializer',
-            recurrent_initializer='orthogonal_initializer',
-            topdown_initializer='glorot_uniform_initializer',
-            boundary_initializer='orthogonal_initializer',
-            bias_initializer='zeros_initializer',
-            weight_normalization=False,
-            layer_normalization=False,
-            power=None,
-            implementation=1,
-            reuse=None,
-            name=None,
-            dtype=None,
-            session=None
-    ):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                if not isinstance(num_units, list):
-                    self.num_units = [num_units] * num_layers
-                else:
-                    self.num_units = num_units
-
-                assert len(self.num_units) == num_layers, 'num_units must either be an integer or a list of integers of length num_layers'
-
-                self.num_layers = num_layers
-                self.forget_bias = forget_bias
-
-
-                self.activation = activation
-                self.inner_activation = inner_activation
-                self.recurrent_activation = recurrent_activation
-                self.boundary_activation = boundary_activation
-
-                self.bottomup_initializer = bottomup_initializer
-                self.recurrent_initializer = recurrent_initializer
-                self.topdown_initializer = topdown_initializer
-                self.boundary_initializer = boundary_initializer
-                self.bias_initializer = bias_initializer
-
-                self.weight_normalization = weight_normalization
-                self.layer_normalization = layer_normalization
-                self.power = power
-                self.implementation = implementation
-
-                self.reuse = reuse
-                self.name = name
-                self.dtype = dtype
-
-                self.built = False
-
-    def build(self, inputs=None):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                self.cell = SoftHMLSTMCell(
-                    self.num_units,
-                    self.num_layers,
-                    forget_bias=self.forget_bias,
-                    activation=self.activation,
-                    inner_activation=self.inner_activation,
-                    recurrent_activation=self.recurrent_activation,
-                    boundary_activation=self.boundary_activation,
-                    bottomup_initializer=self.bottomup_initializer,
-                    recurrent_initializer=self.recurrent_initializer,
-                    topdown_initializer=self.topdown_initializer,
-                    bias_initializer=self.bias_initializer,
-                    weight_normalization=self.weight_normalization,
-                    layer_normalization=self.layer_normalization,
-                    power=self.power,
-                    implementation=self.implementation,
-                    reuse=self.reuse,
-                    name=self.name,
-                    dtype=self.dtype,
-                    session=self.session
-                )
-
-                self.cell.build(inputs.shape[1:])
-
-        self.built = True
-
-    def __call__(self, inputs, mask=None):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                if mask is not None:
-                    sequence_length = tf.reduce_sum(mask, axis=1)
-                else:
-                    sequence_length = None
-                output, state = tf.nn.dynamic_rnn(
-                    self.cell,
-                    inputs,
-                    sequence_length=sequence_length,
-                    dtype=tf.float32
-                )
-
-                out = HMLSTMOutput(output)
-
-                return out
-
-
-class HMLSTMOutput(object):
-    def __init__(self, output, session=None):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        self.num_layers = len(output)
-        self.l = [HMLSTMOutputLevel(level, session=self.session) for level in output]
-
-    def state(self, level=None, discrete=False, method='round'):
-        if level is None:
-            out = tuple([l.state(discrete=discrete, discretization_method=method) for l in self.l])
-        else:
-            out = self.l[level].state(discrete=discrete, discretization_method=method)
-
-        return out
-
-    def boundary(self, level=None, discrete=False, method='round', as_logits=False):
-        if level is None:
-            out = tuple([l.boundary(discrete=discrete, discretization_method=method, as_logits=as_logits) for l in self.l[:-1]])
-        else:
-            out = self.l[level].boundary(discrete=discrete, discretization_method=method, as_logits=as_logits)
-
-        return out
-
-    def output(self, return_sequences=False):
-        if return_sequences:
-            out = self.state(level=-1, discrete=False)
-        else:
-            out = self.state(level=-1, discrete=False)[:,-1,:]
-
-        return out
-
-
-class HMLSTMOutputLevel(object):
-    def __init__(self, output, session=None):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                self.h = output[0]
-                if len(output) > 1:
-                    self.z = output[1]
-                else:
-                    self.z = None
-
-    def state(self, discrete=False, discretization_method='round'):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                out = self.h
-                if discrete:
-                    if discretization_method == 'round':
-                        out = tf.cast(tf.round(self.h), dtype=tf.int32)
-                    else:
-                        raise ValueError('Discretization method "%s" not currently supported' % discretization_method)
-
-                return out
-
-    def boundary(self, discrete=False, discretization_method='round', as_logits=False):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                if self.z is None:
-                    out = tf.zeros(tf.shape(self.h)[:2])
-                else:
-                    out = self.z[..., 0]
-                    if discrete or not as_logits:
-                        out = tf.sigmoid(self.z[..., 0])
-
-                if discrete:
-                    if discretization_method == 'round':
-                        out = tf.round(out)
-                    else:
-                        raise ValueError('Discretization method "%s" not currently supported' % discretization_method)
-
-                if discrete:
-                    out = tf.cast(out, dtype=tf.int32)
-
-                return out
-
-
-
-
-class DenseLayer(object):
-
-    def __init__(
-            self,
-            training,
-            units=None,
-            use_bias=True,
-            activation=None,
-            batch_normalization_decay=0.9,
-            normalize_weights=False,
-            session=None
-    ):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        self.training = training
-        self.units = units
-        self.use_bias = use_bias
-        self.activation = get_activation(activation)
-        self.batch_normalization_decay = batch_normalization_decay
-        self.normalize_weights = normalize_weights
-
-        self.dense_layer = None
-        self.projection = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            if self.units is None:
-                out_dim = inputs.shape[-1]
-            else:
-                out_dim = self.units
-
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    self.dense_layer = tf.keras.layers.Dense(
-                        out_dim,
-                        input_shape=[inputs.shape[1]],
-                        use_bias=self.use_bias
-                    )
-
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-
-                H = self.dense_layer(inputs)
-
-                if self.normalize_weights:
-                    self.w = self.dense_layer.kernel
-                    self.g = tf.Variable(tf.ones(self.w.shape[1]), dtype=tf.float32)
-                    self.v = tf.norm(self.w, axis=0)
-                    self.dense_layer.kernel = self.v
-
-                if self.batch_normalization_decay:
-                    # H = tf.layers.batch_normalization(H, training=self.training)
-                    H = tf.contrib.layers.batch_norm(
-                        H,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None
-                    )
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
-
-
-class DenseResidualLayer(object):
-
-    def __init__(
-            self,
-            training,
-            units=None,
-            use_bias=True,
-            layers_inner=3,
-            activation_inner=None,
-            activation=None,
-            batch_normalization_decay=0.9,
-            project_inputs=False,
-            session=None
-         ):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        self.training = training
-        self.units = units
-        self.use_bias = use_bias
-        self.layers_inner = layers_inner
-        self.activation_inner = get_activation(activation_inner)
-        self.activation = get_activation(activation)
-        self.batch_normalization_decay = batch_normalization_decay
-        self.project_inputs = project_inputs
-
-        self.dense_layers = None
-        self.projection = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    if self.units is None:
-                        out_dim = inputs.shape[-1]
-                    else:
-                        out_dim = self.units
-
-                    self.dense_layers = []
-
-                    for i in range(self.layers_inner):
-                        if i == 0:
-                            in_dim = inputs.shape[1]
-                        else:
-                            in_dim = out_dim
-                        l = tf.keras.layers.Dense(
-                            out_dim,
-                            input_shape=[in_dim],
-                            use_bias=self.use_bias
-                        )
-                        self.dense_layers.append(l)
-
-                    if self.project_inputs:
-                        self.projection = tf.keras.layers.Dense(
-                            out_dim,
-                            input_shape=[inputs.shape[1]]
-                        )
-
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-
-                F = inputs
-                for i in range(self.layers_inner - 1):
-                    F = self.dense_layers[i](F)
-                    if self.batch_normalization_decay:
-                        # F = tf.layers.batch_normalization(F, training=self.training)
-                        F = tf.contrib.layers.batch_norm(
-                            F,
-                            decay=self.batch_normalization_decay,
-                            center=True,
-                            scale=True,
-                            zero_debias_moving_mean=True,
-                            is_training=self.training,
-                            updates_collections=None
-                        )
-                    if self.activation_inner is not None:
-                        F = self.activation_inner(F)
-
-                F = self.dense_layers[-1](F)
-                if self.batch_normalization_decay:
-                    # F = tf.layers.batch_normalization(F, training=self.training)
-                    F = tf.contrib.layers.batch_norm(
-                        F,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None
-                    )
-
-                if self.project_inputs:
-                    x = self.projection(inputs)
-                else:
-                    x = inputs
-
-                H = F + x
-
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
-
-
-class Conv1DLayer(object):
-
-    def __init__(
-            self,
-            training,
-            kernel_size,
-            n_filters=None,
-            stride=1,
-            padding='valid',
-            use_bias=True,
-            activation=None,
-            batch_normalization_decay=0.9,
-            session=None
-    ):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        self.training = training
-        self.n_filters = n_filters
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-        self.use_bias = use_bias
-        self.activation = get_activation(activation)
-        self.batch_normalization_decay = batch_normalization_decay
-
-        self.conv_1d_layer = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    if self.n_filters is None:
-                        out_dim = inputs.shape[-1]
-                    else:
-                        out_dim = self.n_filters
-
-                    self.conv_1d_layer =  tf.keras.layers.Conv1D(
-                        out_dim,
-                        self.kernel_size,
-                        padding=self.padding,
-                        strides=self.stride,
-                        use_bias=self.use_bias
-                    )
-
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                H = inputs
-
-                H = self.conv_1d_layer(H)
-
-                if self.batch_normalization_decay:
-                    # H = tf.layers.batch_normalization(H, training=self.training)
-                    H = tf.contrib.layers.batch_norm(
-                        H,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None
-                    )
-
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
-
-
-
-class Conv1DResidualLayer(object):
-
-    def __init__(
-            self,
-            training,
-            kernel_size,
-            n_filters=None,
-            stride=1,
-            padding='valid',
-            use_bias=True,
-            layers_inner=3,
-            activation=None,
-            activation_inner=None,
-            batch_normalization_decay=0.9,
-            project_inputs=False,
-            n_timesteps=None,
-            n_input_features=None,
-            session=None
-    ):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        self.training = training
-        self.n_filters = n_filters
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-        self.use_bias = use_bias
-        self.layers_inner = layers_inner
-        self.activation = get_activation(activation)
-        self.activation_inner = get_activation(activation_inner)
-        self.batch_normalization_decay = batch_normalization_decay
-        self.project_inputs = project_inputs
-        self.n_timesteps = n_timesteps
-        self.n_input_features = n_input_features
-
-        self.conv_1d_layers = None
-        self.projection = None
-
-        self.built = False
-
-
-    def build(self, inputs):
-        if not self.built:
-            if self.n_filters is None:
-                out_dim = inputs.shape[-1]
-            else:
-                out_dim = self.n_filters
-
-            self.built = True
-
-            self.conv_1d_layers = []
-
-            with self.session.as_default():
-                with self.session.graph.as_default():
-
-                    conv_output_shapes = [[int(inputs.shape[1]), int(inputs.shape[2])]]
-
-                    for i in range(self.layers_inner):
-                        if isinstance(self.stride, list):
-                            cur_strides = self.stride[i]
-                        else:
-                            cur_strides = self.stride
-
-                        l = tf.keras.layers.Conv1D(
-                            out_dim,
-                            self.kernel_size,
-                            padding=self.padding,
-                            strides=cur_strides,
-                            use_bias=self.use_bias
-                        )
-
-                        if self.padding in ['causal', 'same'] and self.stride == 1:
-                            output_shape = conv_output_shapes[-1]
-                        else:
-                            output_shape = [
-                                conv_output_length(
-                                    x,
-                                    self.kernel_size,
-                                    self.padding,
-                                    self.stride
-                                ) for x in conv_output_shapes[-1]
-                            ]
-
-                        conv_output_shapes.append(output_shape)
-
-                        self.conv_1d_layers.append(l)
-
-                    self.conv_output_shapes = conv_output_shapes
-
-                    if self.project_inputs:
-                        self.projection = tf.keras.layers.Dense(
-                            self.conv_output_shapes[-1][0] * out_dim,
-                            input_shape=[self.conv_output_shapes[0][0] * self.conv_output_shapes[0][1]]
-                        )
-                        
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                F = inputs
-
-                for i in range(self.layers_inner - 1):
-                    F = self.conv_1d_layers[i](F)
-
-                    if self.batch_normalization_decay:
-                        # F = tf.layers.batch_normalization(F, training=self.training)
-                        F = tf.contrib.layers.batch_norm(
-                            F,
-                            decay=self.batch_normalization_decay,
-                            center=True,
-                            scale=True,
-                            zero_debias_moving_mean=True,
-                            is_training=self.training,
-                            updates_collections=None
-                        )
-                    if self.activation_inner is not None:
-                        F = self.activation_inner(F)
-
-                F = self.conv_1d_layers[-1](F)
-
-                if self.batch_normalization_decay:
-                    # F = tf.layers.batch_normalization(F, training=self.training)
-                    F = tf.contrib.layers.batch_norm(
-                        F,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None
-                    )
-
-                if self.project_inputs:
-                    x = tf.layers.Flatten()(inputs)
-                    x = self.projection(x)
-                    x = tf.reshape(x, tf.shape(F))
-                else:
-                    x = inputs
-
-                H = F + x
-
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
-
-
-class RNNLayer(object):
-
-    def __init__(
-            self,
-            units=None,
-            layers=1,
-            activation=None,
-            inner_activation='tanh',
-            recurrent_activation='sigmoid',
-            kernel_initializer='glorot_uniform_initializer',
-            bias_initializer='zeros_initializer',
-            refeed_outputs = False,
-            return_sequences=True,
-            name=None,
-            session=None
-    ):
-        if session is None:
-            self.session = tf.get_default_session()
-        else:
-            self.session = session
-
-        self.units = units
-        self.layers = layers
-        self.activation = activation
-        self.inner_activation = inner_activation
-        self.recurrent_activation = recurrent_activation
-        self.kernel_initializer = kernel_initializer
-        self.bias_initializer = bias_initializer
-        self.refeed_outputs = refeed_outputs
-        self.return_sequences = return_sequences
-        self.name = name
-
-        self.rnn_layer = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    # RNN = getattr(tf.keras.layers, self.rnn_type)
-
-                    if self.units is None:
-                        units = [inputs.shape[-1]] * self.layers
-                    else:
-                        units = self.units
-
-                    # self.rnn_layer = RNN(
-                    #     out_dim,
-                    #     return_sequences=self.return_sequences,
-                    #     activation=self.activation,
-                    #     recurrent_activation=self.recurrent_activation
-                    # )
-                    # self.rnn_layer = tf.contrib.rnn.BasicLSTMCell(
-                    #     out_dim,
-                    #     activation=self.activation,
-                    #     name=self.name
-                    # )
-
-                    self.rnn_layer = MultiLSTMCell(
-                        units,
-                        self.layers,
-                        activation=self.activation,
-                        inner_activation=self.inner_activation,
-                        recurrent_activation=self.recurrent_activation,
-                        kernel_initializer=self.kernel_initializer,
-                        bias_initializer=self.bias_initializer,
-                        refeed_outputs=self.refeed_outputs,
-                        session=self.session
-                    )
-
-            self.built = True
-
-    def __call__(self, inputs, mask=None):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                # H = self.rnn_layer(inputs, mask=mask)
-                if mask is None:
-                    sequence_length = None
-                else:
-                    sequence_length = tf.reduce_sum(mask, axis=1)
-
-                H, _ = tf.nn.dynamic_rnn(
-                    self.rnn_layer,
-                    inputs,
-                    sequence_length=sequence_length,
-                    dtype=tf.float32
-                )
-
-                if not self.return_sequences:
-                    H = H[:,-1]
-
-                return H
+is_embedding_dimension = re.compile('d([0-9]+)')
+regularizer = re.compile('([^_]+)(_([0-9]*\.?[0-9]*))?')
 
 
 class AcousticEncoderDecoder(object):
@@ -1344,6 +39,7 @@ class AcousticEncoderDecoder(object):
     """
     _doc_args = """
         :param k: ``int``; dimensionality of classifier.
+        :param train_data: ``AcousticDataset`` object; training data.
     \n"""
     _doc_kwargs = '\n'.join([' ' * 8 + ':param %s' % x.key + ': ' + '; '.join(
         [x.dtypes_str(), x.descr]) + ' **Default**: ``%s``.' % (
@@ -1357,11 +53,15 @@ class AcousticEncoderDecoder(object):
             raise TypeError("UnsupervisedWordClassifier is an abstract class and may not be instantiated")
         return object.__new__(cls)
 
-    def __init__(self, k, **kwargs):
+    def __init__(self, k, train_data, **kwargs):
 
         self.k = k
         for kwarg in AcousticEncoderDecoder._INITIALIZATION_KWARGS:
             setattr(self, kwarg.key, kwargs.pop(kwarg.key, kwarg.default_value))
+        if self.speaker_emb_dim:
+            self.speaker_list = train_data.segments().speaker.unique()
+        else:
+            self.speaker_list = []
 
         self.plot_ix = None
 
@@ -1380,6 +80,9 @@ class AcousticEncoderDecoder(object):
         self.UINT_NP = getattr(tf, 'u' + self.int_type)
         self.use_dtw = self.dtw_gamma is not None
         self.regularizer_losses = []
+
+        self.window_len_left = 50
+        self.window_len_right = 50
 
         if self.n_units_encoder is None:
             self.units_encoder = [self.k] * (self.n_layers_encoder - 1)
@@ -1406,31 +109,76 @@ class AcousticEncoderDecoder(object):
         assert len(self.units_decoder) == (self.n_layers_decoder - 1), 'Misalignment in number of layers between n_layers_decoder and n_units_decoder.'
 
         if self.segment_encoding_correspondence_regularizer_scale and \
-                self.encoder_type.lower() in ['cnn_softhmlstm' ,'softhmlstm'] and \
-                self.resample_inputs == self.resample_outputs and \
+                self.encoder_type.lower() in ['cnn_hmlstm' ,'hmlstm'] and \
                 self.n_layers_encoder == self.n_layers_decoder and \
                 self.units_encoder == self.units_decoder[::-1]:
             self.regularize_correspondences = True
         else:
             self.regularize_correspondences = False
 
+        if self.regularize_correspondences and self.resample_inputs == self.resample_outputs:
+            self.matched_correspondences = True
+        else:
+            self.matched_correspondences = False
+
+        if self.pad_seqs:
+            if self.mask_padding and ('hmlstm' in self.encoder_type.lower() or 'rnn' in self.encoder_type.lower()):
+                self.input_padding = 'post'
+            else:
+                self.input_padding = 'pre'
+            self.target_padding = 'post'
+        else:
+            self.input_padding = None
+            self.target_padding = None
+
+        if self.resample_inputs:
+            if self.max_len < self.resample_inputs:
+                self.n_timestamps_input = self.max_len
+            else:
+                self.n_timestamps_input = self.resample_inputs
+        else:
+            self.n_timestamps_input = self.max_len
+
+        if self.resample_outputs:
+            if self.max_len < self.resample_outputs:
+                self.n_timesteps_output = self.max_len
+            else:
+                self.n_timesteps_output = self.resample_outputs
+        else:
+            self.n_timesteps_output = self.max_len
+
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if self.entropy_regularizer_scale:
-                    self.entropy_regularizer = self._binary_entropy_with_logits_regularizer(scale=self.entropy_regularizer_scale)
+                    self.entropy_regularizer = binary_entropy_regularizer(
+                        scale=self.entropy_regularizer_scale,
+                        from_logits=False,
+                        session=self.sess
+                    )
                 else:
                     self.entropy_regularizer = None
 
+                if self.boundary_regularizer_scale:
+                    self.boundary_regularizer = lambda bit_probs: tf.reduce_mean(bit_probs) * self.boundary_regularizer_scale
+                else:
+                    self.boundary_regularizer = None
+
                 if self.segment_encoding_correspondence_regularizer_scale:
-                    # self.segment_encoding_correspondence_regularizer = self._mse_regularizer(scale=self.segment_encoding_correspondence_regularizer_scale)
-                    # self.segment_encoding_correspondence_regularizer = self._cross_entropy_regularizer(scale=self.segment_encoding_correspondence_regularizer_scale)
+                    # self.segment_encoding_correspondence_regularizer = mse_regularizer(scale=self.segment_encoding_correspondence_regularizer_scale, session=self.sess)
+                    # self.segment_encoding_correspondence_regularizer = cross_entropy_regularizer(scale=self.segment_encoding_correspondence_regularizer_scale, session=self.sess)
                     self.segment_encoding_correspondence_regularizer = tf.contrib.layers.l1_regularizer(scale=self.segment_encoding_correspondence_regularizer_scale)
                 else:
                     self.segment_encoding_correspondence_regularizer = None
 
     def _pack_metadata(self):
+        if hasattr(self, 'n_train'):
+            n_train = self.n_train
+        else:
+            n_train = None
         md = {
             'k': self.k,
+            'speaker_list': self.speaker_list,
+            'n_train': n_train
         }
         for kwarg in AcousticEncoderDecoder._INITIALIZATION_KWARGS:
             md[kwarg.key] = getattr(self, kwarg.key)
@@ -1438,6 +186,8 @@ class AcousticEncoderDecoder(object):
 
     def _unpack_metadata(self, md):
         self.k = md.pop('k')
+        self.speaker_list = md.pop('speaker_list', [])
+        self.n_train = md.pop('n_train', None)
         for kwarg in AcousticEncoderDecoder._INITIALIZATION_KWARGS:
             setattr(self, kwarg.key, md.pop(kwarg.key, kwarg.default_value))
 
@@ -1458,33 +208,67 @@ class AcousticEncoderDecoder(object):
     # Private model construction methods
     ############################################################
 
-    def build(self, n_train, outdir=None, restore=True, verbose=True):
+    def build(self, n_train=None, outdir=None, restore=True, verbose=True):
         if outdir is None:
             if not hasattr(self, 'outdir'):
                 self.outdir = './dnnseg_model/'
         else:
             self.outdir = outdir
 
+        if n_train is not None:
+            self.n_train = n_train
+
+        if not hasattr(self, 'n_train') or self.n_train is None:
+            raise ValueError('Build parameter "n_train" must be provided the first time build() is called.')
+
         self._initialize_inputs()
-        self._initialize_encoder()
-        self._initialize_classifier()
-        self._augment_encoding()
-        self._initialize_decoder()
-        self._initialize_output_model()
+        if self.task != 'streaming_autoencoder':
+            self.encoder = self._initialize_encoder(self.X)
+            self.encoding = self._initialize_classifier(self.encoder)
+            self.decoder_in, self.extra_dims = self._augment_encoding(self.encoding, encoder=self.encoder)
+            self.decoder = self._initialize_decoder(self.decoder_in, self.n_timesteps_output)
+            self._initialize_output_model()
         self._initialize_objective(n_train)
         self._initialize_ema()
         self._initialize_saver()
         self._initialize_logging()
+
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                self.report_uninitialized = tf.report_uninitialized_variables(
+                    var_list=None
+                )
         self.load(restore=restore)
 
     def _initialize_inputs(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                self.X = tf.placeholder(self.FLOAT_TF, shape=(None, self.n_timesteps_input, self.n_coef * (self.order + 1)), name='X')
+                X_n_feats = self.n_coef * (self.order + 1)
+                if self.speaker_emb_dim:
+                    self.speaker_table, self.speaker_embedding_matrix = initialize_embeddings(
+                        self.speaker_list,
+                        self.speaker_emb_dim,
+                        session=self.sess
+                    )
+                    self.speaker = tf.placeholder(tf.string, shape=[None], name='speaker')
+                    self.speaker_embeddings = tf.nn.embedding_lookup(
+                        self.speaker_embedding_matrix,
+                        self.speaker_table.lookup(self.speaker)
+                    )
+
+                self.X_n_feats = X_n_feats
+
+                self.X = tf.placeholder(self.FLOAT_TF, shape=(None, self.n_timesteps_input, X_n_feats), name='X')
                 self.X_mask = tf.placeholder(self.FLOAT_TF, shape=(None, self.n_timesteps_input), name='X_mask')
 
                 self.X_feat_mean = tf.reduce_sum(self.X, axis=-2) / tf.reduce_sum(self.X_mask, axis=-1, keepdims=True)
                 self.X_time_mean = tf.reduce_mean(self.X, axis=-1)
+
+                if self.speaker_emb_dim:
+                    tiled_embeddings = tf.tile(self.speaker_embeddings[:, None, :], [1, tf.shape(self.X)[1], 1])
+                    self.inputs = tf.concat([self.X, tiled_embeddings], axis=-1)
+                else:
+                    self.inputs = self.X
 
                 if self.reconstruct_deltas:
                     self.frame_dim = self.n_coef * (self.order + 1)
@@ -1508,17 +292,58 @@ class AcousticEncoderDecoder(object):
                     name='global_batch_step'
                 )
                 self.incr_global_batch_step = tf.assign(self.global_batch_step, self.global_batch_step + 1)
-                self.batch_len = tf.shape(self.X)[0]
+                self.batch_len = tf.shape(self.inputs)[0]
 
                 self.loss_summary = tf.placeholder(tf.float32, name='loss_summary')
                 self.homogeneity = tf.placeholder(tf.float32, name='homogeneity')
                 self.completeness = tf.placeholder(tf.float32, name='completeness')
                 self.v_measure = tf.placeholder(tf.float32, name='v_measure')
+                self.ami = tf.placeholder(tf.float32, name='ami')
+                self.fmi = tf.placeholder(tf.float32, name='fmi')
 
-                self.training_batch_norm = tf.placeholder(tf.bool, name='training_batch_norm')
-                self.training_dropout = tf.placeholder(tf.bool, name='training_dropout')
+                self.training = tf.placeholder(tf.bool, name='training')
 
-    def _initialize_encoder(self):
+                if 'hmlstm' in self.encoder_type.lower():
+                    self.segmentation_scores = []
+                    for i in range(self.n_layers_encoder - 1):
+                        self.segmentation_scores.append({'phn': None, 'wrd': None})
+                        for s in ['phn', 'wrd']:
+                            self.segmentation_scores[-1][s] = {
+                                'b_p': tf.placeholder(dtype=self.FLOAT_TF, shape=[], name='b_p_%d_%s' %(i+1, s)),
+                                'b_r': tf.placeholder(dtype=self.FLOAT_TF, shape=[], name='b_r_%d_%s' %(i+1, s)),
+                                'b_f': tf.placeholder(dtype=self.FLOAT_TF, shape=[], name='b_f_%d_%s' %(i+1, s)),
+                                'w_p': tf.placeholder(dtype=self.FLOAT_TF, shape=[], name='w_p_%d_%s' %(i+1, s)),
+                                'w_r': tf.placeholder(dtype=self.FLOAT_TF, shape=[], name='w_r_%d_%s' %(i+1, s)),
+                                'w_f': tf.placeholder(dtype=self.FLOAT_TF, shape=[], name='w_f_%d_%s' %(i+1, s))
+                            }
+
+                if self.task == 'streaming_autoencoder':
+                    self.new_series = tf.placeholder(self.FLOAT_TF)
+
+                if self.n_correspondence:
+                    self.correspondence_embedding_placeholders = []
+                    self.correspondence_feature_placeholders = []
+                    self.correspondence_features = []
+                    for l in range(self.n_layers_encoder - 1):
+                        correspondence_embedding = tf.Variable(
+                            tf.zeros(shape=[self.n_correspondence, self.units_encoder[l]]),
+                            dtype=self.FLOAT_TF,
+                            trainable=False,
+                            name='embedding_correspondence_l%d' %l
+                        )
+                        correspondence_features = tf.Variable(
+                            tf.zeros(shape=[self.n_correspondence, self.resample_correspondence, self.frame_dim]),
+                            dtype=self.FLOAT_TF,
+                            trainable=False,
+                            name='X_correspondence_l%d' %l
+                        )
+
+                        self.correspondence_embedding_placeholders.append(correspondence_embedding)
+                        self.correspondence_feature_placeholders.append(correspondence_features)
+                        
+                        # TODO: Implement speaker embeddings in the correspondence loss
+
+    def _initialize_encoder(self, encoder_in):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if self.batch_normalize_encodings:
@@ -1531,24 +356,24 @@ class AcousticEncoderDecoder(object):
                 else:
                     mask = None
 
-                encoder = self.X
+                encoder = encoder_in
                 if self.input_dropout_rate is not None:
                     encoder = tf.layers.dropout(
                         encoder,
                         self.input_dropout_rate,
                         noise_shape=[tf.shape(encoder)[0], tf.shape(encoder)[1], 1],
-                        training=self.training_dropout
+                        training=self.training
                     )
 
                 units_utt = self.k
                 if self.emb_dim:
                     units_utt += self.emb_dim
 
-                if self.encoder_type.lower() in ['cnn_softhmlstm', 'softhmlstm', 'hmlstm']:
-                    if self.encoder_type == 'cnn_softhmlstm':
+                if self.encoder_type.lower() in ['cnn_hmlstm', 'hmlstm']:
+                    if self.encoder_type == 'cnn_hmlstm':
                         encoder = Conv1DLayer(
-                            self.training_batch_norm,
                             self.conv_kernel_size,
+                            training=self.training,
                             n_filters=self.n_coef * (self.order + 1),
                             padding='same',
                             activation=tf.nn.elu,
@@ -1556,45 +381,74 @@ class AcousticEncoderDecoder(object):
                             session=self.sess
                         )(encoder)
 
-                    self.segmenter = SoftHMLSTMSegmenter(
+                    self.segmenter = HMLSTMSegmenter(
                         self.units_encoder + [units_utt],
                         self.n_layers_encoder,
-                        activation=tf.tanh,
+                        activation=self.encoder_inner_activation,
                         inner_activation=self.encoder_inner_activation,
                         recurrent_activation=self.encoder_recurrent_activation,
                         boundary_activation=self.encoder_boundary_activation,
+                        bottomup_regularizer=self.encoder_weight_regularization,
+                        recurrent_regularizer=self.encoder_weight_regularization,
+                        topdown_regularizer=self.encoder_weight_regularization,
+                        boundary_regularizer=self.encoder_weight_regularization,
+                        bias_regularizer=None,
                         layer_normalization=self.encoder_layer_normalization,
+                        refeed_boundary=True,
                         power=self.boundary_power,
+                        boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
+                        state_slope_annealing_rate=self.state_slope_annealing_rate,
+                        state_discretizer=self.encoder_state_discretizer,
+                        global_step=self.global_step,
                         implementation=2
-                    )(encoder, mask=mask)
+                    )
+                    self.segmenter_output = self.segmenter(encoder, mask=mask)
 
-                    self.segmentation_logits = self.segmenter.boundary(discrete=False, as_logits=True)
-                    for l in self.segmentation_logits:
-                        self._regularize(
-                            l,
-                            self.entropy_regularizer
-                        )
-                    self.segmentation_probs = tf.sigmoid(self.segmentation_logits)
-                    self.state_probs = self.segmenter.state(discrete=False)
+                    self.regularizer_losses += self.segmenter.get_regularizer_losses()
+                    self.segmentation_probs = self.segmenter_output.boundary(discrete=False, as_logits=False)
+                    self.encoder_hidden_states = self.segmenter_output.state(discrete=False)
 
-                    encoder = self.segmenter.output(return_sequences=False)
 
-                    if encoding_batch_normalization_decay:
-                        encoder = tf.contrib.layers.batch_norm(
-                            encoder,
-                            decay=encoding_batch_normalization_decay,
-                            center=True,
-                            scale=True,
-                            zero_debias_moving_mean=True,
-                            is_training=self.training_batch_norm,
-                            updates_collections=None
-                        )
+                    for i, l in enumerate(self.segmentation_probs):
+                        self._regularize(l, self.entropy_regularizer)
+                        self._regularize(l, self.boundary_regularizer)
+                        if self.lm_scale:
+                            lm = RNNLayer(
+                                training=self.training,
+                                units=self.units_encoder[i],
+                                activation=self.encoder_inner_activation,
+                                recurrent_activation=self.encoder_recurrent_activation,
+                                return_sequences=True,
+                                session=self.sess
+                            )(self.encoder_hidden_states[i][:,:-1], mask=l[:,:-1])
+                            if self.encoder_state_discretizer:
+                                lm_out = tf.sigmoid(lm)
+                                loss_fn = tf.losses.sigmoid_cross_entropy
+                            else:
+                                lm_out = lm
+                                loss_fn = tf.losses.mean_squared_error
+                            lm_loss = loss_fn(
+                                self.encoder_hidden_states[i][:, 1:],
+                                lm_out,
+                                weights=l[:, 1:, None]
+                            )
+                            self._regularize(lm_loss, identity_regularizer(self.lm_scale))
+
+                    encoder = self.segmenter_output.output(return_sequences=self.task == 'streaming_autoencoder')
+
+                    encoder = DenseLayer(
+                        training=self.training,
+                        units=units_utt,
+                        activation=self.encoder_activation,
+                        batch_normalization_decay=encoding_batch_normalization_decay,
+                        session=self.sess
+                    )(encoder)
 
                 elif self.encoder_type.lower() in ['rnn', 'cnn_rnn']:
                     if self.encoder_type == 'cnn_rnn':
                         encoder = Conv1DLayer(
-                            self.training_batch_norm,
                             self.conv_kernel_size,
+                            training=self.training,
                             n_filters=self.n_coef * (self.order + 1),
                             padding='same',
                             activation=tf.nn.elu,
@@ -1602,7 +456,8 @@ class AcousticEncoderDecoder(object):
                             session=self.sess
                         )(encoder)
 
-                    encoder = RNNLayer(
+                    encoder = MultiRNNLayer(
+                        training=self.training,
                         units=self.units_encoder + [units_utt],
                         layers=self.n_layers_encoder,
                         activation=self.encoder_activation,
@@ -1617,8 +472,8 @@ class AcousticEncoderDecoder(object):
 
                 elif self.encoder_type.lower() == 'cnn':
                     encoder = Conv1DLayer(
-                        self.training_batch_norm,
                         self.conv_kernel_size,
+                        training=self.training,
                         n_filters=self.n_coef * (self.order + 1),
                         padding='same',
                         activation=tf.nn.elu,
@@ -1629,8 +484,8 @@ class AcousticEncoderDecoder(object):
                     for i in range(self.n_layers_encoder - 1):
                         if i > 0 and self.encoder_resnet_n_layers_inner:
                             encoder = Conv1DResidualLayer(
-                                self.training_batch_norm,
                                 self.conv_kernel_size,
+                                training=self.training,
                                 n_filters=self.units_encoder[i],
                                 padding='causal',
                                 layers_inner=self.encoder_resnet_n_layers_inner,
@@ -1641,8 +496,8 @@ class AcousticEncoderDecoder(object):
                             )(encoder)
                         else:
                             encoder = Conv1DLayer(
-                                self.training_batch_norm,
                                 self.conv_kernel_size,
+                                training=self.training,
                                 n_filters=self.units_encoder[i],
                                 padding='causal',
                                 activation=self.encoder_inner_activation,
@@ -1651,7 +506,7 @@ class AcousticEncoderDecoder(object):
                             )(encoder)
 
                     encoder = DenseLayer(
-                        self.training_batch_norm,
+                        training=self.training,
                         units=units_utt,
                         activation=self.encoder_activation,
                         batch_normalization_decay=encoding_batch_normalization_decay,
@@ -1664,7 +519,7 @@ class AcousticEncoderDecoder(object):
                     for i in range(self.n_layers_encoder - 1):
                         if i > 0 and self.encoder_resnet_n_layers_inner:
                             encoder = DenseResidualLayer(
-                                self.training_batch_norm,
+                                training=self.training,
                                 units=self.n_timesteps_input * self.units_encoder[i],
                                 layers_inner=self.encoder_resnet_n_layers_inner,
                                 activation=self.encoder_inner_activation,
@@ -1674,7 +529,7 @@ class AcousticEncoderDecoder(object):
                             )(encoder)
                         else:
                             encoder = DenseLayer(
-                                self.training_batch_norm,
+                                training=self.training,
                                 units=self.n_timesteps_input * self.units_encoder[i],
                                 activation=self.encoder_inner_activation,
                                 batch_normalization_decay=self.encoder_batch_normalization_decay,
@@ -1682,7 +537,7 @@ class AcousticEncoderDecoder(object):
                             )(encoder)
 
                     encoder = DenseLayer(
-                        self.training_batch_norm,
+                        training=self.training,
                         units=units_utt,
                         activation=self.encoder_activation,
                         batch_normalization_decay=encoding_batch_normalization_decay,
@@ -1692,88 +547,96 @@ class AcousticEncoderDecoder(object):
                 else:
                     raise ValueError('Encoder type "%s" is not currently supported' %self.encoder_type)
 
-                self.encoder = encoder
+                return encoder
 
-    def _initialize_classifier(self):
+    def _initialize_classifier(self, classifier_in):
         self.encoding = None
         raise NotImplementedError
 
-    def _augment_encoding(self):
+    def _augment_encoding(self, encoding, encoder=None):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                if self.classify_utterance:
+                if self.task == 'utterance_classifier':
                     if self.binary_classifier:
-                        self.labels = self._binary2integer(tf.round(self.encoding))
-                        self.label_probs = self._bernoulli2categorical(self.encoding)
-                        self.encoding_entropy = self._binary_entropy_with_logits(self.encoding_logits)
-                        self.encoding_entropy_mean = tf.reduce_mean(self.encoding_entropy)
-                        self._regularize(self.encoding_logits, self.entropy_regularizer)
+                        self.labels = binary2integer(tf.round(encoding), session=self.sess)
+                        self.label_probs = bernoulli2categorical(encoding, session=self.sess)
                     else:
-                        if self.classify_utterance:
-                            self.labels = tf.argmax(self.encoding, axis=-1)
-                            self.label_probs = self.encoding
+                        self.labels = tf.argmax(self.encoding, axis=-1)
+                        self.label_probs = self.encoding
 
                 extra_dims = None
 
-                if self.emb_dim:
-                    extra_dims = tf.nn.elu(self.encoder[:,self.k:])
+                if encoder is not None:
+                    if self.emb_dim:
+                        extra_dims = tf.nn.elu(encoder[:,self.k:])
 
-                if self.decoder_use_input_length or self.utt_len_emb_dim:
-                    utt_len = tf.reduce_sum(self.y_mask, axis=1, keepdims=True)
-                    if self.decoder_use_input_length:
-                        if extra_dims is None:
-                            extra_dims = utt_len
-                        else:
-                            extra_dims = tf.concat(
-                            [extra_dims, utt_len],
-                            axis=1
-                        )
-
-                    if self.utt_len_emb_dim:
-                        self.utt_len_emb_mat = tf.identity(
-                            tf.Variable(
-                                tf.random_uniform([int(self.y_mask.shape[1]) + 1, self.utt_len_emb_dim], -1., 1.),
-                                dtype=self.FLOAT_TF
-                            )
-                        )
-
-                        if self.optim_name == 'Nadam':
-                            # Nadam breaks with sparse gradients, have to use matmul
-                            utt_len_emb = tf.one_hot(tf.cast(utt_len[:, 0], dtype=self.INT_TF), int(self.y_mask.shape[1]) + 1)
-                            utt_len_emb = tf.matmul(utt_len_emb, self.utt_len_emb_mat)
-                        else:
-                            utt_len_emb = tf.gather(self.utt_len_emb_mat, tf.cast(utt_len[:, 0], dtype=self.INT_TF), axis=0)
-
-                        if extra_dims is None:
-                            extra_dims = utt_len_emb
-                        else:
-                            extra_dims = tf.concat(
-                                [extra_dims,
-                                 utt_len_emb],
+                    if self.decoder_use_input_length or self.utt_len_emb_dim:
+                        utt_len = tf.reduce_sum(self.y_mask, axis=1, keepdims=True)
+                        if self.decoder_use_input_length:
+                            if extra_dims is None:
+                                extra_dims = utt_len
+                            else:
+                                extra_dims = tf.concat(
+                                [extra_dims, utt_len],
                                 axis=1
                             )
 
-                self.extra_dims = extra_dims
+                        if self.utt_len_emb_dim:
+                            self.utt_len_emb_mat = tf.identity(
+                                tf.Variable(
+                                    tf.random_uniform([int(self.y_mask.shape[1]) + 1, self.utt_len_emb_dim], -1., 1.),
+                                    dtype=self.FLOAT_TF
+                                )
+                            )
 
-                if self.extra_dims is not None:
-                    self.decoder_in = tf.concat([self.encoding, self.extra_dims], axis=1)
+                            if self.optim_name == 'Nadam':
+                                # Nadam breaks with sparse gradients, have to use matmul
+                                utt_len_emb = tf.one_hot(tf.cast(utt_len[:, 0], dtype=self.INT_TF), int(self.y_mask.shape[1]) + 1)
+                                utt_len_emb = tf.matmul(utt_len_emb, self.utt_len_emb_mat)
+                            else:
+                                utt_len_emb = tf.gather(self.utt_len_emb_mat, tf.cast(utt_len[:, 0], dtype=self.INT_TF), axis=0)
+
+                            if extra_dims is None:
+                                extra_dims = utt_len_emb
+                            else:
+                                extra_dims = tf.concat(
+                                    [extra_dims,
+                                     utt_len_emb],
+                                    axis=1
+                                )
+
+                if self.speaker_emb_dim:
+                    speaker_embeddings = self.speaker_embeddings
+                    if extra_dims is None:
+                        extra_dims = speaker_embeddings
+                    else:
+                        extra_dims = tf.concat([extra_dims, speaker_embeddings], axis=1)
+
+                if extra_dims is not None:
+                    decoder_in = tf.concat([encoding, extra_dims], axis=1)
                 else:
-                    self.decoder_in = self.encoding
+                    decoder_in = encoding
 
-    def _initialize_decoder(self):
+                return decoder_in, extra_dims
+
+    def _initialize_decoder(self, decoder_in, n_timesteps):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                decoder = self.decoder_in
+                decoder = decoder_in
                 if self.mask_padding:
                     mask = self.y_mask
                 else:
                     mask = None
 
                 if self.decoder_type.lower() in ['rnn', 'cnn_rnn']:
+                    tile_dims = [1] * len(decoder.shape) + 1
+                    tile_dims[-2] = n_timesteps
+
                     decoder = tf.tile(
                         decoder[..., None, :],
-                        [1, tf.shape(self.y)[1], 1]
-                    ) * self.y_mask[...,None]
+                        tile_dims
+                    )
+                    # decoder *= self.y_mask[...,None]
                     # index = tf.range(self.y.shape[1])[None, ..., None]
                     # index = tf.tile(
                     #     index,
@@ -1782,7 +645,8 @@ class AcousticEncoderDecoder(object):
                     # index = tf.cast(index, dtype=self.FLOAT_TF)
                     # decoder = tf.concat([decoder, index], axis=2)
 
-                    decoder = RNNLayer(
+                    decoder = MultiRNNLayer(
+                        training=self.training,
                         units=self.units_decoder + [self.frame_dim],
                         layers=self.n_layers_decoder,
                         activation=self.decoder_inner_activation,
@@ -1794,10 +658,8 @@ class AcousticEncoderDecoder(object):
                         session=self.sess
                     )(decoder, mask=mask)
 
-                    print(decoder)
-
                     decoder = DenseLayer(
-                        self.training_batch_norm,
+                        training=self.training,
                         units=self.frame_dim,
                         activation=self.decoder_activation,
                         batch_normalization_decay=self.decoder_batch_normalization_decay,
@@ -1805,23 +667,24 @@ class AcousticEncoderDecoder(object):
                     )(decoder)
 
                 elif self.decoder_type.lower() == 'cnn':
-                    assert self.n_timesteps_output is not None, 'n_timesteps_output must be defined when decoder_type == "cnn"'
+                    assert n_timesteps is not None, 'n_timesteps must be defined when decoder_type == "cnn"'
 
                     decoder = DenseLayer(
-                        self.training_batch_norm,
-                        self.n_timesteps_output * self.units_decoder[0],
+                        training=self.training,
+                        units=n_timesteps * self.units_decoder[0],
                         activation=tf.nn.elu,
                         batch_normalization_decay=self.decoder_batch_normalization_decay,
                         session=self.sess
                     )(decoder)
 
-                    decoder = tf.reshape(decoder, (self.batch_len, self.n_timesteps_output, self.units_decoder[0]))
+                    decoder_shape = tf.concat([tf.shape(decoder)[:-2], [n_timesteps, self.units_decoder[0]]], axis=0)
+                    decoder = tf.reshape(decoder, decoder_shape)
 
                     for i in range(self.n_layers_decoder - 1):
                         if i > 0 and self.decoder_resnet_n_layers_inner:
                             decoder = Conv1DResidualLayer(
-                                self.training_batch_norm,
                                 self.conv_kernel_size,
+                                training=self.training,
                                 n_filters=self.units_decoder[i],
                                 padding='same',
                                 layers_inner=self.decoder_resnet_n_layers_inner,
@@ -1832,8 +695,8 @@ class AcousticEncoderDecoder(object):
                             )(decoder)
                         else:
                             decoder = Conv1DLayer(
-                                self.training_batch_norm,
                                 self.conv_kernel_size,
+                                training=self.training,
                                 n_filters=self.units_decoder[i],
                                 padding='same',
                                 activation=self.decoder_inner_activation,
@@ -1841,32 +704,26 @@ class AcousticEncoderDecoder(object):
                                 session=self.sess
                             )(decoder)
 
-                        if self.regularize_correspondences:
-                            states = self.state_probs[self.n_layers_encoder - i - 2]
-                            if self.reverse_targets:
-                                states = states[:, ::-1, :]
-
-                            correspondences = states - decoder
-                            self._regularize(
-                                correspondences,
-                                tf.contrib.layers.l2_regularizer(self.segment_encoding_correspondence_regularizer_scale)
-                            )
+                        self._regularize_correspondences(self.n_layers_encoder - i - 2, decoder)
 
                     decoder = DenseLayer(
-                            self.training_batch_norm,
-                            units=self.n_timesteps_output * self.frame_dim,
+                            training=self.training,
+                            units=n_timesteps * self.frame_dim,
                             activation=self.decoder_inner_activation,
                             batch_normalization_decay=False,
                             session=self.sess
                     )(tf.layers.Flatten()(decoder))
 
-                    decoder = tf.reshape(decoder, (self.batch_len, self.n_timesteps_output, self.frame_dim))
+                    decoder_shape = tf.concat([tf.shape(decoder)[:-2], [n_timesteps, self.frame_dim]], axis=0)
+                    decoder = tf.reshape(decoder, decoder_shape)
 
                 elif self.decoder_type.lower() == 'dense':
-                    assert self.n_timesteps_output is not None, 'n_timesteps_output must be defined when decoder_type == "dense"'
+                    assert n_timesteps is not None, 'n_timesteps must be defined when decoder_type == "dense"'
 
                     for i in range(self.n_layers_decoder - 1):
-                        decoder = tf.layers.Flatten()(decoder)
+
+                        in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(decoder, n_timesteps, self.units_decoder[i], expand_sequence=i==0)
+                        decoder = tf.reshape(decoder, in_shape_flattened)
 
                         if i > 0 and self.decoder_resnet_n_layers_inner:
                             if self.units_decoder[i] != self.units_decoder[i-1]:
@@ -1875,8 +732,8 @@ class AcousticEncoderDecoder(object):
                                 project_inputs = False
 
                             decoder = DenseResidualLayer(
-                                self.training_batch_norm,
-                                units=self.n_timesteps_output * self.units_decoder[i],
+                                training=self.training,
+                                units=n_timesteps * self.units_decoder[i],
                                 layers_inner=self.decoder_resnet_n_layers_inner,
                                 activation=self.decoder_inner_activation,
                                 activation_inner=self.decoder_inner_activation,
@@ -1886,41 +743,128 @@ class AcousticEncoderDecoder(object):
                             )(decoder)
                         else:
                             decoder = DenseLayer(
-                                self.training_batch_norm,
-                                units=self.n_timesteps_output * self.units_decoder[i],
+                                training=self.training,
+                                units=n_timesteps * self.units_decoder[i],
                                 activation=self.decoder_inner_activation,
                                 batch_normalization_decay=self.decoder_batch_normalization_decay,
                                 session=self.sess
                             )(decoder)
 
-                        decoder = tf.reshape(decoder, (self.batch_len, self.n_timesteps_output, self.units_decoder[i]))
+                        decoder = tf.reshape(decoder, out_shape_unflattened)
 
-                        if self.regularize_correspondences:
-                            states = self.state_probs[self.n_layers_encoder - i - 2]
-                            if self.reverse_targets:
-                                states = states[:, ::-1, :]
+                        self._regularize_correspondences(self.n_layers_encoder - i - 2, decoder)
 
-                            correspondences = states - decoder
-                            self._regularize(
-                                correspondences,
-                                tf.contrib.layers.l2_regularizer(self.segment_encoding_correspondence_regularizer_scale)
-                            )
+                    in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(decoder, n_timesteps, self.frame_dim)
+                    decoder = tf.reshape(decoder, in_shape_flattened)
 
-                    decoder = tf.layers.Flatten()(decoder)
                     decoder = DenseLayer(
-                        self.training_batch_norm,
-                        units=self.n_timesteps_output * self.frame_dim,
+                        training=self.training,
+                        units=n_timesteps * self.frame_dim,
                         activation=self.decoder_activation,
                         batch_normalization_decay=None,
                         session=self.sess
                     )(decoder)
 
-                    decoder = tf.reshape(decoder, (self.batch_len, self.n_timesteps_output, self.frame_dim))
+                    decoder = tf.reshape(decoder, out_shape_unflattened)
+
+                elif self.decoder_type.lower() == 'layerwise_rnn':
+                    assert self.n_layers_encoder == self.n_layers_decoder, 'layerwise_rnn requires equal number of layers in encoder and decoder.'
+                    assert self.units_encoder == self.units_decoder[::-1], 'layerwise_rnn requires equal units in each encoder and decoder layer.'
+                    self.decoder_layers = []
+
+                    for i in range(self.n_layers_decoder):
+                        if i == 0:
+                            tile_dims = [1] * len(decoder.shape) + 1
+                            tile_dims[-2] = tf.shape(self.y)[1]
+                            input_cur = tf.tile(
+                                decoder[..., None, :],
+                                tile_dims
+                            ) * self.y_mask[..., None]
+                        else:
+                            input_cur = self.encoder_hidden_states[self.n_layers_decoder - i - 1]
+
+                        output_cur = RNNLayer(
+                            training=self.training,
+                            units=self.units_decoder[i] if i < (self.n_layers_decoder - 1) else self.frame_dim,
+                            activation=self.decoder_inner_activation,
+                            recurrent_activation=self.decoder_recurrent_activation,
+                            return_sequences=True,
+                            session=self.sess
+                        )(input_cur)
+
+                        if i == self.n_layers_decoder - 1:
+                            output_cur = DenseLayer(
+                                training=self.training,
+                                units=self.frame_dim,
+                                activation=self.decoder_activation,
+                                batch_normalization_decay=None,
+                                session=self.sess
+                            )(output_cur)
+
+                        self.decoder_layers.append(output_cur)
+
+                    decoder = self.decoder_layers[-1]
+
+                elif self.decoder_type.lower() == 'layerwise_dense':
+                    assert n_timesteps is not None, 'n_timesteps must be defined when decoder_type == "dense"'
+                    assert self.n_layers_encoder == self.n_layers_decoder, 'layerwise_dense requires equal number of layers in encoder and decoder.'
+                    assert self.units_encoder == self.units_decoder[::-1], 'layerwise_dense requires equal units in each encoder and decoder layer.'
+                    self.decoder_layers = []
+
+                    for i in range(self.n_layers_decoder - 1):
+                        if i == 0:
+                            input_cur = decoder
+                        else:
+                            input_cur = self.encoder_hidden_states[self.n_layers_decoder - i - 1]
+
+                        input_cur = tf.layers.Flatten()(input_cur)
+
+                        if i > 0 and self.decoder_resnet_n_layers_inner:
+                            if self.units_decoder[i] != self.units_decoder[i-1]:
+                                project_inputs = True
+                            else:
+                                project_inputs = False
+
+                            decoder_layer = DenseResidualLayer(
+                                training=self.training,
+                                units=n_timesteps * self.units_decoder[i],
+                                layers_inner=self.decoder_resnet_n_layers_inner,
+                                activation=self.decoder_inner_activation,
+                                activation_inner=self.decoder_inner_activation,
+                                project_inputs=project_inputs,
+                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                session=self.sess
+                            )(input_cur)
+                        else:
+                            decoder_layer = DenseLayer(
+                                training=self.training,
+                                units=n_timesteps * self.units_decoder[i],
+                                activation=self.decoder_inner_activation,
+                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                session=self.sess
+                            )(input_cur)
+
+                        decoder_layer = tf.reshape(decoder_layer, (self.batch_len, n_timesteps, self.units_decoder[i]))
+                        self.decoder_layers.append(decoder_layer)
+
+                    input_cur = tf.layers.Flatten()(self.encoder_hidden_states[0])
+                    decoder_layer = DenseLayer(
+                        training=self.training,
+                        units=n_timesteps * self.frame_dim,
+                        activation=self.decoder_activation,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(input_cur)
+
+                    decoder_layer = tf.reshape(decoder_layer, (self.batch_len, n_timesteps, self.frame_dim))
+                    self.decoder_layers.append(decoder_layer)
+
+                    decoder = self.decoder_layers[-1]
 
                 else:
                     raise ValueError('Decoder type "%s" is not currently supported' %self.decoder_type)
 
-                self.decoder = decoder
+                return decoder
 
     def _initialize_output_model(self):
         self.out = None
@@ -1978,15 +922,33 @@ class AcousticEncoderDecoder(object):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 tf.summary.scalar('loss_summary', self.loss_summary, collections=['metrics'])
-                if self.classify_utterance:
+                if self.task == 'utterance_classifier':
                     tf.summary.scalar('homogeneity', self.homogeneity, collections=['metrics'])
                     tf.summary.scalar('completeness', self.completeness, collections=['metrics'])
                     tf.summary.scalar('v_measure', self.v_measure, collections=['metrics'])
+                    tf.summary.scalar('ami', self.ami, collections=['metrics'])
+                    tf.summary.scalar('fmi', self.fmi, collections=['metrics'])
+
+                elif self.task == 'streaming_autoencoder':
+                    pass
+
+                else:
+                    if 'hmlstm' in self.encoder_type.lower():
+                        for i in range(self.n_layers_encoder - 1):
+                            for s in ['phn', 'wrd']:
+                                tf.summary.scalar('b_p_%d_%s' %(i+1, s), self.segmentation_scores[i][s]['b_p'], collections=['segmentations'])
+                                tf.summary.scalar('b_r_%d_%s' %(i+1, s), self.segmentation_scores[i][s]['b_r'], collections=['segmentations'])
+                                tf.summary.scalar('b_f_%d_%s' %(i+1, s), self.segmentation_scores[i][s]['b_f'], collections=['segmentations'])
+                                tf.summary.scalar('w_p_%d_%s' % (i+1, s), self.segmentation_scores[i][s]['b_p'], collections=['segmentations'])
+                                tf.summary.scalar('w_r_%d_%s' % (i+1, s), self.segmentation_scores[i][s]['b_r'], collections=['segmentations'])
+                                tf.summary.scalar('w_f_%d_%s' % (i+1, s), self.segmentation_scores[i][s]['b_f'], collections=['segmentations'])
+
                 if self.log_graph:
                     self.writer = tf.summary.FileWriter(self.outdir + '/tensorboard/dnnseg', self.sess.graph)
                 else:
                     self.writer = tf.summary.FileWriter(self.outdir + '/tensorboard/dnnseg')
                 self.summary_metrics = tf.summary.merge_all(key='metrics')
+                self.summary_segmentations = tf.summary.merge_all(key='segmentations')
 
     def _initialize_saver(self):
         with self.sess.as_default():
@@ -2018,11 +980,11 @@ class AcousticEncoderDecoder(object):
     def _pairwise_distances(self, targets, preds):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                targets = tf.expand_dims(targets, axis=2)
-                preds = tf.expand_dims(preds, axis=1)
+                targets = tf.expand_dims(targets, axis=-2)
+                preds = tf.expand_dims(preds, axis=-3)
                 offsets = targets - preds
 
-                distances = tf.norm(offsets, axis=3)
+                distances = tf.norm(offsets, axis=-1)
 
                 return distances
 
@@ -2045,12 +1007,12 @@ class AcousticEncoderDecoder(object):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 # Compute dimensions
-                b = tf.shape(D_i)[1]
+                b = tf.shape(D_i)[1:]
 
                 # Extract alignment scores from adjacent cells in preceding row, prepending upper-left alignment to R_im1_jm1
                 R_im1_jm1 = tf.concat(
                     [
-                        tf.fill([1,b], R_i0),
+                        tf.fill(tf.concat([[1],b], axis=0), R_i0),
                         R_im1[:-1, :]
                     ],
                     axis=0
@@ -2061,7 +1023,7 @@ class AcousticEncoderDecoder(object):
                 out = tf.scan(
                     lambda a, x: self._dtw_compute_cell(x[0], x[1], x[2], a, gamma),
                     [D_i, R_im1_jm1, R_im1_j],
-                    initializer=tf.fill([b], np.inf),
+                    initializer=tf.fill(b, np.inf),
                     swap_memory=True
                 )
 
@@ -2073,7 +1035,7 @@ class AcousticEncoderDecoder(object):
                 # Extract dimensions
                 n = tf.shape(D)[0]
                 m = tf.shape(D)[1]
-                b = tf.shape(D)[2]
+                b = tf.shape(D)[2:]
 
                 # Construct the 0th column with appropriate dimensionality
                 R_i0 = tf.concat([[0.], tf.fill([n-1], np.inf)], axis=0)
@@ -2082,7 +1044,7 @@ class AcousticEncoderDecoder(object):
                 out = tf.scan(
                     lambda a, x: self._dtw_inner_scan(x[0], a, x[1], gamma),
                     [D, R_i0],
-                    initializer=tf.fill([m, b], np.inf),
+                    initializer=tf.fill(tf.concat([[m], b], axis=0), np.inf),
                     swap_memory=True
                 )
 
@@ -2126,8 +1088,8 @@ class AcousticEncoderDecoder(object):
     def _soft_dtw_B(self, targets, preds, gamma, mask=None):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                n = tf.shape(targets)[1]
-                b = tf.shape(targets)[0]
+                n = tf.shape(targets)[-2]
+                b = tf.shape(targets)[-1]
 
                 # Compute/transform mask as needed
                 if mask is None:
@@ -2138,33 +1100,31 @@ class AcousticEncoderDecoder(object):
                 # Compute distance matrix
                 D = self._pairwise_distances(targets, preds)
 
-                # Move batch dimension to end so we can scan along time dimensions
-                D = tf.transpose(D, perm=[1, 2, 0])
+                # Move batch dimension(s) to end so we can scan along time dimensions
+                perm = list(range(len(D.shape)))
+                perm = perm[-2:] + perm[:-2]
+                D = tf.transpose(D, perm=perm)
 
                 # Perform soft-DTW alignment
                 R = self._dtw_outer_scan(D, gamma)
 
-                # Move batch dimension back to beginning so indexing works as expected
-                R = tf.transpose(R, perm=[2, 0, 1])
+                # Move batch dimension(s) back to beginning so indexing works as expected
+                perm = list(range(len(D.shape)))
+                perm = perm[2:] + perm[:2]
+                R = tf.transpose(R, perm=perm)
 
                 # Extract final cell of alignment matrix
-                if self.pad_seqs:
-                    target_end_ix = tf.cast(
-                        tf.maximum(
-                            tf.reduce_sum(mask, axis=0) - 1,
-                            tf.zeros([b], dtype=self.FLOAT_TF)
-                        ),
-                        self.INT_TF
-                    )
-                    out = tf.gather(R[:, :, -1], target_end_ix, axis=1)
-                else:
-                    out = R[:, -1, -1]
-
-                # Take the batch mean
-                out = tf.reduce_mean(out)
-
-                self.R = R
-
+                # if self.pad_seqs:
+                #     target_end_ix = tf.cast(
+                #         tf.maximum(
+                #             tf.reduce_sum(mask, axis=0) - 1,
+                #             tf.zeros([b], dtype=self.FLOAT_TF)
+                #         ),
+                #         self.INT_TF
+                #     )
+                #     out = tf.gather(R[..., -1], target_end_ix, axis=1)
+                # else:
+                out = R[..., -1, -1]
 
                 return out
 
@@ -2229,6 +1189,11 @@ class AcousticEncoderDecoder(object):
     # Private utility methods
     ############################################################
 
+    def _extract_backward_targets(self, n):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                pass
+
     ## Thanks to Keisuke Fujii (https://github.com/blei-lab/edward/issues/708) for this idea
     def _clipped_optimizer_class(self, base_optimizer):
         class ClippedOptimizer(base_optimizer):
@@ -2260,76 +1225,299 @@ class AcousticEncoderDecoder(object):
 
         return ClippedOptimizer
 
-    def _binary2integer(self, b):
-        k = int(b.shape[-1])
-        if self.int_type.endswith('128'):
-            assert k <= int(self.int_type[-3:]) / 2, 'The number of classes (2 ** %d) exceeds the capacity of the current integer encoding ("%s")' %(b.shape[-1], self.int_type)
-        else:
-            assert k <= int(self.int_type[-2:]) / 2, 'The number of classes (2 ** %d) exceeds the capacity of the current integer encoding ("%s")' %(b.shape[-1], self.int_type)
-        base2 = 2 ** tf.range(k-1, limit=-1, delta=-1, dtype=self.INT_TF)
-        while len(base2.shape) < len(b.shape):
-            base2 = tf.expand_dims(base2, 0)
-
-        return tf.reduce_sum(tf.cast(b, dtype=self.INT_TF) * base2, axis=-1)
-
-    def _bernoulli2categorical(self, b):
-        k = int(b.shape[-1])
-        if self.int_type.endswith('128'):
-            assert k <= int(self.int_type[-3:]), 'The number of classes (2 ** %d) exceeds the capacity of the current integer encoding ("%s")' % (b.shape[-1], self.int_type)
-        else:
-            assert k <= int(self.int_type[-2:]), 'The number of classes (2 ** %d) exceeds the capacity of the current integer encoding ("%s")' % (b.shape[-1], self.int_type)
-
-        binary_matrix = tf.constant((np.expand_dims(np.arange(2 ** k), -1) & (1 << np.arange(k))).astype(bool).astype(int).T, dtype=self.FLOAT_TF)
-        c = tf.expand_dims(b, -1) * binary_matrix + (1 - tf.expand_dims(b, -1)) * (1 - binary_matrix)
-        c = tf.reduce_prod(c, -2)
-        return c
-
-    def _flat_matrix_diagonal_indices(self, n):
-        out = np.arange(n) + np.arange(n) * n
-        out = out.astype('int')
-
-        return out
-
-    def _flat_matrix_off_diagonal_indices(self, n):
-        offset = np.zeros(n**2 - n)
-        offset[np.arange(n-1) * 10] = 1
-        offset = offset.cumsum()
-
-        out = (np.arange(n**2 - n) + offset).astype('int')
-
-        return out
-
-    def _binary_entropy_with_logits(self, p):
-        with self.sess.as_default():
-            with self.sess.graph.as_default():
-                out = tf.minimum(
-                    tf.nn.sigmoid_cross_entropy_with_logits(logits=p, labels=tf.zeros_like(p)),
-                    tf.nn.sigmoid_cross_entropy_with_logits(logits=p, labels=tf.ones_like(p))
-                )
-
-                return out
-
-    def _binary_entropy_with_logits_regularizer(self, scale):
-        with self.sess.as_default():
-            with self.sess.graph.as_default():
-                return lambda bit_probs: tf.reduce_mean(self._binary_entropy_with_logits(bit_probs)) * scale
-
-    def _cross_entropy_regularizer(self, scale):
-        with self.sess.as_default():
-            with self.sess.graph.as_default():
-                return lambda x: tf.nn.sigmoid_cross_entropy_with_logits(labels=x[0], logits=x[1]) * scale
-
-    def _mse_regularizer(self, scale):
-        with self.sess.as_default():
-            with self.sess.graph.as_default():
-                return lambda offsets: tf.reduce_mean(offsets ** 2) * scale
-
     def _regularize(self, var, regularizer):
         if regularizer is not None:
             with self.sess.as_default():
                 with self.sess.graph.as_default():
                     reg = tf.contrib.layers.apply_regularization(regularizer, [var])
                     self.regularizer_losses.append(reg)
+
+    def _regularize_correspondences(self, layer_number, preds):
+        if self.regularize_correspondences:
+            with self.sess.as_default():
+                with self.sess.graph.as_default():
+                    states = self.encoder_hidden_states[layer_number]
+                    if self.reverse_targets:
+                        states = states[:, ::-1, :]
+
+                    if self.matched_correspondences:
+                        correspondences = states - preds
+                        self._regularize(
+                            correspondences,
+                            tf.contrib.layers.l2_regularizer(self.segment_encoding_correspondence_regularizer_scale)
+                        )
+                    else:
+                        correspondences = self._soft_dtw_B(states, preds, self.dtw_gamma, mask=self.y_mask)
+                        self._regularize(
+                            correspondences,
+                            tf.contrib.layers.l1_regularizer(self.segment_encoding_correspondence_regularizer_scale)
+                        )
+
+    def _get_decoder_shapes(self, decoder, n_timesteps, units, expand_sequence=False):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                decoder_in_shape = tf.shape(decoder)
+                if expand_sequence:
+                    decoder_in_shape_flattened = decoder_in_shape
+                else:
+                    feat = int(decoder.shape[-1])
+                    decoder_in_shape_flattened = tf.concat([decoder_in_shape[:-2], [n_timesteps * feat]], axis=0)
+                decoder_out_shape = tf.concat([decoder_in_shape_flattened[:-1], [n_timesteps, units]], axis=0)
+
+                return decoder_in_shape_flattened, decoder_out_shape
+
+    def _streaming_dynamic_scan_inner(self, targets, prev, encoder_in, left, cur, right):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                prev_loss, state, _, _ = prev
+                if self.batch_normalize_encodings:
+                    encoding_batch_normalization_decay = self.encoder_batch_normalization_decay
+                else:
+                    encoding_batch_normalization_decay = None
+
+                units_utt = self.k
+                if self.emb_dim:
+                    units_utt += self.emb_dim
+
+                log_loss = self.normalize_data and self.constrain_output
+
+                o, h = self.encoder_cell(encoder_in, state)
+                encoder = o[-1][0]
+                encoder = DenseLayer(
+                    self.training,
+                    units=units_utt,
+                    activation=self.encoder_activation,
+                    batch_normalization_decay=encoding_batch_normalization_decay,
+                    session=self.sess
+                )(encoder)
+
+                encoding = self._initialize_classifier(encoder)
+                decoder_in, extra_dims = self._augment_encoding(encoding, encoder=encoder)
+
+                targ_left = targets[cur:left:-1]
+                with tf.variable_scope('left'):
+                    pred_left = self._initialize_decoder(decoder_in, self.window_len_left)
+                with tf.variable_scope('right'):
+                    pred_right = self._initialize_decoder(decoder_in, self.window_len_right)
+
+                loss_left = self._get_loss(targ_left, pred_left, log_loss=log_loss)
+                loss_left /= self.window_len_left
+
+                targ_right = targets[cur + 1:right + 1]
+                loss_right = self._get_loss(targ_right, pred_right, log_loss=log_loss)
+                loss_right /= self.window_len_right
+
+                loss = loss_left + loss_right
+
+                return (prev_loss + loss, h, pred_left, pred_right)
+
+    def _streaming_dynamic_scan(self, input, reset_state=False):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                # Make input time major
+                batch_size = tf.shape(input)[0]
+                n_timesteps = tf.shape(input)[1]
+                input = tf.transpose(input, [1, 0, 2])
+
+                targets = self.X
+                if not self.reconstruct_deltas:
+                    targets = targets[..., :self.n_coef]
+                targets = tf.pad(targets, [[0, 0], [self.window_len_left, self.window_len_right], [0, 0]])
+                targets = tf.transpose(targets, [1, 0, 2])
+                t_lb = tf.range(0, tf.shape(self.X)[1])
+                t = t_lb + self.window_len_left
+                t_rb = t + self.window_len_right
+
+                losses, states, preds_left, preds_right = tf.scan(
+                    lambda a, x: self._streaming_dynamic_scan_inner(targets, a, x[0], x[1], x[2], x[3]),
+                    [input, t_lb, t, t_rb],
+                    initializer=(
+                        0., # Initial loss
+                        self.encoder_state, # Initial state
+                        tf.zeros([batch_size, self.window_len_left, self.frame_dim]), # Initial left prediction
+                        tf.zeros([batch_size, self.window_len_right, self.frame_dim]) # Initial right prediction
+                    )
+                )
+
+                return losses[-1], states, preds_left, preds_right
+
+    def _map_state(self, state):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                fd = {}
+                for i in range(len(self.encoder_state)):
+                    for j in range(len(self.encoder_state[i])):
+                        fd[self.encoder_state[i][j]] = state[i][j]
+
+                return fd
+
+    def _get_segs_and_states(self, X, X_mask, training_batch_norm=False, training_dropout=False):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                if self.pad_seqs:
+                    if not np.isfinite(self.eval_minibatch_size):
+                        minibatch_size = len(X)
+                    else:
+                        minibatch_size = self.eval_minibatch_size
+                else:
+                    minibatch_size = 1
+
+                segmentation_probs = []
+                states = []
+
+                for i in range(0, len(X), minibatch_size):
+                    if self.pad_seqs:
+                        indices = slice(i, i + minibatch_size, 1)
+                    else:
+                        indices = i
+
+                    fd_minibatch = {
+                        self.X: X[indices],
+                        self.X_mask: X_mask[indices],
+                        self.training: training_batch_norm,
+                        self.training: training_dropout
+                    }
+
+                    segmentation_probs_cur, states_cur = self.sess.run(
+                        [self.segmentation_probs, self.encoder_hidden_states[:-1]],
+                        feed_dict=fd_minibatch
+                    )
+
+                    segmentation_probs.append(np.stack(segmentation_probs_cur, axis=-1))
+                    states.append(np.concatenate(states_cur, axis=-1))
+
+                new_segmentation_probs = [np.squeeze(x, axis=-1) for x in np.split(np.concatenate(segmentation_probs, axis=0), 1, axis=-1)]
+                new_states = np.split(np.concatenate(states, axis=0), np.cumsum(self.units_encoder[:-1], dtype='int'), axis=-1)
+
+                return new_segmentation_probs, new_states
+
+    def _collect_previous_segments(self, n, data, segtype, X=None, X_mask=None, training_batch_norm=False, training_dropout=False):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                if X is None or X_mask is None:
+                    sys.stderr.write('Getting input data...\n')
+                    X, X_mask = data.inputs(
+                        segments=segtype,
+                        padding=self.input_padding,
+                        normalize=self.normalize_data,
+                        center=self.center_data,
+                        resample=self.resample_inputs,
+                        max_len=self.max_len
+                    )
+
+                sys.stderr.write('Collecting boundary and state predictions...\n')
+                segmentation_probs, states = self._get_segs_and_states(X, X_mask, training_batch_norm, training_dropout)
+
+                if 'bsn' in self.encoder_boundary_activation.lower():
+                    smoothing_algorithm = None
+                else:
+                    smoothing_algorithm = 'rbf'
+
+                sys.stderr.write('Converting predictions into tables of segments...\n')
+                segment_tables = data.get_segment_tables_from_segmenter_states(
+                    segmentation_probs,
+                    parent_segment_type=segtype,
+                    states=states,
+                    algorithm=smoothing_algorithm,
+                    mask=X_mask,
+                    padding=self.input_padding,
+                    discretize=False
+                )
+
+                sys.stderr.write('Resegmenting input data...\n')
+                y = []
+
+                keep_ix = []
+
+                for l in range(len(segment_tables)):
+                    y_cur, _ = data.targets(
+                        segments=segment_tables[l],
+                        padding='post',
+                        reverse=self.reverse_targets,
+                        normalize=self.normalize_data,
+                        center=self.center_data,
+                        with_deltas=self.reconstruct_deltas,
+                        resample=self.resample_correspondence
+                    )
+                    keep_ix.append(np.random.randint(0, len(y_cur), (n,)))
+
+                    y.append(y_cur[keep_ix[l]])
+
+                sys.stderr.write('Collecting segment embeddings...\n')
+                n_units = self.units_encoder
+                embeddings = []
+                for l in range(len(segment_tables)):
+                    embeddings_cur = []
+                    for f in data.fileIDs:
+                        embeddings_cur.append(segment_tables[l][f][['d%d' %u for u in range(n_units[l])]].as_matrix())
+                    embeddings.append(np.concatenate(embeddings_cur, axis=0)[keep_ix[l]])
+
+                return embeddings, y
+
+    # Thanks to Ralph Mao (https://github.com/RalphMao) for this workaround
+    def _restore_inner(self, path, predict=False, allow_missing=False):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                try:
+                    if predict:
+                        self.ema_saver.restore(self.sess, path)
+                    else:
+                        self.saver.restore(self.sess, path)
+                except tf.errors.DataLossError:
+                    sys.stderr.write('Read failure during load. Trying from backup...\n')
+                    if predict:
+                        self.ema_saver.restore(self.sess, path[:-5] + '_backup.ckpt')
+                    else:
+                        self.saver.restore(self.sess, path[:-5] + '_backup.ckpt')
+                except tf.errors.NotFoundError as err:  # Model contains variables that are missing in checkpoint, special handling needed
+                    if allow_missing:
+                        reader = tf.train.NewCheckpointReader(path)
+                        saved_shapes = reader.get_variable_to_shape_map()
+                        model_var_names = sorted(
+                            [(var.name, var.name.split(':')[0]) for var in tf.global_variables()])
+                        ckpt_var_names = sorted([(var.name, var.name.split(':')[0]) for var in tf.global_variables()
+                                                 if var.name.split(':')[0] in saved_shapes])
+
+                        model_var_names_set = set([x[1] for x in model_var_names])
+                        ckpt_var_names_set = set([x[1] for x in ckpt_var_names])
+
+                        missing_in_ckpt = model_var_names_set - ckpt_var_names_set
+                        if len(missing_in_ckpt) > 0:
+                            sys.stderr.write(
+                                'Checkpoint file lacked the variables below. They will be left at their initializations.\n%s.\n\n' % (
+                                    sorted(list(missing_in_ckpt))))
+                        missing_in_model = ckpt_var_names_set - model_var_names_set
+                        if len(missing_in_model) > 0:
+                            sys.stderr.write(
+                                'Checkpoint file contained the variables below which do not exist in the current model. They will be ignored.\n%s.\n\n' % (
+                                    sorted(list(missing_in_ckpt))))
+
+                        restore_vars = []
+                        name2var = dict(
+                            zip(map(lambda x: x.name.split(':')[0], tf.global_variables()), tf.global_variables()))
+
+                        with tf.variable_scope('', reuse=True):
+                            for var_name, saved_var_name in ckpt_var_names:
+                                curr_var = name2var[saved_var_name]
+                                var_shape = curr_var.get_shape().as_list()
+                                if var_shape == saved_shapes[saved_var_name]:
+                                    restore_vars.append(curr_var)
+
+                        if predict:
+                            self.ema_map = {}
+                            for v in restore_vars:
+                                self.ema_map[self.ema.average_name(v)] = v
+                            saver_tmp = tf.train.Saver(self.ema_map)
+                        else:
+                            saver_tmp = tf.train.Saver(restore_vars)
+
+                        saver_tmp.restore(self.sess, path)
+                    else:
+                        raise err
+
+
+
+
 
 
 
@@ -2353,42 +1541,58 @@ class AcousticEncoderDecoder(object):
     def run_train_step(self, feed_dict, return_losses=True, return_reconstructions=False, return_labels=False):
         return NotImplementedError
 
-    def run_incremental_evaluation(
+    def evaluate_classifier(
             self,
-            X_cv,
-            X_mask_cv,
-            y_cv,
-            y_mask_cv,
-            labels_cv,
-            n_plot=10,
-            ix2label=None,
-            y_means_cv=None,
-            training_batch_norm=False,
-            training_dropout=False,
-            shuffle=False,
-            plot=True,
+            cv_data,
+            X_cv=None,
+            X_mask_cv=None,
+            y_cv=None,
+            y_mask_cv=None,
+            segtype='vad',
             verbose=True
     ):
+        eval_dict = {}
         binary = self.binary_classifier
-        seg = self.encoder_type.lower() in ['cnn_softhmlstm', 'softhmlstm']
 
-        with self.sess.as_default():
-            with self.sess.graph.as_default():
-                self.set_predict_mode(True)
+        if self.task == 'utterance_classifier':
+            if X_cv is None or X_mask_cv is None:
+                X_cv, X_mask_cv = cv_data.inputs(
+                    segments=segtype,
+                    padding=self.input_padding,
+                    normalize=self.normalize_data,
+                    center=self.center_data,
+                    resample=self.resample_inputs,
+                    max_len=self.max_len
+                )
+            if y_cv is None or y_mask_cv is None:
+                y_cv, y_mask_cv = cv_data.targets(
+                    segments=segtype,
+                    padding=self.target_padding,
+                    reverse=self.reverse_targets,
+                    normalize=self.normalize_data,
+                    center=self.center_data,
+                    resample=self.resample_outputs,
+                    max_len=self.max_len
+                )
+            labels_cv = cv_data.labels(one_hot=False, segment_type=segtype)
 
-                if self.pad_seqs:
-                    if not np.isfinite(self.eval_minibatch_size):
-                        minibatch_size = len(y_cv)
-                    else:
-                        minibatch_size = self.eval_minibatch_size
-                    n_minibatch = math.ceil(float(len(y_cv)) / minibatch_size)
-                else:
-                    minibatch_size = 1
-                    n_minibatch = len(y_cv)
-
-                if self.classify_utterance:
+            if self.speaker_emb_dim:
+                speaker = cv_data.segments(segtype).speaker.as_matrix()
+            with self.sess.as_default():
+                with self.sess.graph.as_default():
+                    self.set_predict_mode(True)
                     if verbose:
                         sys.stderr.write('Predicting labels...\n\n')
+
+                    if self.pad_seqs:
+                        if not np.isfinite(self.eval_minibatch_size):
+                            minibatch_size = len(y_cv)
+                        else:
+                            minibatch_size = self.eval_minibatch_size
+                        n_minibatch = math.ceil(float(len(y_cv)) / minibatch_size)
+                    else:
+                        minibatch_size = 1
+                        n_minibatch = len(y_cv)
 
                     to_run = []
 
@@ -2399,30 +1603,25 @@ class AcousticEncoderDecoder(object):
                         encoding = []
                         encoding_entropy = []
                         to_run += [self.encoding_post, self.encoding_entropy]
-
-                    if shuffle:
-                            perm, perm_inv = get_random_permutation(len(y_cv))
+                    else:
+                        encoding = None
 
                     for i in range(0, len(X_cv), minibatch_size):
-                        if shuffle:
-                            if self.pad_seqs:
-                                indices = perm[i:i+minibatch_size]
-                            else:
-                                indices = perm[i]
+                        if self.pad_seqs:
+                            indices = np.arange(i, min(i + minibatch_size, len(X_cv)))
                         else:
-                            if self.pad_seqs:
-                                indices = np.arange(i,i+minibatch_size)
-                            else:
-                                indices = i
+                            indices = i
 
                         fd_minibatch = {
                             self.X: X_cv[indices],
                             self.X_mask: X_mask_cv[indices],
                             self.y: y_cv[indices],
                             self.y_mask: y_mask_cv[indices],
-                            self.training_batch_norm: training_batch_norm,
-                            self.training_dropout: training_dropout
+                            self.training: False
                         }
+
+                        if self.speaker_emb_dim:
+                            fd_minibatch[self.speaker] = speaker[indices]
 
                         out = self.sess.run(
                             to_run,
@@ -2439,26 +1638,29 @@ class AcousticEncoderDecoder(object):
 
                     labels_pred = np.concatenate(labels_pred, axis=0)
 
-                    if shuffle:
-                        labels_pred = labels_pred[perm_inv]
-
                     if binary:
                         encoding = np.concatenate(encoding, axis=0)
                         encoding_entropy = np.concatenate(encoding_entropy, axis=0).mean()
-                        if shuffle:
-                            encoding = encoding[perm_inv]
 
-                    homogeneity = homogeneity_score(labels_cv, labels_pred)
-                    completeness = completeness_score(labels_cv, labels_pred)
-                    v_measure = v_measure_score(labels_cv, labels_pred)
+                    h, c, v = homogeneity_completeness_v_measure(labels_cv, labels_pred)
+                    ami = adjusted_mutual_info_score(labels_cv, labels_pred)
+                    fmi = fowlkes_mallows_score(labels_cv, labels_pred)
+
+                    eval_dict['homogeneity'] = h
+                    eval_dict['completeness'] = c
+                    eval_dict['v_measure'] = v
+                    eval_dict['ami'] = ami
+                    eval_dict['fmi'] = fmi
 
                     if verbose:
                         if self.binary_classifier:
                             sys.stderr.write('Encoding entropy: %s\n\n' % encoding_entropy)
                         sys.stderr.write('Labeling scores (predictions):\n')
-                        sys.stderr.write('  Homogeneity:  %s\n' % homogeneity)
-                        sys.stderr.write('  Completeness: %s\n' % completeness)
-                        sys.stderr.write('  V-measure:    %s\n\n' % v_measure)
+                        sys.stderr.write('  Homogeneity:  %s\n' % h)
+                        sys.stderr.write('  Completeness: %s\n' % c)
+                        sys.stderr.write('  V-measure:    %s\n' % v)
+                        sys.stderr.write('  Adjusted mutual information:    %s\n' % ami)
+                        sys.stderr.write('  Fowlkes-Mallows index:    %s\n\n' % fmi)
 
                     if self.binary_classifier or not self.k:
                         if not self.k:
@@ -2471,19 +1673,289 @@ class AcousticEncoderDecoder(object):
                     labels_rand = np.random.randint(0, k, labels_pred.shape)
 
                     if verbose:
+                        h, c, v = homogeneity_completeness_v_measure(labels_cv, labels_rand)
+                        ami = adjusted_mutual_info_score(labels_cv, labels_rand)
+                        fmi = fowlkes_mallows_score(labels_cv, labels_rand)
                         sys.stderr.write('Labeling scores (random uniform):\n')
-                        sys.stderr.write('  Homogeneity:  %s\n' % homogeneity_score(labels_cv, labels_rand))
-                        sys.stderr.write('  Completeness: %s\n' % completeness_score(labels_cv, labels_rand))
-                        sys.stderr.write('  V-measure:    %s\n\n' % v_measure_score(labels_cv, labels_rand))
+                        sys.stderr.write('  Homogeneity:  %s\n' % h)
+                        sys.stderr.write('  Completeness: %s\n' % c)
+                        sys.stderr.write('  V-measure:    %s\n' % v)
+                        sys.stderr.write('  Adjusted mutual information:    %s\n' % ami)
+                        sys.stderr.write('  Fowlkes-Mallows index:    %s\n' % fmi)
+                    self.set_predict_mode(False)
+        else:
+            if verbose:
+                sys.stderr.write('The system is in segmentation mode and does not perform utterance classification. Skipping classifier evaluation...\n')
+            labels_pred = None
+            encoding = None
 
+        return eval_dict, labels_pred, encoding
+
+    def classify_utterances(
+            self,
+            cv_data=None,
+            X_cv=None,
+            X_mask_cv=None,
+            y_cv=None,
+            y_mask_cv=None,
+            segtype='phn',
+            verbose=True
+    ):
+        eval_dict = {}
+        binary = self.binary_classifier
+
+        if self.task == 'utterance_classifier':
+            if X_cv is None or X_mask_cv is None:
+                X_cv, X_mask_cv = cv_data.inputs(
+                    segments=segtype,
+                    padding=self.input_padding,
+                    normalize=self.normalize_data,
+                    center=self.center_data,
+                    resample=self.resample_inputs,
+                    max_len=self.max_len
+                )
+            if y_cv is None or y_mask_cv is None:
+                y_cv, y_mask_cv = cv_data.targets(
+                    segments=segtype,
+                    padding=self.target_padding,
+                    reverse=self.reverse_targets,
+                    normalize=self.normalize_data,
+                    center=self.center_data,
+                    resample=self.resample_outputs,
+                    max_len=self.max_len
+                )
+
+            segments = cv_data.segments(segment_type=segtype)
+            segments.reset_index(inplace=True)
+
+            classifier_scores, labels_pred, encoding = self.evaluate_classifier(
+                cv_data,
+                X_cv=X_cv,
+                X_mask_cv=X_mask_cv,
+                y_cv=y_cv,
+                y_mask_cv=y_mask_cv,
+                segtype=segtype,
+                verbose=verbose
+            )
+            eval_dict.update(classifier_scores)
+
+            if binary:
+                out_data = pd.DataFrame(encoding, columns=['d%d' % (i+1) for i in range(self.k)])
+                out_data = pd.concat([segments, out_data], axis=1)
+            else:
+                out_data = None
+        else:
+            if verbose:
+                sys.stderr.write('The system is in segmentation mode and does not perform utterance classification. Skipping classifier evaluation...\n')
+            out_data = None
+
+        return out_data, eval_dict
+
+    def run_evaluation(
+            self,
+            cv_data,
+            X_cv=None,
+            X_mask_cv=None,
+            y_cv=None,
+            y_mask_cv=None,
+            n_plot=10,
+            ix2label=None,
+            y_means_cv=None,
+            training_batch_norm=False,
+            training_dropout=False,
+            shuffle=False,
+            segtype='vad',
+            plot=True,
+            verbose=True
+    ):
+        eval_dict = {}
+
+        binary = self.binary_classifier
+        seg = 'hmlstm' in self.encoder_type.lower()
+
+        if X_cv is None or X_mask_cv is None:
+            X_cv, X_mask_cv = cv_data.inputs(
+                segments=segtype,
+                padding=self.input_padding,
+                normalize=self.normalize_data,
+                center=self.center_data,
+                resample=self.resample_inputs,
+                max_len=self.max_len
+            )
+        if y_cv is None or y_mask_cv is None:
+            y_cv, y_mask_cv = cv_data.targets(
+                segments=segtype,
+                padding=self.target_padding,
+                reverse=self.reverse_targets,
+                normalize=self.normalize_data,
+                center=self.center_data,
+                resample=self.resample_outputs,
+                max_len=self.max_len
+            )
+        labels_cv = cv_data.labels(one_hot=False, segment_type=segtype)
+
+        if self.speaker_emb_dim:
+            speaker = cv_data.segments(segtype).speaker.as_matrix()
+
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                self.set_predict_mode(True)
+
+                if self.pad_seqs:
+                    if not np.isfinite(self.eval_minibatch_size):
+                        minibatch_size = len(y_cv)
+                    else:
+                        minibatch_size = self.eval_minibatch_size
+                    n_minibatch = math.ceil(float(len(y_cv)) / minibatch_size)
                 else:
-                    homogeneity = completeness = v_measure = 0.
+                    minibatch_size = 1
+                    n_minibatch = len(y_cv)
+
+                if self.task == 'utterance_classifier':
+                    classifier_scores, labels_pred, encoding = self.evaluate_classifier(
+                        cv_data,
+                        X_cv=X_cv,
+                        X_mask_cv=X_mask_cv,
+                        y_cv=y_cv,
+                        y_mask_cv=y_mask_cv,
+                        segtype=segtype,
+                        verbose=verbose
+                    )
+                    eval_dict.update(classifier_scores)
+                else:
+                    if self.segment_eval_freq and self.global_step.eval(session=self.sess) % self.segment_eval_freq == 0:
+                        if verbose:
+                            sys.stderr.write('Extracting segmenter states...\n')
+
+                        segmentation_probs = [[] for _ in self.segmentation_probs]
+                        states = [[] for _ in self.segmentation_probs]
+
+                        if shuffle:
+                            perm, perm_inv = get_random_permutation(len(y_cv))
+
+                        for i in range(0, len(X_cv), minibatch_size):
+                            if shuffle:
+                                if self.pad_seqs:
+                                    indices = perm[i:i+minibatch_size]
+                                else:
+                                    indices = perm[i]
+                            else:
+                                if self.pad_seqs:
+                                    indices = slice(i, i+minibatch_size, 1)
+                                else:
+                                    indices = i
+
+                            fd_minibatch = {
+                                self.X: X_cv[indices],
+                                self.X_mask: X_mask_cv[indices],
+                                self.y: y_cv[indices],
+                                self.y_mask: y_mask_cv[indices],
+                                self.training: training_batch_norm,
+                                self.training: training_dropout
+                            }
+
+                            if self.speaker_emb_dim:
+                                fd_minibatch[self.speaker] = speaker[indices]
+
+                            segmentation_probs_cur, states_cur = self.sess.run(
+                                [self.segmentation_probs, self.encoder_hidden_states[:-1]],
+                                feed_dict=fd_minibatch
+                            )
+
+                            for j in range(len(self.segmentation_probs)):
+                                segmentation_probs[j].append(segmentation_probs_cur[j])
+                                states[j].append(states_cur[j])
+
+                        new_segmentation_probs = []
+                        new_states = []
+                        for j in range(len(self.segmentation_probs)):
+                            new_segmentation_probs.append(
+                                np.concatenate(segmentation_probs[j], axis=0)
+                            )
+                            new_states.append(
+                                np.concatenate(states[j], axis=0)
+                            )
+                        segmentation_probs = new_segmentation_probs
+                        states = new_states
+
+                        if verbose:
+                            sys.stderr.write('Computing segmentation tables...\n')
+
+                        if 'bsn' in self.encoder_boundary_activation.lower():
+                            smoothing_algorithm = None
+                            n_points = None
+                        else:
+                            smoothing_algorithm = 'rbf'
+                            n_points = 1000
+
+                        tables = cv_data.get_segment_tables_from_segmenter_states(
+                            segmentation_probs,
+                            parent_segment_type=segtype,
+                            states=states,
+                            state_activation=self.encoder_inner_activation,
+                            algorithm=smoothing_algorithm,
+                            algorithm_params=None,
+                            offset=10,
+                            n_points=n_points,
+                            mask=X_mask_cv,
+                            padding=self.input_padding
+                        )
+
+                        segmentation_scores = []
+
+                        sys.stderr.write('\nSEGMENTATION EVAL:\n\n')
+                        for i, f in enumerate(tables):
+                            segmentation_scores.append({'phn': None, 'wrd': None})
+
+                            sys.stderr.write('  Layer %s\n' %(i + 1))
+
+                            s = cv_data.score_segmentation('phn', f, tol=0.02)[0]
+                            B_P, B_R, B_F = f_measure(s['b_tp'], s['b_fp'], s['b_fn'])
+                            W_P, W_R, W_F = f_measure(s['w_tp'], s['w_fp'], s['w_fn'])
+                            sys.stderr.write('    Phonemes:\n')
+                            sys.stderr.write('       B P: %s\n' %B_P)
+                            sys.stderr.write('       B R: %s\n' %B_R)
+                            sys.stderr.write('       B F: %s\n\n' %B_F)
+                            sys.stderr.write('       W P: %s\n' %W_P)
+                            sys.stderr.write('       W R: %s\n' %W_R)
+                            sys.stderr.write('       W F: %s\n\n' %W_F)
+
+                            segmentation_scores[-1]['phn'] = {
+                                'b_p': B_P,
+                                'b_r': B_R,
+                                'b_f': B_F,
+                                'w_p': W_P,
+                                'w_r': W_R,
+                                'w_f': W_F,
+                            }
+
+                            s = cv_data.score_segmentation('wrd', f, tol=0.03)[0]
+                            B_P, B_R, B_F = f_measure(s['b_tp'], s['b_fp'], s['b_fn'])
+                            W_P, W_R, W_F = f_measure(s['w_tp'], s['w_fp'], s['w_fn'])
+                            sys.stderr.write('    Words:\n')
+                            sys.stderr.write('       B P: %s\n' % B_P)
+                            sys.stderr.write('       B R: %s\n' % B_R)
+                            sys.stderr.write('       B F: %s\n\n' % B_F)
+                            sys.stderr.write('       W P: %s\n' % W_P)
+                            sys.stderr.write('       W R: %s\n' % W_R)
+                            sys.stderr.write('       W F: %s\n\n' % W_F)
+
+                            segmentation_scores[-1]['wrd'] = {
+                                'b_p': B_P,
+                                'b_r': B_R,
+                                'b_f': B_F,
+                                'w_p': W_P,
+                                'w_r': W_R,
+                                'w_f': W_F,
+                            }
+
+                            cv_data.dump_segmentations_to_textgrid(outdir=self.outdir, suffix='_l%d' % (i + 1), segments=f)
 
                 if plot:
                     if verbose:
                         sys.stderr.write('Plotting...\n\n')
 
-                    if self.classify_utterance and ix2label is not None:
+                    if self.task == 'utterance_classifier' and ix2label is not None:
                         labels_string = np.vectorize(lambda x: ix2label[x])(labels_cv.astype('int'))
                         titles = labels_string[self.plot_ix]
 
@@ -2504,7 +1976,7 @@ class AcousticEncoderDecoder(object):
 
                     to_run = [self.reconst]
                     if seg:
-                        to_run += [self.segmentation_probs, self.state_probs]
+                        to_run += [self.segmentation_probs, self.encoder_hidden_states]
 
                     if self.pad_seqs:
                         X_cv_plot = X_cv[self.plot_ix]
@@ -2515,9 +1987,12 @@ class AcousticEncoderDecoder(object):
                             self.X_mask: X_mask_cv[self.plot_ix] if self.pad_seqs else [X_mask_cv[ix] for ix in self.plot_ix],
                             self.y: y_cv[self.plot_ix] if self.pad_seqs else [y_cv[ix] for ix in self.plot_ix],
                             self.y_mask: y_mask_cv[self.plot_ix] if self.pad_seqs else [y_mask_cv[ix] for ix in self.plot_ix],
-                            self.training_batch_norm: training_dropout,
-                            self.training_dropout: training_dropout
+                            self.training: training_dropout,
+                            self.training: training_dropout
                         }
+
+                        if self.speaker_emb_dim:
+                            fd_minibatch[self.speaker] = speaker[self.plot_ix]
 
                         out = self.sess.run(
                             to_run,
@@ -2534,8 +2009,8 @@ class AcousticEncoderDecoder(object):
                                 self.X_mask: X_mask_cv[ix],
                                 self.y: y_cv[ix],
                                 self.y_mask: y_mask_cv[ix],
-                                self.training_batch_norm: training_dropout,
-                                self.training_dropout: training_dropout
+                                self.training: training_dropout,
+                                self.training: training_dropout
                             }
 
                             out_cur = self.sess.run(
@@ -2560,60 +2035,118 @@ class AcousticEncoderDecoder(object):
                             for s in out[1]:
                                 segmentation_probs.append(np.stack(s, axis=1))
                             states = out[2]
-
                     else:
                         segmentation_probs = None
+                        states = None
 
-                    self.plot_reconstructions(
+                    if 'bsn' in self.encoder_boundary_activation:
+                        hard_segmentations=True
+                    else:
+                        hard_segmentations=False
+
+                    plot_acoustic_features(
                         X_cv_plot,
                         y_cv_plot,
                         reconst,
                         titles=titles,
-                        target_means=y_means_cv[self.plot_ix] if self.residual_decoder else None,
                         segmentation_probs=segmentation_probs,
                         states=states,
-                        drop_zeros=self.pad_seqs
+                        hard_segmentations=hard_segmentations,
+                        target_means=y_means_cv[self.plot_ix] if self.residual_decoder else None,
+                        dir=self.outdir
                     )
 
-                    if self.classify_utterance:
+                    if self.task == 'utterance_classifier':
                         self.plot_label_histogram(labels_pred)
 
                 self.set_predict_mode(False)
 
-                return homogeneity, completeness, v_measure
+                return eval_dict
 
     def fit(
             self,
-            X,
-            X_mask,
-            y,
-            y_mask,
-            labels,
-            X_cv=None,
-            X_mask_cv=None,
-            y_cv=None,
-            y_mask_cv=None,
-            labels_cv=None,
+            train_data,
+            segtype,
+            cv_data=None,
             n_iter=None,
             ix2label=None,
             n_plot=10,
             verbose=True
     ):
+        if self.global_step.eval(session=self.sess) == 0:
+            self.save()
+
+        n_fold = 512
         if verbose:
             usingGPU = tf.test.is_gpu_available()
             sys.stderr.write('Using GPU: %s\n' % usingGPU)
 
-        if X_cv is None or X_mask_cv is None or y_cv is None or y_mask_cv is None or labels_cv is None:
+        sys.stderr.write('Extracting training and cross-validation data...\n')
+        t0 = time.time()
+
+        if self.task == 'streaming_autoencoder':
+            X, new_series = train_data.features(fold=n_fold, filter=None)
+            n_train = len(X)
+        else:
+            X, X_mask = train_data.inputs(
+                segments=segtype,
+                padding=self.input_padding,
+                max_len=self.max_len,
+                normalize=self.normalize_data,
+                center=self.center_data,
+                resample=self.resample_inputs
+            )
+            y, y_mask = train_data.targets(
+                segments=segtype,
+                padding=self.target_padding,
+                max_len=self.max_len,
+                reverse=self.reverse_targets,
+                normalize=self.normalize_data,
+                center=self.center_data,
+                resample=self.resample_outputs
+            )
+            n_train = len(y)
+
+        if cv_data is None:
+            if self.task == 'streaming_autoencoder':
+                X_cv = X
+            else:
+                X_cv = X
+                X_mask_cv = X_mask
+                y_cv = y
+                y_mask_cv = y_mask
+
             if self.plot_ix is None or len(self.plot_ix) != n_plot:
                 self.plot_ix = np.random.choice(np.arange(len(X)), size=n_plot)
-            X_cv = X
-            X_mask_cv = X_mask
-            y_cv = y
-            y_mask_cv = y_mask
-            labels_cv = labels
         else:
+            if self.task == 'streaming_autoencoder':
+                X_cv = cv_data.features()
+            else:
+                X_cv, X_mask_cv = cv_data.inputs(
+                    segments=segtype,
+                    padding=self.input_padding,
+                    max_len=self.max_len,
+                    normalize=self.normalize_data,
+                    center=self.center_data,
+                    resample=self.resample_inputs
+                )
+                y_cv, y_mask_cv = cv_data.targets(
+                    segments=segtype,
+                    padding=self.target_padding,
+                    max_len=self.max_len,
+                    reverse=self.reverse_targets,
+                    normalize=self.normalize_data,
+                    center=self.center_data,
+                    resample=self.resample_outputs
+                )
+
             if self.plot_ix is None or len(self.plot_ix) != n_plot:
                 self.plot_ix = np.random.choice(np.arange(len(X_cv)), size=n_plot)
+
+        t1 = time.time()
+
+        sys.stderr.write('Training and cross-validation data extracted in %ds\n\n' % (t1 - t0))
+        sys.stderr.flush()
 
         if self.residual_decoder:
             mean_axes = (0, 1)
@@ -2637,6 +2170,9 @@ class AcousticEncoderDecoder(object):
         if n_iter is None:
             n_iter = self.n_iter
 
+        if self.speaker_emb_dim:
+            speaker = train_data.segments(segtype).speaker.as_matrix()
+
         if verbose:
             sys.stderr.write('*' * 100 + '\n')
             sys.stderr.write(self.report_settings())
@@ -2646,28 +2182,36 @@ class AcousticEncoderDecoder(object):
             with self.sess.graph.as_default():
                 if self.pad_seqs:
                     if not np.isfinite(self.minibatch_size):
-                        minibatch_size = len(y)
+                        minibatch_size = n_train
                     else:
                         minibatch_size = self.minibatch_size
-                    n_minibatch = math.ceil(float(len(y)) / minibatch_size)
+                    n_minibatch = math.ceil(float(n_train) / minibatch_size)
                 else:
                     minibatch_size = 1
-                    n_minibatch = len(y)
+                    n_minibatch = n_train
 
-                homogeneity, completeness, v_measure = self.run_incremental_evaluation(
-                    X_cv,
-                    X_mask_cv,
-                    y_cv,
-                    y_mask_cv,
-                    labels_cv,
-                    ix2label=ix2label,
-                    y_means_cv=None if y_means_cv is None else y_means_cv,
-                    plot=True,
-                    verbose=verbose
-                )
+                # if self.task == 'streaming_autoencoder':
+                #     eval_dict = {}
+                # else:
+                #     eval_dict = self.run_evaluation(
+                #         cv_data if cv_data is not None else train_data,
+                #         X_cv=X_cv,
+                #         X_mask_cv=X_mask_cv,
+                #         y_cv=y_cv,
+                #         y_mask_cv=y_mask_cv,
+                #         ix2label=ix2label,
+                #         y_means_cv=None if y_means_cv is None else y_means_cv,
+                #         segtype=segtype,
+                #         plot=True,
+                #         verbose=verbose
+                #     )
 
                 while self.global_step.eval(session=self.sess) < n_iter:
-                    perm, perm_inv = get_random_permutation(len(y))
+                    if self.task == 'streaming_autoencoder':
+                        last_state = None
+                        perm = np.arange(n_train)
+                    else:
+                        perm, perm_inv = get_random_permutation(n_train)
 
                     if verbose:
                         t0_iter = time.time()
@@ -2677,39 +2221,134 @@ class AcousticEncoderDecoder(object):
                         if self.optim_name is not None and self.lr_decay_family is not None:
                             sys.stderr.write('Learning rate: %s\n' %self.lr.eval(session=self.sess))
 
+                    if self.n_correspondence and self.global_step.eval(session=self.sess) + 1 >= self.correspondence_start_iter:
+                        if verbose:
+                            sys.stderr.write('Extracting and caching correspondence autoencoder targets...\n')
+                        segment_embeddings, segment_spans = self._collect_previous_segments(self.n_correspondence, train_data, segtype, X=X, X_mask=X_mask)
+
+                    if verbose:
                         sys.stderr.write('Updating...\n')
                         pb = tf.contrib.keras.utils.Progbar(n_minibatch)
+
                     loss_total = 0.
 
-                    for i in range(0, len(y), minibatch_size):
+                    for i in range(0, n_train, minibatch_size):
                         if self.pad_seqs:
                             indices = perm[i:i+minibatch_size]
                         else:
                             indices = perm[i]
 
                         fd_minibatch = {
-                            self.X: X[indices],
-                            self.X_mask: X_mask[indices],
-                            self.y: y[indices],
-                            self.y_mask: y_mask[indices],
-                            self.training_batch_norm: True,
-                            self.training_dropout: True
+                            self.training: True,
+                            self.training: True
                         }
 
+                        if self.task == 'streaming_autoencoder':
+                            fd_minibatch[self.X] = X[int(indices)]
+                            reset_state = new_series[int(indices)]
+
+                            if self.speaker_emb_dim:
+                                fd_minibatch[self.speaker] = speaker[int(indices)]
+
+                            if reset_state or last_state is None:
+                                state = self.sess.run(self.encoder_zero_state, feed_dict=fd_minibatch)
+                            else:
+                                state = last_state
+
+                            fd_minibatch.update(self._map_state(state))
+
+                        else:
+                            fd_minibatch[self.X] = X[indices]
+                            fd_minibatch[self.X_mask] = X_mask[indices]
+                            fd_minibatch[self.y] = y[indices]
+                            fd_minibatch[self.y_mask] = y_mask[indices]
+
+                            if self.speaker_emb_dim:
+                                fd_minibatch[self.speaker] = speaker[indices]
+
+                            if self.n_correspondence and self.global_step.eval(session=self.sess) + 1 >= self.correspondence_start_iter:
+                                for l in range(len(segment_embeddings)):
+                                    fd_minibatch[self.correspondence_embedding_placeholders[l]] = segment_embeddings[l]
+                                    fd_minibatch[self.correspondence_feature_placeholders[l]] = segment_spans[l]
+
                         info_dict = self.run_train_step(fd_minibatch)
-                        metric_cur = info_dict['loss']
+                        loss_cur = info_dict['loss']
+                        reg_cur = info_dict['regularizer_loss']
 
                         if self.ema_decay:
                             self.sess.run(self.ema_op)
-                        if not np.isfinite(metric_cur):
-                            metric_cur = 0
-                        loss_total += metric_cur
+                        if not np.isfinite(loss_cur):
+                            loss_cur = 0
+                        loss_total += loss_cur
 
                         self.sess.run(self.incr_global_batch_step)
                         if verbose:
-                            pb.update((i/minibatch_size)+1, values=[('loss', metric_cur)])
+                            pb.update((i/minibatch_size)+1, values=[('loss', loss_cur), ('reg', reg_cur)])
 
                         self.check_numerics()
+
+                        if self.task == 'streaming_autoencoder':
+                            X_plot = fd_minibatch[self.X]
+                            x_len = X_plot.shape[1]
+
+                            last_state = []
+                            states = info_dict['encoder_states']
+                            encoder_hidden_states = [states[i][1] for i in range(len(states))]
+                            segmentations = [states[i][2] for i in range(len(states) - 1)]
+
+                            for i in range(len(states)):
+                                state_layer = []
+                                for j in range(len(states[i])):
+                                    state_layer.append(states[i][j][-1])
+                                last_state.append(tuple(state_layer))
+                            last_state = tuple(last_state)
+
+                            if x_len > self.window_len_left + self.window_len_right:
+                                ix = np.random.randint(self.window_len_left, x_len-self.window_len_right)
+                                lb = max(-1, ix - self.window_len_left)
+                                rb = min(x_len, ix + self.window_len_right + 1)
+                                length_left = ix - lb
+                                length_right = rb - (ix + 1)
+                                preds_left = info_dict['out_left']
+                                preds_right = info_dict['out_right']
+                                segmentation_probs = []
+                                for l in segmentations:
+                                    l = np.swapaxes(l, 0, 1)
+                                    segmentation_probs.append(l[:,:ix])
+                                segmentation_probs = np.concatenate(segmentation_probs, axis=2)
+                                states = []
+                                for l in encoder_hidden_states:
+                                    l = np.swapaxes(l, 0, 1)
+                                    states.append(l[:,:ix])
+
+                                y_plot_left = np.zeros((1, self.window_len_left, self.frame_dim))
+                                y_plot_left[:, -length_left:] = X_plot[:,ix:lb:-1,:self.frame_dim]
+                                y_plot_right = np.zeros((1, self.window_len_right, self.frame_dim))
+                                y_plot_right[:, :length_right] = X_plot[:,ix+1:rb,:self.frame_dim]
+                                reconst_left = preds_left[ix,:X_plot.shape[0]]
+                                reconst_right = preds_right[ix,:X_plot.shape[0]]
+
+                                plot_acoustic_features(
+                                    X_plot[:, :ix],
+                                    y_plot_left,
+                                    reconst_left,
+                                    segmentation_probs=segmentation_probs,
+                                    states=states,
+                                    drop_zeros=False,
+                                    dir=self.outdir,
+                                    suffix='_left.png'
+                                )
+
+                                plot_acoustic_features(
+                                    X_plot[:, :ix],
+                                    y_plot_right,
+                                    reconst_right,
+                                    segmentation_probs=segmentation_probs,
+                                    states=states,
+                                    drop_zeros=False,
+                                    dir=self.outdir,
+                                    suffix='_right.png'
+                                )
 
                     loss_total /= n_minibatch
 
@@ -2728,29 +2367,51 @@ class AcousticEncoderDecoder(object):
 
                             self.save()
 
-                            homogeneity, completeness, v_measure = self.run_incremental_evaluation(
-                                X_cv,
-                                X_mask_cv,
-                                y_cv,
-                                y_mask_cv,
-                                labels_cv,
-                                ix2label=ix2label,
-                                y_means_cv=None if y_means_cv is None else y_means_cv,
-                                plot=True,
-                                verbose=verbose
-                            )
+                            if self.task == 'streaming_autoencoder':
+                                eval_dict = {}
+                            else:
+                                eval_dict = self.run_evaluation(
+                                    cv_data if cv_data is not None else train_data,
+                                    X_cv=X_cv,
+                                    X_mask_cv=X_mask_cv,
+                                    y_cv=y_cv,
+                                    y_mask_cv=y_mask_cv,
+                                    ix2label=ix2label,
+                                    y_means_cv=None if y_means_cv is None else y_means_cv,
+                                    segtype=segtype,
+                                    plot=True,
+                                    verbose=verbose
+                                )
 
                             fd_summary = {
                                 self.loss_summary: loss_total
                             }
 
-                            if self.classify_utterance:
-                                fd_summary[self.homogeneity] = homogeneity
-                                fd_summary[self.completeness] = completeness
-                                fd_summary[self.v_measure] = v_measure
+                            if self.task == 'utterance_classifier':
+                                fd_summary[self.homogeneity] = eval_dict['homogeneity']
+                                fd_summary[self.completeness] = eval_dict['completeness']
+                                fd_summary[self.v_measure] = eval_dict['v_measure']
+                                fd_summary[self.ami] = eval_dict['ami']
+                                fd_summary[self.fmi] = eval_dict['fmi']
+
 
                             summary_metrics = self.sess.run(self.summary_metrics, feed_dict=fd_summary)
                             self.writer.add_summary(summary_metrics, self.global_step.eval(session=self.sess))
+
+                            if 'segmentation_scores' in eval_dict and self.task != 'streaming_autoencoder' and 'hmlstm' in self.encoder_type.lower():
+                                segmentation_scores = eval_dict['segmentation_scores']
+                                for i in range(self.n_layers_encoder - 1):
+                                    for s in ['phn', 'wrd']:
+                                        fd_summary[self.segmentation_scores[i][s]['b_p']] = segmentation_scores[i][s]['b_p']
+                                        fd_summary[self.segmentation_scores[i][s]['b_r']] = segmentation_scores[i][s]['b_r']
+                                        fd_summary[self.segmentation_scores[i][s]['b_f']] = segmentation_scores[i][s]['b_f']
+                                        fd_summary[self.segmentation_scores[i][s]['w_p']] = segmentation_scores[i][s]['w_p']
+                                        fd_summary[self.segmentation_scores[i][s]['w_r']] = segmentation_scores[i][s]['w_r']
+                                        fd_summary[self.segmentation_scores[i][s]['w_f']] = segmentation_scores[i][s]['w_f']
+
+                                    summary_segmentations = self.sess.run(self.summary_segmentations, feed_dict=fd_summary)
+                                    self.writer.add_summary(summary_segmentations, self.global_step.eval(session=self.sess))
+
 
                         else:
                             if verbose:
@@ -2761,33 +2422,6 @@ class AcousticEncoderDecoder(object):
                     if verbose:
                         t1_iter = time.time()
                         sys.stderr.write('Iteration time: %.2fs\n' % (t1_iter - t0_iter))
-
-    def plot_reconstructions(
-            self,
-            inputs,
-            targets,
-            preds,
-            drop_zeros=True,
-            titles=None,
-            segmentation_probs=None,
-            states=None,
-            target_means=None,
-            dir=None
-    ):
-        if dir is None:
-            dir = self.outdir
-
-        plot_acoustic_features(
-            inputs,
-            targets,
-            preds,
-            drop_zeros=drop_zeros,
-            titles=titles,
-            segmentation_probs=segmentation_probs,
-            states=states,
-            target_means=target_means,
-            dir=dir
-        )
 
     def plot_label_histogram(self, labels_pred, dir=None):
         if dir is None:
@@ -2814,6 +2448,20 @@ class AcousticEncoderDecoder(object):
             dir=dir
         )
 
+    def initialized(self):
+        """
+        Check whether model has been initialized.
+
+        :return: ``bool``; whether the model has been initialized.
+        """
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                uninitialized = self.sess.run(self.report_uninitialized)
+                if len(uninitialized) == 0:
+                    return True
+                else:
+                    return False
+
     def save(self, dir=None):
         if dir is None:
             dir = self.outdir
@@ -2839,32 +2487,29 @@ class AcousticEncoderDecoder(object):
                     with open(dir + '/m.obj', 'wb') as f:
                         pickle.dump(self, f)
 
-    def load(self, dir=None, predict=False, restore=True):
-        if dir is None:
-            dir = self.outdir
+    def load(self, outdir=None, predict=False, restore=True, allow_missing=True):
+        """
+        Load weights from a DNN-Seg checkpoint and/or initialize the DNN-Seg model.
+        Missing weights in the checkpoint will be kept at their initializations, and unneeded weights in the checkpoint will be ignored.
+
+        :param outdir: ``str``; directory in which to search for weights. If ``None``, use model defaults.
+        :param predict: ``bool``; load EMA weights because the model is being used for prediction. If ``False`` load training weights.
+        :param restore: ``bool``; restore weights from a checkpoint file if available, otherwise initialize the model. If ``False``, no weights will be loaded even if a checkpoint is found.
+        :param allow_missing: ``bool``; load all weights found in the checkpoint file, allowing those that are missing to remain at their initializations. If ``False``, weights in checkpoint must exactly match those in the model graph, or else an error will be raised. Leaving set to ``True`` is helpful for backward compatibility, setting to ``False`` can be helpful for debugging.
+        :return:
+        """
+        if outdir is None:
+            outdir = self.outdir
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                if restore and os.path.exists(dir + '/checkpoint'):
-                    try:
-                        if predict:
-                            if self.ema_decay:
-                                self.ema_saver.restore(self.sess, dir + '/model.ckpt')
-                            else:
-                                sys.stderr.write('EMA is not turned on for this model. Ignoring command to load into predict mode.\n')
-                        else:
-                            self.saver.restore(self.sess, dir + '/model.ckpt')
-                    except:
-                        if predict:
-                            if self.ema_decay:
-                                self.ema_saver.restore(self.sess, dir + '/model_backup.ckpt')
-                            else:
-                                sys.stderr.write('EMA is not turned on for this model. Ignoring command to load into predict mode.\n')
-                        else:
-                            self.saver.restore(self.sess, dir + '/model_backup.ckpt')
+                if not self.initialized():
+                    self.sess.run(tf.global_variables_initializer())
+                    tf.tables_initializer().run()
+                if restore and os.path.exists(outdir + '/checkpoint'):
+                    self._restore_inner(outdir + '/model.ckpt', predict=predict, allow_missing=allow_missing)
                 else:
                     if predict:
                         sys.stderr.write('No EMA checkpoint available. Leaving internal variables unchanged.\n')
-                    self.sess.run(tf.global_variables_initializer())
 
     def set_predict_mode(self, mode):
         with self.sess.as_default():
@@ -2882,16 +2527,6 @@ class AcousticEncoderDecoder(object):
         return out
 
 
-
-
-
-
-
-
-
-
-
-
 class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
     _INITIALIZATION_KWARGS = UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
 
@@ -2907,9 +2542,10 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                      for x in _INITIALIZATION_KWARGS])
     __doc__ = _doc_header + _doc_args + _doc_kwargs
 
-    def __init__(self, k, **kwargs):
+    def __init__(self, k, train_data, **kwargs):
         super(AcousticEncoderDecoderMLE, self).__init__(
-            k=k,
+            k,
+            train_data,
             **kwargs
         )
 
@@ -2943,57 +2579,278 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
         if len(md) > 0:
             sys.stderr.write('Saved model contained unrecognized attributes %s which are being ignored\n' %sorted(list(md.keys())))
 
-    def _initialize_classifier(self):
+    def _initialize_classifier(self, classifier_in):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                self.encoding_logits = self.encoder[:, :self.k]
+                encoding_logits = classifier_in[..., :self.k]
 
-                if self.classify_utterance:
+                if self.task == 'utterance_classifier':
                     if self.binary_classifier:
-                        self.encoding = tf.sigmoid(self.encoding_logits)
+                        encoding_logits *= 1 + 0.25 * tf.cast(self.global_step, dtype=self.FLOAT_TF)
+                        if self.state_slope_annealing_rate:
+                            rate = self.state_slope_annealing_rate
+                            slope_coef = tf.minimum(10., 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
+                            encoding_logits *= slope_coef
+                        encoding_probs = tf.sigmoid(encoding_logits)
+                        encoding = encoding_probs
+                        encoding = get_activation(
+                            self.encoder_state_discretizer,
+                            training=self.training,
+                            session=self.sess,
+                            from_logits=False
+                        )(encoding)
+                        self.encoding_entropy = binary_entropy(encoding_logits, from_logits=True, session=self.sess)
+                        self.encoding_entropy_mean = tf.reduce_mean(self.encoding_entropy)
+                        self._regularize(encoding_logits, self.entropy_regularizer)
+                        self._regularize(encoding, self.boundary_regularizer)
                     else:
-                        self.encoding = tf.nn.softmax(self.encoding_logits)
+                        encoding = tf.nn.softmax(encoding_logits)
                 else:
-                    self.encoding = tf.nn.elu(self.encoding_logits)
+                    encoding = encoding_logits
+
+                return encoding
 
     def _initialize_output_model(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                if self.normalize_data and self.constrain_output:
-                    self.out = tf.sigmoid(self.decoder)
+                if self.task != 'streaming_autoencoder':
+                    if self.normalize_data and self.constrain_output:
+                        self.out = tf.sigmoid(self.decoder)
+                    else:
+                        self.out = self.decoder
+
+                    # if self.n_correspondence:
+                    #     self.correspondence_autoencoders = []
+                    #     for l in range(self.n_layers_encoder - 1):
+                    #         correspondence_autoencoder = self._initialize_decoder(self.encoder_hidden_states[l], self.resample_correspondence)
+                    #         self.correspondence_autoencoders.append(correspondence_autoencoder)
+
+    def _get_loss(self, targets, preds, use_dtw=False, layerwise=False, log_loss=False, mask=None, weights=None, reduce=True):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                loss = 0
+                if use_dtw:
+                    if layerwise:
+                        for i in range(self.n_layers_decoder):
+                            pred = self.decoder_layers[i]
+                            if i < self.n_layers_decoder - 1:
+                                targ = self.encoder_hidden_states[self.n_layers_decoder - i - 2]
+                            else:
+                                targ = self.y
+                            loss_cur = self._soft_dtw_B(targ, pred, self.dtw_gamma, mask=mask)
+                            if weights is not None:
+                                loss_cur *= weights
+                            if reduce:
+                                loss_cur = tf.reduce_mean(loss_cur)
+                            loss += loss_cur
+                    else:
+                        loss_cur = self._soft_dtw_B(targets, preds, self.dtw_gamma, mask=mask)
+                        if weights is not None:
+                            loss_cur *= weights
+                        if reduce:
+                            loss_cur = tf.reduce_mean(loss_cur)
+                        loss += loss_cur
                 else:
-                    self.out = self.decoder
+                    if log_loss:
+                        if mask is not None:
+                            loss += tf.losses.log_loss(targets, preds, weights=mask[..., None])
+                        else:
+                            loss += tf.losses.log_loss(targets, preds)
+                    else:
+                        if layerwise:
+                            for i in range(self.n_layers_decoder):
+                                pred = self.decoder_layers[i]
+                                if i < self.n_layers_decoder - 1:
+                                    targ = self.encoder_hidden_states[self.n_layers_decoder - i - 2]
+                                else:
+                                    targ = targets
+                                loss_cur = (targ - pred) ** 2
+                                if mask is not None:
+                                    while len(mask.shape) < len(loss_cur.shape):
+                                        mask = mask[..., None]
+                                    loss_cur *= mask
+                                if weights is not None:
+                                    while len(weights.shape) < len(loss_cur.shape):
+                                        weights = weights[..., None]
+                                    loss_cur *= weights
+                                if reduce:
+                                    loss += tf.reduce_mean(loss_cur)
+                                else:
+                                    loss += loss_cur
+                        else:
+                            loss_cur = (targets - preds) ** 2
+                            if mask is not None:
+                                while len(mask.shape) < len(loss_cur.shape):
+                                    mask = mask[..., None]
+                                loss_cur *= mask
+                            if weights is not None:
+                                while len(weights.shape) < len(loss_cur.shape):
+                                    weights = weights[..., None]
+                                loss_cur *= weights
+                            if reduce:
+                                loss_cur = tf.reduce_mean(loss_cur)
+                            loss += loss_cur
+
+                return loss
+
 
     def _initialize_objective(self, n_train):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 # Define access points to important layers
-                self.reconst = self.out
-                if not self.dtw_gamma:
-                    self.reconst *= self.y_mask[..., None]
 
-                self.encoding_post = self.encoding
-                if self.classify_utterance:
-                    self.labels_post = self.labels
-                    self.label_probs_post = self.label_probs
+                IMPLEMENTATION = 2
+                K = 5
 
-                if self.use_dtw:
-                    loss = self._soft_dtw_B(self.y, self.out, self.dtw_gamma, mask=self.y_mask)
+                if self.task == 'streaming_autoencoder':
+                    units_utt = self.k
+                    if self.emb_dim:
+                        units_utt += self.emb_dim
+
+                    self.encoder_cell = HMLSTMCell(
+                        self.units_encoder + [units_utt],
+                        self.n_layers_encoder,
+                        activation=self.encoder_inner_activation,
+                        inner_activation=self.encoder_inner_activation,
+                        recurrent_activation=self.encoder_recurrent_activation,
+                        boundary_activation=self.encoder_boundary_activation,
+                        bottomup_regularizer=self.encoder_weight_regularization,
+                        recurrent_regularizer=self.encoder_weight_regularization,
+                        topdown_regularizer=self.encoder_weight_regularization,
+                        boundary_regularizer=self.encoder_weight_regularization,
+                        bias_regularizer=None,
+                        layer_normalization=self.encoder_layer_normalization,
+                        refeed_boundary=True,
+                        power=self.boundary_power,
+                        boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
+                        state_slope_annealing_rate=self.slope_annealing_rate,
+                        state_discretizer=self.encoder_state_discretizer,
+                        global_step=self.global_step,
+                        implementation=2
+                    )
+
+                    self.encoder_zero_state = self.encoder_cell.zero_state(tf.shape(self.X)[0], self.FLOAT_TF)
+                    encoder_state = []
+                    for i in range(len(self.encoder_zero_state)):
+                        state_layer = []
+                        for j in range(len(self.encoder_zero_state[i])):
+                            state_layer.append(tf.placeholder(self.FLOAT_TF, shape=self.encoder_zero_state[i][j].shape))
+                        encoder_state.append(tuple(state_layer))
+
+                    self.encoder_state = tuple(encoder_state)
+                    loss, self.encoder_states, self.out_left, self.out_right = self._streaming_dynamic_scan(self.X)
+
+                    self.encoder_hidden_states = [self.encoder_states[i][1] for i in range(len(self.encoder_states))]
+                    self.segmentation_probs = [self.encoder_states[i][2] for i in range(len(self.encoder_states) - 1)]
+
                 else:
-                    if self.normalize_data and self.constrain_output:
-                        if self.mask_padding:
-                            loss = tf.losses.log_loss(self.y, self.out, weights=self.y_mask[..., None])
-                        else:
-                            loss = tf.losses.log_loss(self.y, self.out)
-                    else:
-                        if self.mask_padding:
-                            loss = tf.losses.mean_squared_error(self.y, self.out, weights=self.y_mask[..., None])
-                        else:
-                            loss = tf.losses.mean_squared_error(self.y, self.out)
+                    self.reconst = self.out
+                    if not self.dtw_gamma:
+                        self.reconst *= self.y_mask[..., None]
+
+                    self.encoding_post = self.encoding
+                    if self.task == 'utterance_classifier':
+                        self.labels_post = self.labels
+                        self.label_probs_post = self.label_probs
+
+                    targets = self.y
+                    preds = self.out
+
+                    loss = self._get_loss(
+                        targets,
+                        preds,
+                        use_dtw=self.use_dtw,
+                        layerwise='layerwise' in self.decoder_type.lower(),
+                        log_loss=self.normalize_data and self.constrain_output,
+                        mask=self.y_mask if self.mask_padding else None
+                    )
+
+                    if self.n_correspondence:
+                        for l in range(self.n_layers_encoder - 1):
+                            def compute_loss_cur():
+                                correspondence_autoencoder = self._initialize_decoder(self.encoder_hidden_states[l], self.resample_correspondence)
+
+                                targets = tf.expand_dims(tf.expand_dims(self.correspondence_feature_placeholders[l], axis=0), axis=0)
+                                preds = correspondence_autoencoder
+
+                                embeddings_by_timestep = self.encoder_hidden_states[l]
+                                embeddings_by_timestep /= (tf.norm(embeddings_by_timestep, axis=-1, keepdims=True) + self.epsilon)
+
+                                embeddings_by_segment = self.correspondence_embedding_placeholders[l]
+                                embeddings_by_segment /= (tf.norm(embeddings_by_segment, axis=-1, keepdims=True) + self.epsilon)
+
+                                cos_sim = tf.tensordot(embeddings_by_timestep, tf.transpose(embeddings_by_segment, perm=[1,0]), axes=1)
+                                
+                                alpha = 10
+                                weights = cos_sim
+
+                                if IMPLEMENTATION == 1:
+                                    weights = tf.nn.softmax(weights * alpha, axis=-1)
+                                    weights = tf.expand_dims(tf.expand_dims(weights, -1), -1)
+                                    targets = tf.reduce_sum(targets * weights, axis=2)
+
+                                    loss_cur = self._get_loss(
+                                        targets,
+                                        preds,
+                                        use_dtw=self.use_dtw,
+                                        log_loss=self.normalize_data and self.constrain_output,
+                                        reduce=False
+                                    )
+                                elif IMPLEMENTATION == 2:
+                                    ix = tf.argmax(weights, axis=-1)
+                                    targets = tf.gather(self.correspondence_feature_placeholders[l], ix)
+
+                                    loss_cur = self._get_loss(
+                                        targets,
+                                        preds,
+                                        use_dtw=self.use_dtw,
+                                        log_loss=self.normalize_data and self.constrain_output,
+                                        reduce=False
+                                    )
+                                    # loss_cur = 0
+                                    # _, k_best = tf.nn.top_k(weights, k=K)
+                                    # for k in range(K):
+                                    #     ix = k_best[..., k]
+                                    #     targets = tf.gather(self.X_correspondence[l], ix)
+                                    #
+                                    #     loss_cur += self._get_loss(
+                                    #         targets,
+                                    #         preds,
+                                    #         use_dtw=self.use_dtw,
+                                    #         log_loss=self.normalize_data and self.constrain_output,
+                                    #         reduce=False
+                                    #     )
+                                else:
+                                    weights = tf.nn.softmax(weights * alpha, axis=-1)
+                                    preds = tf.expand_dims(preds, axis=2)
+
+                                    loss_cur = self._get_loss(
+                                        targets,
+                                        preds,
+                                        use_dtw=self.use_dtw,
+                                        log_loss=self.normalize_data and self.constrain_output,
+                                        weights=weights,
+                                        reduce=False
+                                    )
+                                    loss_cur = tf.reduce_sum(loss_cur, axis=2)
+
+                                seg_probs = self.segmentation_probs[l]
+                                while len(seg_probs.shape) < len(loss_cur.shape):
+                                    seg_probs = seg_probs[..., None]
+                                loss_cur *= seg_probs
+                                loss_cur = tf.reduce_mean(loss_cur) * self.correspondence_loss_weight
+
+                                return loss_cur
+
+                            loss_cur = tf.cond(self.global_step + 1 >= self.correspondence_start_iter, compute_loss_cur, lambda: 0.)
+
+                            self.regularizer_losses.append(loss_cur)
 
                 if len(self.regularizer_losses) > 0:
                     self.regularizer_loss_total = tf.add_n(self.regularizer_losses)
-                    loss = loss + self.regularizer_loss_total
+                    loss += self.regularizer_loss_total
+                else:
+                    self.regularizer_loss_total = tf.constant(0., dtype=self.FLOAT_TF)
 
                 self.loss = loss
                 self.optim = self._initialize_optimizer(self.optim_name)
@@ -3003,6 +2860,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
             self,
             feed_dict,
             return_loss=True,
+            return_regularizer_loss=True,
             return_reconstructions=False,
             return_labels=False,
             return_label_probs=False,
@@ -3017,6 +2875,9 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
             if return_loss:
                 to_run.append(self.loss)
                 to_run_names.append('loss')
+            if return_regularizer_loss:
+                to_run.append(self.regularizer_loss_total)
+                to_run_names.append('regularizer_loss')
             if return_reconstructions:
                 to_run.append(self.reconst)
                 to_run_names.append('reconst')
@@ -3029,9 +2890,18 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
             if return_encoding_entropy:
                 to_run.append(self.encoding_entropy_mean)
                 to_run_names.append('encoding_entropy')
-            if self.encoder_type.lower() in ['cnn_softhmlstm', 'softhmlstm'] and return_segmentation_probs:
+            if self.encoder_type.lower() in ['cnn_hmlstm', 'hmlstm'] and return_segmentation_probs:
                 to_run.append(self.segmentation_probs)
                 to_run_names.append('segmentation_probs')
+            if self.task == 'streaming_autoencoder':
+                to_run.append(self.encoder_states)
+                to_run.append(self.segmentation_probs)
+                to_run.append(self.out_left)
+                to_run.append(self.out_right)
+                to_run_names.append('encoder_states')
+                to_run_names.append('segmentation_probs')
+                to_run_names.append('out_left')
+                to_run_names.append('out_right')
 
             output = self.sess.run(to_run, feed_dict=feed_dict)
 

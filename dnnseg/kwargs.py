@@ -144,10 +144,34 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Path to output directory, where logs and model parameters are saved."
     ),
     Kwarg(
-        'classify_utterance',
-        False,
-        bool,
-        "Whether to perform unsupervised classification at the utterance level. Encodes the utterance embedding as binary or categorical and scores classification at test time."
+        'task',
+        'autoencoder',
+        str,
+        "Task to perform. One of ``['utterance_classifier', 'autoencoder', 'streaming_autoencoder']``."
+    ),
+    Kwarg(
+        'n_correspondence',
+        None,
+        [int, None],
+        "Number of discovered segments to use to compute correspondence autoencoder auxiliary loss. If ``0`` or ``None``, do not use correpondence autoencoder."
+    ),
+    Kwarg(
+        'resample_correspondence',
+        25,
+        int,
+        "Number of timesteps to which correspondence autoencoder targets should be resampled. Ignored if **n_correspondence** is ``0`` or ``None``."
+    ),
+    Kwarg(
+        'correspondence_start_iter',
+        1,
+        int,
+        "Iteration number at which to start minimizing correpondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
+    ),
+    Kwarg(
+        'correspondence_loss_weight',
+        1.,
+        float,
+        "Coefficient by which to scale correspondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
     ),
     Kwarg(
         'binary_classifier',
@@ -160,6 +184,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [int, None],
         "Append **emb_dim** ELU-activated pass-through channels to the classifier output for capturing category-internal variation. If ``None`` or ``0``, the encoding consists exclusively of the classifier output."
+    ),
+    Kwarg(
+        'speaker_emb_dim',
+        None,
+        [int, None],
+        "Append a **speaker_emb_dim** dimensional embedding of the speaker ID to each acoustic frame and to the utterance embedding. If ``None`` or ``0``, no speaker embedding used."
+    ),
+    Kwarg(
+        'speaker_ids',
+        '',
+        str,
+        "Space-delimited list of string IDs for the speakers in the training data. Ignored if **speaker_emb_dim** is ``None`` or ``0``."
     ),
     Kwarg(
         'utt_len_emb_dim',
@@ -213,10 +249,36 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['boundary_activation']
     ),
     Kwarg(
+        'encoder_weight_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder weight regularization. If ``float``, scale of encoder L2 weight regularization. If ``None``, no encoder weight regularization."
+    ),
+    Kwarg(
         'boundary_power',
         None,
         [int, None],
         "Power to raise boundary probabilities to for information flow in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM."
+    ),
+    Kwarg(
+        'boundary_slope_annealing_rate',
+        None,
+        [float, None],
+        "Whether to anneal the slopes of the boundary activations.",
+        aliases=['slope_annealing_rate']
+    ),
+    Kwarg(
+        'state_slope_annealing_rate',
+        None,
+        [float, None],
+        "Whether to anneal the slopes of the hidden state activations.",
+        aliases=['slope_annealing_rate']
+    ),
+    Kwarg(
+        'encoder_state_discretizer',
+        None,
+        [str, None],
+        "Discretization function to apply to encoder hidden states, one of ``None``, ``'bsn_round'``, or ``'bsn_bernoulli'``. If ``None``, no discretization."
     ),
     Kwarg(
         'encoder_weight_normalization',
@@ -327,6 +389,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Maximum order of derivatives present in the input data. All lower orders must also be included."
     ),
     Kwarg(
+        'max_len',
+        None,
+        [int, None],
+        "Maximum sequence length. If ``None``, no maximum length imposed."
+    ),
+    Kwarg(
         'resample_inputs',
         None,
         [int, None],
@@ -428,7 +496,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'epsilon',
-        1e-5,
+        1e-3,
         float,
         "Epsilon to avoid boundary violations."
     ),
@@ -446,7 +514,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'learning_rate_min',
-        1e-4,
+        0.,
         float,
         "Minimum value for the learning rate."
     ),
@@ -458,13 +526,13 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'lr_decay_rate',
-        0.,
+        1.,
         float,
         "coefficient by which to decay the learning rate every ``lr_decay_steps`` (ignored if ``lr_decay_family==None``)."
     ),
     Kwarg(
         'lr_decay_steps',
-        25,
+        1,
         int,
         "Span of iterations over which to decay the learning rate by ``lr_decay_rate`` (ignored if ``lr_decay_family==None``)."
     ),
@@ -496,7 +564,19 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'entropy_regularizer_scale',
         None,
         [float, None],
-        "Scale of regularizer on classifier entropy. If ``None``, no entropy regularization."
+        "Scale of regularizer on binary entropy. If ``None``, no entropy regularization."
+    ),
+    Kwarg(
+        'boundary_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer on boundary activations. If ``None``, no boundary regularization."
+    ),
+    Kwarg(
+        'lm_scale',
+        None,
+        [float, None],
+        "Scale of encoder language modeling objective in the loss function. If ``None`` or 0, no language modeling objective is used."
     ),
     Kwarg(
         'segment_encoding_correspondence_regularizer_scale',
@@ -545,6 +625,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         1,
         int,
         "Frequency (in iterations) with which to save model checkpoints."
+    ),
+    Kwarg(
+        'segment_eval_freq',
+        1,
+        int,
+        "Frequency (in iterations) with which to evaluate segmentations."
     ),
     Kwarg(
         'log_graph',

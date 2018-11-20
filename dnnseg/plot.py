@@ -5,7 +5,24 @@ import librosa.display
 import pandas as pd
 from matplotlib import ticker, pyplot as plt
 
-from .data import smooth_segmentations, find_segmentation_peaks, extract_segmentation_indices_1D
+from .data import extract_segment_timestamps
+
+def plot_streaming_segmenter(
+        input,
+        segmentation,
+        left_targ,
+        left_pred,
+        right_targ,
+        right_pred,
+        cmap='Blues',
+        titles=None,
+        dir='./',
+        prefix='',
+        suffix='.png'
+):
+    pass
+
+
 
 def plot_acoustic_features(
         inputs,
@@ -17,6 +34,7 @@ def plot_acoustic_features(
         sr=16000,
         hop_length=160,
         drop_zeros=True,
+        hard_segmentations=False,
         cmap='Blues',
         titles=None,
         dir='./',
@@ -39,14 +57,16 @@ def plot_acoustic_features(
     if has_means:
         n_plots += 1
     if has_segs:
-        n_plots += 3
+        n_plots += 2
+        if not hard_segmentations:
+            n_plots += 1
     if has_states:
         n_plots += n_states
 
     fig.set_size_inches(10, 3 * n_plots)
     axes = []
     for i in range(n_plots):
-        axes.append(fig.add_subplot(100 * n_plots + 10 + i + 1))
+        axes.append(fig.add_subplot(n_plots, 1, i+1))
 
     segmentations_offset = 0
     target_means_offset = 0
@@ -56,9 +76,11 @@ def plot_acoustic_features(
 
     if has_segs:
         ax_seg = axes[1]
-        ax_seg_smoothed = axes[2]
-        ax_seg_hard = axes[3]
-        segmentations_offset = 3
+        ax_seg_hard = axes[2]
+        segmentations_offset = 2
+        if not hard_segmentations:
+            ax_seg_smoothed = axes[3]
+            segmentations_offset += 1
 
     if has_means:
         ax_targ_means = axes[1 + segmentations_offset]
@@ -95,6 +117,7 @@ def plot_acoustic_features(
             segmentation_probs_cur = segmentation_probs[i]
             if drop_zeros:
                 segmentation_probs_cur = segmentation_probs_cur[inputs_select]
+
             segmentation_probs_cur = np.swapaxes(segmentation_probs_cur, -2, -1)
 
             df = pd.DataFrame(
@@ -110,26 +133,35 @@ def plot_acoustic_features(
             ax_seg.set_title('Segmentations')
 
             colors = [plt.get_cmap('gist_rainbow')(1. * j / len(segmentation_probs_cur)) for j in range(len(segmentation_probs_cur))]
-            segs_hard = np.zeros_like(segmentation_probs_cur)
+            segs_hard = []
+
+            if hard_segmentations:
+                smoothing_algorithm = None
+                n_points = None
+            else:
+                smoothing_algorithm = 'rbf'
+                n_points = 1000
 
             for j, s in enumerate(segmentation_probs_cur):
-                peak_ix, basis, segs_smoothed = extract_segmentation_indices_1D(s, smooth_type='rbf', n_points=1000, return_plot=True)
-                segs_hard[j, peak_ix] = 1.
+                timestamps, basis, segs_smoothed = extract_segment_timestamps(
+                    s,
+                    algorithm=smoothing_algorithm,
+                    n_points=n_points,
+                    return_plot=True
+                )
+                segs_hard.append(timestamps)
+                if not hard_segmentations:
+                    ax_seg_smoothed.plot(basis, segs_smoothed, color=colors[j], label=str(j+1))
+                ax_seg_hard.vlines(timestamps, j, j+1, color='k')
 
-                ax_seg_smoothed.plot(basis, segs_smoothed, color=colors[j], label=str(j+1))
+            if not hard_segmentations:
+                ax_seg_smoothed.set_xlim(0., basis[-1])
+                ax_seg_smoothed.legend(fancybox=True, framealpha=0.75, frameon=True, facecolor='white', edgecolor='gray')
+                ax_seg_smoothed.set_xlabel('Time')
+                ax_seg_smoothed.set_title('Smoothed Segmentations')
 
-            ax_seg_smoothed.set_xlim(0., basis[-1])
-            ax_seg_smoothed.legend(fancybox=True, framealpha=0.75, frameon=True, facecolor='white', edgecolor='gray')
-            ax_seg_smoothed.set_xlabel('Time')
-            ax_seg_smoothed.set_title('Smoothed Segmentations')
-
-            df = pd.DataFrame(
-                segs_hard,
-                index=list(range(1, segs_hard.shape[0] + 1))
-            )
-
-            ax_seg_hard.pcolormesh(df, cmap='Greys', vmin=0., vmax=1.)
-            ax_seg_hard.xaxis.set_major_formatter(time_tick_formatter)
+            ax_seg_hard.set_xlim(0., basis[-1])
+            ax_seg_hard.set_ylim(0., n_states - 1)
             ax_seg_hard.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
             ax_seg_hard.set_yticklabels(df.index)
             ax_seg_hard.set_xlabel('Time')
@@ -138,8 +170,10 @@ def plot_acoustic_features(
         if has_states:
             for j in range(n_states):
                 states_cur = states[j][i]
+
                 if drop_zeros:
                     states_cur = states_cur[inputs_select]
+
                 states_cur = np.swapaxes(states_cur, -2, -1)
 
                 librosa.display.specshow(
@@ -216,8 +250,9 @@ def plot_acoustic_features(
         ax_input.clear()
         if has_segs:
             ax_seg.clear()
-            ax_seg_smoothed.clear()
             ax_seg_hard.clear()
+            if not hard_segmentations:
+                ax_seg_smoothed.clear()
         if has_states:
             for ax in ax_states:
                 ax.clear()
