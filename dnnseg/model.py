@@ -12,7 +12,7 @@ from sklearn.metrics import homogeneity_completeness_v_measure, adjusted_mutual_
 from .backend import *
 from .data import get_random_permutation, get_padded_lags, extract_segment_timestamps_batch, extract_states_at_timestamps_batch
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
-from .util import f_measure
+from .util import f_measure, pretty_print_seconds
 from .plot import plot_acoustic_features, plot_label_histogram, plot_label_heatmap, plot_binary_unit_heatmap
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -169,6 +169,13 @@ class AcousticEncoderDecoder(object):
                     self.segment_encoding_correspondence_regularizer = tf.contrib.layers.l1_regularizer(scale=self.segment_encoding_correspondence_regularizer_scale)
                 else:
                     self.segment_encoding_correspondence_regularizer = None
+
+        self.label_map = None
+        if self.label_map_file:
+            if os.path.exists(self.label_map_file):
+                self.label_map = pd.read_csv(self.label_map_file)
+            else:
+                sys.stderr.write('Label map file %s does not exist. Label mapping will not be used.' %self.label_map_file)
 
     def _pack_metadata(self):
         if hasattr(self, 'n_train'):
@@ -384,6 +391,7 @@ class AcousticEncoderDecoder(object):
                     self.segmenter = HMLSTMSegmenter(
                         self.units_encoder + [units_utt],
                         self.n_layers_encoder,
+                        training=self.training,
                         activation=self.encoder_inner_activation,
                         inner_activation=self.encoder_inner_activation,
                         recurrent_activation=self.encoder_recurrent_activation,
@@ -398,6 +406,7 @@ class AcousticEncoderDecoder(object):
                         power=self.boundary_power,
                         boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                         state_slope_annealing_rate=self.state_slope_annealing_rate,
+                        slope_annealing_max=self.slope_annealing_max,
                         state_discretizer=self.encoder_state_discretizer,
                         global_step=self.global_step,
                         implementation=2
@@ -436,6 +445,17 @@ class AcousticEncoderDecoder(object):
 
                     encoder = self.segmenter_output.output(return_sequences=self.task == 'streaming_autoencoder')
 
+                    # if encoding_batch_normalization_decay:
+                    #     encoder = tf.contrib.layers.batch_norm(
+                    #         encoder,
+                    #         decay=self.encoder_batch_normalization_decay,
+                    #         center=True,
+                    #         scale=True,
+                    #         zero_debias_moving_mean=True,
+                    #         is_training=self.training,
+                    #         updates_collections=None
+                    #     )
+
                     encoder = DenseLayer(
                         training=self.training,
                         units=units_utt,
@@ -460,14 +480,32 @@ class AcousticEncoderDecoder(object):
                         training=self.training,
                         units=self.units_encoder + [units_utt],
                         layers=self.n_layers_encoder,
-                        activation=self.encoder_activation,
+                        activation=self.encoder_inner_activation,
                         inner_activation=self.encoder_inner_activation,
                         recurrent_activation=self.encoder_recurrent_activation,
-                        refeed_outputs=False,
                         return_sequences=False,
                         name='RNNEncoder',
                         session=self.sess
                     )(encoder, mask=mask)
+
+                    # encoder = DenseLayer(
+                    #     training=self.training,
+                    #     units=units_utt,
+                    #     activation=self.encoder_activation,
+                    #     batch_normalization_decay=encoding_batch_normalization_decay,
+                    #     session=self.sess
+                    # )(encoder)
+
+                    if encoding_batch_normalization_decay:
+                        encoder = tf.contrib.layers.batch_norm(
+                            encoder,
+                            decay=self.encoder_batch_normalization_decay,
+                            center=True,
+                            scale=True,
+                            zero_debias_moving_mean=True,
+                            is_training=self.training,
+                            updates_collections=None
+                        )
 
 
                 elif self.encoder_type.lower() == 'cnn':
@@ -628,22 +666,26 @@ class AcousticEncoderDecoder(object):
                 else:
                     mask = None
 
-                if self.decoder_type.lower() in ['rnn', 'cnn_rnn']:
-                    tile_dims = [1] * len(decoder.shape) + 1
+                if self.decoder_type.lower() == 'rnn':
+                    tile_dims = [1] * (len(decoder.shape) + 1)
                     tile_dims[-2] = n_timesteps
 
                     decoder = tf.tile(
                         decoder[..., None, :],
                         tile_dims
                     )
-                    # decoder *= self.y_mask[...,None]
-                    # index = tf.range(self.y.shape[1])[None, ..., None]
-                    # index = tf.tile(
-                    #     index,
-                    #     [self.batch_len, 1, 1]
-                    # )
-                    # index = tf.cast(index, dtype=self.FLOAT_TF)
-                    # decoder = tf.concat([decoder, index], axis=2)
+                    decoder *= self.y_mask[...,None]
+                    max_len = tf.reduce_sum(self.y_mask, axis=1, keepdims=True)[..., None]
+
+                    index = tf.range(self.y.shape[1])[None, ..., None]
+                    index = tf.tile(
+                        index,
+                        [self.batch_len, 1, 1]
+                    )
+                    index = tf.cast(index, dtype=self.FLOAT_TF)
+                    index /= max_len
+
+                    decoder = tf.concat([decoder, index], axis=2)
 
                     decoder = MultiRNNLayer(
                         training=self.training,
@@ -652,11 +694,15 @@ class AcousticEncoderDecoder(object):
                         activation=self.decoder_inner_activation,
                         inner_activation=self.decoder_inner_activation,
                         recurrent_activation=self.decoder_recurrent_activation,
-                        refeed_outputs=self.n_layers_decoder > 1,
                         return_sequences=True,
                         name='RNNDecoder',
                         session=self.sess
                     )(decoder, mask=mask)
+
+                    # if self.decoder_activation is not None:
+                    #     s = tf.Variable(tf.ones([], dtype=self.FLOAT_TF), name='output_scale')
+                    #     s = tf.Print(s, [s])
+                    #     decoder *= s
 
                     decoder = DenseLayer(
                         training=self.training,
@@ -1391,9 +1437,12 @@ class AcousticEncoderDecoder(object):
 
                 return new_segmentation_probs, new_states
 
-    def _collect_previous_segments(self, n, data, segtype, X=None, X_mask=None, training_batch_norm=False, training_dropout=False):
+    def _collect_previous_segments(self, n, data, segtype=None, X=None, X_mask=None, training_batch_norm=False, training_dropout=False):
         with self.sess.as_default():
             with self.sess.graph.as_default():
+                if segtype is None:
+                    segtype = self.segtype
+
                 if X is None or X_mask is None:
                     sys.stderr.write('Getting input data...\n')
                     X, X_mask = data.inputs(
@@ -1548,11 +1597,16 @@ class AcousticEncoderDecoder(object):
             X_mask_cv=None,
             y_cv=None,
             y_mask_cv=None,
-            segtype='vad',
+            segtype=None,
+            ix2label=None,
+            plot=True,
             verbose=True
     ):
+        summary = ''
         eval_dict = {}
         binary = self.binary_classifier
+        if segtype is None:
+            segtype = self.segtype
 
         if self.task == 'utterance_classifier':
             if X_cv is None or X_mask_cv is None:
@@ -1642,6 +1696,32 @@ class AcousticEncoderDecoder(object):
                         encoding = np.concatenate(encoding, axis=0)
                         encoding_entropy = np.concatenate(encoding_entropy, axis=0).mean()
 
+                    if plot:
+                        if self.task == 'utterance_classifier' and ix2label is not None:
+                            labels_string = np.vectorize(lambda x: ix2label[x])(labels_cv.astype('int'))
+
+                            plot_label_heatmap(
+                                labels_string,
+                                labels_pred.astype('int'),
+                                label_map=self.label_map,
+                                dir=self.outdir
+                            )
+
+                            if binary:
+                                if self.keep_plot_history:
+                                    iter = self.global_step.eval(session=self.sess) + 1
+                                    suffix = '_%d.png' % iter
+                                else:
+                                    suffix = '.png'
+
+                                plot_binary_unit_heatmap(
+                                    labels_string,
+                                    encoding,
+                                    label_map=self.label_map,
+                                    dir=self.outdir,
+                                    suffix=suffix
+                                )
+
                     h, c, v = homogeneity_completeness_v_measure(labels_cv, labels_pred)
                     ami = adjusted_mutual_info_score(labels_cv, labels_pred)
                     fmi = fowlkes_mallows_score(labels_cv, labels_pred)
@@ -1652,15 +1732,18 @@ class AcousticEncoderDecoder(object):
                     eval_dict['ami'] = ami
                     eval_dict['fmi'] = fmi
 
+                    pred_eval_summary = ''
+                    if self.binary_classifier:
+                        pred_eval_summary += 'Encoding entropy: %s\n\n' % encoding_entropy
+                    pred_eval_summary +=  'Labeling scores (predictions):\n'
+                    pred_eval_summary += '  Homogeneity:                 %s\n' % h
+                    pred_eval_summary += '  Completeness:                %s\n' % c
+                    pred_eval_summary += '  V-measure:                   %s\n' % v
+                    pred_eval_summary += '  Adjusted mutual information: %s\n' % ami
+                    pred_eval_summary += '  Fowlkes-Mallows index:       %s\n\n' % fmi
+
                     if verbose:
-                        if self.binary_classifier:
-                            sys.stderr.write('Encoding entropy: %s\n\n' % encoding_entropy)
-                        sys.stderr.write('Labeling scores (predictions):\n')
-                        sys.stderr.write('  Homogeneity:  %s\n' % h)
-                        sys.stderr.write('  Completeness: %s\n' % c)
-                        sys.stderr.write('  V-measure:    %s\n' % v)
-                        sys.stderr.write('  Adjusted mutual information:    %s\n' % ami)
-                        sys.stderr.write('  Fowlkes-Mallows index:    %s\n\n' % fmi)
+                        sys.stderr.write(pred_eval_summary)
 
                     if self.binary_classifier or not self.k:
                         if not self.k:
@@ -1672,24 +1755,33 @@ class AcousticEncoderDecoder(object):
 
                     labels_rand = np.random.randint(0, k, labels_pred.shape)
 
+                    h, c, v = homogeneity_completeness_v_measure(labels_cv, labels_rand)
+                    ami = adjusted_mutual_info_score(labels_cv, labels_rand)
+                    fmi = fowlkes_mallows_score(labels_cv, labels_rand)
+
+                    rand_eval_summary = ''
+                    if self.binary_classifier:
+                        pred_eval_summary += 'Encoding entropy: %s\n\n' % encoding_entropy
+                    rand_eval_summary += 'Labeling scores (predictions):\n'
+                    rand_eval_summary += '  Homogeneity:                 %s\n' % h
+                    rand_eval_summary += '  Completeness:                %s\n' % c
+                    rand_eval_summary += '  V-measure:                   %s\n' % v
+                    rand_eval_summary += '  Adjusted mutual information: %s\n' % ami
+                    rand_eval_summary += '  Fowlkes-Mallows index:       %s\n\n' % fmi
+
                     if verbose:
-                        h, c, v = homogeneity_completeness_v_measure(labels_cv, labels_rand)
-                        ami = adjusted_mutual_info_score(labels_cv, labels_rand)
-                        fmi = fowlkes_mallows_score(labels_cv, labels_rand)
-                        sys.stderr.write('Labeling scores (random uniform):\n')
-                        sys.stderr.write('  Homogeneity:  %s\n' % h)
-                        sys.stderr.write('  Completeness: %s\n' % c)
-                        sys.stderr.write('  V-measure:    %s\n' % v)
-                        sys.stderr.write('  Adjusted mutual information:    %s\n' % ami)
-                        sys.stderr.write('  Fowlkes-Mallows index:    %s\n' % fmi)
+                        sys.stderr.write(rand_eval_summary)
+
                     self.set_predict_mode(False)
+
+                    summary += pred_eval_summary + rand_eval_summary
         else:
             if verbose:
                 sys.stderr.write('The system is in segmentation mode and does not perform utterance classification. Skipping classifier evaluation...\n')
             labels_pred = None
             encoding = None
 
-        return eval_dict, labels_pred, encoding
+        return eval_dict, labels_pred, encoding, summary
 
     def classify_utterances(
             self,
@@ -1698,11 +1790,15 @@ class AcousticEncoderDecoder(object):
             X_mask_cv=None,
             y_cv=None,
             y_mask_cv=None,
-            segtype='phn',
+            segtype=None,
+            ix2label=None,
+            plot=True,
             verbose=True
     ):
         eval_dict = {}
         binary = self.binary_classifier
+        if segtype is None:
+            segtype = self.segtype
 
         if self.task == 'utterance_classifier':
             if X_cv is None or X_mask_cv is None:
@@ -1728,13 +1824,15 @@ class AcousticEncoderDecoder(object):
             segments = cv_data.segments(segment_type=segtype)
             segments.reset_index(inplace=True)
 
-            classifier_scores, labels_pred, encoding = self.evaluate_classifier(
+            classifier_scores, labels_pred, encoding, summary = self.evaluate_classifier(
                 cv_data,
                 X_cv=X_cv,
                 X_mask_cv=X_mask_cv,
                 y_cv=y_cv,
                 y_mask_cv=y_mask_cv,
                 segtype=segtype,
+                ix2label=ix2label,
+                plot=plot,
                 verbose=verbose
             )
             eval_dict.update(classifier_scores)
@@ -1749,7 +1847,7 @@ class AcousticEncoderDecoder(object):
                 sys.stderr.write('The system is in segmentation mode and does not perform utterance classification. Skipping classifier evaluation...\n')
             out_data = None
 
-        return out_data, eval_dict
+        return out_data, eval_dict, summary
 
     def run_evaluation(
             self,
@@ -1764,7 +1862,7 @@ class AcousticEncoderDecoder(object):
             training_batch_norm=False,
             training_dropout=False,
             shuffle=False,
-            segtype='vad',
+            segtype=None,
             plot=True,
             verbose=True
     ):
@@ -1772,6 +1870,8 @@ class AcousticEncoderDecoder(object):
 
         binary = self.binary_classifier
         seg = 'hmlstm' in self.encoder_type.lower()
+        if segtype is None:
+            segtype = self.segtype
 
         if X_cv is None or X_mask_cv is None:
             X_cv, X_mask_cv = cv_data.inputs(
@@ -1812,13 +1912,15 @@ class AcousticEncoderDecoder(object):
                     n_minibatch = len(y_cv)
 
                 if self.task == 'utterance_classifier':
-                    classifier_scores, labels_pred, encoding = self.evaluate_classifier(
+                    classifier_scores, labels_pred, encoding, _ = self.evaluate_classifier(
                         cv_data,
                         X_cv=X_cv,
                         X_mask_cv=X_mask_cv,
                         y_cv=y_cv,
                         y_mask_cv=y_mask_cv,
                         segtype=segtype,
+                        ix2label=ix2label,
+                        plot=plot,
                         verbose=verbose
                     )
                     eval_dict.update(classifier_scores)
@@ -1958,19 +2060,6 @@ class AcousticEncoderDecoder(object):
                     if self.task == 'utterance_classifier' and ix2label is not None:
                         labels_string = np.vectorize(lambda x: ix2label[x])(labels_cv.astype('int'))
                         titles = labels_string[self.plot_ix]
-
-                        plot_label_heatmap(
-                            labels_string,
-                            labels_pred.astype('int'),
-                            dir=self.outdir
-                        )
-                        if binary:
-                            plot_binary_unit_heatmap(
-                                labels_string,
-                                encoding,
-                                dir=self.outdir
-                            )
-
                     else:
                         titles = [None] * n_plot
 
@@ -2053,6 +2142,7 @@ class AcousticEncoderDecoder(object):
                         states=states,
                         hard_segmentations=hard_segmentations,
                         target_means=y_means_cv[self.plot_ix] if self.residual_decoder else None,
+                        label_map=self.label_map,
                         dir=self.outdir
                     )
 
@@ -2066,7 +2156,6 @@ class AcousticEncoderDecoder(object):
     def fit(
             self,
             train_data,
-            segtype,
             cv_data=None,
             n_iter=None,
             ix2label=None,
@@ -2089,7 +2178,7 @@ class AcousticEncoderDecoder(object):
             n_train = len(X)
         else:
             X, X_mask = train_data.inputs(
-                segments=segtype,
+                segments=self.segtype,
                 padding=self.input_padding,
                 max_len=self.max_len,
                 normalize=self.normalize_data,
@@ -2097,7 +2186,7 @@ class AcousticEncoderDecoder(object):
                 resample=self.resample_inputs
             )
             y, y_mask = train_data.targets(
-                segments=segtype,
+                segments=self.segtype,
                 padding=self.target_padding,
                 max_len=self.max_len,
                 reverse=self.reverse_targets,
@@ -2123,7 +2212,7 @@ class AcousticEncoderDecoder(object):
                 X_cv = cv_data.features()
             else:
                 X_cv, X_mask_cv = cv_data.inputs(
-                    segments=segtype,
+                    segments=self.segtype,
                     padding=self.input_padding,
                     max_len=self.max_len,
                     normalize=self.normalize_data,
@@ -2131,7 +2220,7 @@ class AcousticEncoderDecoder(object):
                     resample=self.resample_inputs
                 )
                 y_cv, y_mask_cv = cv_data.targets(
-                    segments=segtype,
+                    segments=self.segtype,
                     padding=self.target_padding,
                     max_len=self.max_len,
                     reverse=self.reverse_targets,
@@ -2171,7 +2260,7 @@ class AcousticEncoderDecoder(object):
             n_iter = self.n_iter
 
         if self.speaker_emb_dim:
-            speaker = train_data.segments(segtype).speaker.as_matrix()
+            speaker = train_data.segments(self.segtype).speaker.as_matrix()
 
         if verbose:
             sys.stderr.write('*' * 100 + '\n')
@@ -2201,7 +2290,7 @@ class AcousticEncoderDecoder(object):
                 #         y_mask_cv=y_mask_cv,
                 #         ix2label=ix2label,
                 #         y_means_cv=None if y_means_cv is None else y_means_cv,
-                #         segtype=segtype,
+                #         segtype=self.segtype,
                 #         plot=True,
                 #         verbose=verbose
                 #     )
@@ -2224,7 +2313,7 @@ class AcousticEncoderDecoder(object):
                     if self.n_correspondence and self.global_step.eval(session=self.sess) + 1 >= self.correspondence_start_iter:
                         if verbose:
                             sys.stderr.write('Extracting and caching correspondence autoencoder targets...\n')
-                        segment_embeddings, segment_spans = self._collect_previous_segments(self.n_correspondence, train_data, segtype, X=X, X_mask=X_mask)
+                        segment_embeddings, segment_spans = self._collect_previous_segments(self.n_correspondence, train_data, self.segtype, X=X, X_mask=X_mask)
 
                     if verbose:
                         sys.stderr.write('Updating...\n')
@@ -2335,6 +2424,7 @@ class AcousticEncoderDecoder(object):
                                     segmentation_probs=segmentation_probs,
                                     states=states,
                                     drop_zeros=False,
+                                    label_map=self.label_map,
                                     dir=self.outdir,
                                     suffix='_left.png'
                                 )
@@ -2346,6 +2436,7 @@ class AcousticEncoderDecoder(object):
                                     segmentation_probs=segmentation_probs,
                                     states=states,
                                     drop_zeros=False,
+                                    label_map=self.label_map,
                                     dir=self.outdir,
                                     suffix='_right.png'
                                 )
@@ -2378,7 +2469,7 @@ class AcousticEncoderDecoder(object):
                                     y_mask_cv=y_mask_cv,
                                     ix2label=ix2label,
                                     y_means_cv=None if y_means_cv is None else y_means_cv,
-                                    segtype=segtype,
+                                    segtype=self.segtype,
                                     plot=True,
                                     verbose=verbose
                                 )
@@ -2421,7 +2512,8 @@ class AcousticEncoderDecoder(object):
 
                     if verbose:
                         t1_iter = time.time()
-                        sys.stderr.write('Iteration time: %.2fs\n' % (t1_iter - t0_iter))
+                        time_str = pretty_print_seconds(t1_iter - t0_iter)
+                        sys.stderr.write('Iteration time: %s\n' % time_str)
 
     def plot_label_histogram(self, labels_pred, dir=None):
         if dir is None:
@@ -2445,7 +2537,8 @@ class AcousticEncoderDecoder(object):
         plot_label_heatmap(
             labels,
             preds,
-            dir=dir
+            dir=dir,
+            suffix=suffix
         )
 
     def initialized(self):
@@ -2526,6 +2619,9 @@ class AcousticEncoderDecoder(object):
 
         return out
 
+    def summary(self):
+        out = ''
+
 
 class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
     _INITIALIZATION_KWARGS = UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
@@ -2586,10 +2682,12 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
 
                 if self.task == 'utterance_classifier':
                     if self.binary_classifier:
-                        encoding_logits *= 1 + 0.25 * tf.cast(self.global_step, dtype=self.FLOAT_TF)
                         if self.state_slope_annealing_rate:
                             rate = self.state_slope_annealing_rate
-                            slope_coef = tf.minimum(10., 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
+                            if self.slope_annealing_max is None:
+                                slope_coef = 1 + rate * tf.cast(self.global_step, dtype=tf.float32)
+                            else:
+                                slope_coef = tf.minimum(self.slope_annealing_max, 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
                             encoding_logits *= slope_coef
                         encoding_probs = tf.sigmoid(encoding_logits)
                         encoding = encoding_probs
@@ -2710,6 +2808,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                     self.encoder_cell = HMLSTMCell(
                         self.units_encoder + [units_utt],
                         self.n_layers_encoder,
+                        training=self.training,
                         activation=self.encoder_inner_activation,
                         inner_activation=self.encoder_inner_activation,
                         recurrent_activation=self.encoder_recurrent_activation,
@@ -2723,7 +2822,8 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                         refeed_boundary=True,
                         power=self.boundary_power,
                         boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
-                        state_slope_annealing_rate=self.slope_annealing_rate,
+                        state_slope_annealing_rate=self.state_slope_annealing_rate,
+                        slope_annealing_max=self.slope_annealing_max,
                         state_discretizer=self.encoder_state_discretizer,
                         global_step=self.global_step,
                         implementation=2

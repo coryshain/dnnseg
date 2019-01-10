@@ -41,7 +41,11 @@ if __name__ == '__main__':
 
     dnnseg_model = load_dnnseg(p.outdir)
 
-    segments, _ = dnnseg_model.classify_utterances(data, segtype=args.segtype)
+    segments, _, summary = dnnseg_model.classify_utterances(
+        data,
+        segtype=args.segtype,
+        ix2label=data.ix2label(args.segtype)
+    )
 
     if args.goldfeats:
         gold_feature_map = pd.read_csv(args.goldfeats)
@@ -55,6 +59,11 @@ if __name__ == '__main__':
 
     outfile = p.outdir + '/' + 'classifications_%s' % args.partition + '.csv'
     segments.to_csv(outfile, na_rep='nan', index=False)
+
+    outfile = p.outdir + '/' + 'classification_scores_%s' % args.partition + '.txt'
+    with open(outfile, 'w') as f:
+        f.write(summary)
+
 
 
 

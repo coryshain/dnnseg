@@ -150,6 +150,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Task to perform. One of ``['utterance_classifier', 'autoencoder', 'streaming_autoencoder']``."
     ),
     Kwarg(
+        'segtype',
+        'vad',
+        str,
+        'Utterance-level segmentation type used to chunk audio input (one of ["vad", "wrd", "phn"]).'
+    ),
+    Kwarg(
         'n_correspondence',
         None,
         [int, None],
@@ -273,6 +279,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         [float, None],
         "Whether to anneal the slopes of the hidden state activations.",
         aliases=['slope_annealing_rate']
+    ),
+    Kwarg(
+        'slope_annealing_max',
+        10.,
+        [float, None],
+        "Maximum allowed value of the slope annealing coefficient. If ``None``, no maximum will be enforced."
     ),
     Kwarg(
         'encoder_state_discretizer',
@@ -637,6 +649,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Log the network graph to Tensorboard"
+    ),
+    Kwarg(
+        'label_map_file',
+        None,
+        [str, None],
+        "Path to CSV file mapping segment labels to strings to use in plots. Must contain text columns named 'source' and 'target'. If ``None``, source labels will be used."
+    ),
+    Kwarg(
+        'keep_plot_history',
+        False,
+        bool,
+        "Keep plots from each checkpoint of a run, which can help visualize learning trajectories but can also consume a lot of disk space. If ``False``, only the most recent plot of each type is kept."
     )
 ]
 

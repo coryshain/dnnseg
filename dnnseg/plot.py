@@ -3,9 +3,17 @@ import numpy as np
 import librosa
 import librosa.display
 import pandas as pd
+import matplotlib
 from matplotlib import ticker, pyplot as plt
+import seaborn as sns
+from scipy.cluster import hierarchy
 
 from .data import extract_segment_timestamps
+
+class SmartDict(dict):
+    def __missing__(self, key):
+        return key
+
 
 def plot_streaming_segmenter(
         input,
@@ -37,6 +45,7 @@ def plot_acoustic_features(
         hard_segmentations=False,
         cmap='Blues',
         titles=None,
+        label_map=None,
         dir='./',
         prefix='',
         suffix='.png'
@@ -45,6 +54,9 @@ def plot_acoustic_features(
 
     if titles is None:
         titles = [None] * inputs.shape[0]
+
+    if label_map is not None:
+        label_map = dict(zip(label_map.source,label_map.target))
 
     has_means = target_means is not None
     has_segs = segmentation_probs is not None
@@ -240,7 +252,10 @@ def plot_acoustic_features(
         ax_pred.set_title('Predictions')
 
         if titles[i] is not None:
-            fig.suptitle(titles[i], fontsize=20, weight='bold')
+            title = titles[i]
+            if label_map is not None:
+                title = label_map.get(title, title)
+            fig.suptitle(title, fontsize=20, weight='bold')
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         try:
             fig.savefig(dir + '/' + prefix + 'featureplot_%d'%i + suffix)
@@ -264,10 +279,17 @@ def plot_acoustic_features(
     plt.close(fig)
 
 
-def plot_label_histogram(labels, title=None, bins='auto', dir='./', prefix='', suffix='.png'):
+def plot_label_histogram(labels, title=None, bins='auto', label_map=None, dir='./', prefix='', suffix='.png'):
+
+    if label_map is not None:
+        label_map = dict(zip(label_map.source,label_map.target))
 
     fig = plt.figure()
     ax = fig.add_subplot(1, 1, 1)
+
+    labels = pd.Series(labels)
+    if label_map is not None:
+        labels = labels.replace(label_map)
 
     ax.hist(labels, bins=bins)
 
@@ -282,15 +304,24 @@ def plot_label_histogram(labels, title=None, bins='auto', dir='./', prefix='', s
 
     plt.close(fig)
 
-def plot_label_heatmap(labels, preds, title=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
+def plot_label_heatmap(labels, preds, title=None, label_map=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
+    if label_map is not None:
+        label_map = dict(zip(label_map.source,label_map.target))
 
     fig = plt.figure()
     ax = fig.add_subplot(1, 1, 1)
 
     df = pd.crosstab(labels, preds)
-    df = pd.DataFrame(np.array(df) / np.array(df).sum(axis=0, keepdims=True), index=df.index, columns=df.columns)
 
-    fig.set_size_inches(1 + .5 * len(df.columns), .25 * len(df.index))
+    df = pd.DataFrame(np.array(df) / np.array(df).sum(axis=0, keepdims=True), index=df.index, columns=df.columns)
+    if label_map is not None:
+        index = pd.Series(df.index).replace(label_map)
+    else:
+        index = df.index
+    df.index = index
+    df.index.name = None
+
+    fig.set_size_inches(1 + .5 * len(df.columns), .27 * len(df.index))
 
     ax.pcolormesh(df, cmap=cmap, vmin=0., vmax=1.)
     ax.set_xticks(np.arange(0.5, len(df.columns), 1), minor=False)
@@ -309,35 +340,44 @@ def plot_label_heatmap(labels, preds, title=None, cmap='Blues', dir='./', prefix
 
     plt.close(fig)
 
-def plot_binary_unit_heatmap(labels, label_probs, title=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
-
-    fig = plt.figure()
-    ax = fig.add_subplot(1, 1, 1)
+def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
+    if label_map is not None:
+        label_map = dict(zip(label_map.source,label_map.target))
 
     df = {'label': labels}
     for bit in range(label_probs.shape[1]):
         df['%d' %bit] = label_probs[:,bit]
 
     df = pd.DataFrame(df)
+    df = df[~df['label'].isin(['SPN', 'SIL'])]
     df = df.groupby('label').mean()
 
-    fig.set_size_inches(1 + .5 * len(df.columns), .25 * len(df.index))
+    if label_map is not None:
+        index = pd.Series(df.index).replace(label_map)
+    else:
+        index = df.index
 
-    ax.pcolormesh(df, cmap=cmap, vmin=0., vmax=1.)
-    ax.set_xticks(np.arange(0.5, len(df.columns), 1), minor=False)
-    ax.set_xticklabels(df.columns)
-    ax.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
-    ax.set_yticklabels(df.index)
+    df.index = index
+    df.index.name = None
 
-    if title is not None:
-        fig.suptitle(title)
-    # fig.tight_layout()
+    width = 1 + .3 * len(df.columns)
+    height = .27 * len(df.index)
+
+    # Correlation-based clustering is undefined if any vectors happen to have no variance.
+    # Try correlation first, then fall back to default distance metric if it fails.
+    try:
+        cm = sns.clustermap(data=df, metric='correlation', cmap=cmap, figsize=(width,height))
+    except:
+        cm = sns.clustermap(data=df, cmap=cmap, figsize=(width,height))
+    cm.cax.set_visible(False)
+    cm.ax_col_dendrogram.set_visible(False)
 
     try:
-        fig.savefig(dir + '/' + prefix + 'binary_unit_heatmap' + suffix)
+        cm.savefig(dir + '/' + prefix + 'binary_unit_heatmap' + suffix)
     except:
         sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
 
-    plt.close(fig)
+    plt.close('all')
+
 
 

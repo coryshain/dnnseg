@@ -20,7 +20,6 @@ if __name__ == '__main__':
     argparser.add_argument('config', help='Path to configuration file.')
     argparser.add_argument('-p', '--preprocess', action='store_true', help='Preprocess data (even if saved data object exists in the model directory)')
     argparser.add_argument('-r', '--restart', action='store_true', help='Restart training even if model checkpoint exists (this will overwrite existing checkpoint)')
-    argparser.add_argument('-s', '--segtype', type=str, default='vad', help='Segment type to use for training (one of ["vad", "wrd", "phn"]')
     args = argparser.parse_args()
 
     p = Config(args.config)
@@ -81,7 +80,7 @@ if __name__ == '__main__':
     sys.stderr.write('Data loaded in %ds\n\n' %(t1-t0))
     sys.stderr.flush()
 
-    if args.segtype == 'rnd':
+    if p['segtype'] == 'rnd':
         train_data.initialize_random_segmentation(7.4153)
         if cv_data is not None:
             cv_data.initialize_random_segmentation(7.4153)
@@ -119,14 +118,13 @@ if __name__ == '__main__':
             **kwargs
         )
 
-    dnnseg_model.build(len(train_data.segments(segment_type=args.segtype)), outdir=p.outdir, restore=not args.restart)
+    dnnseg_model.build(len(train_data.segments(segment_type=p['segtype'])), outdir=p.outdir, restore=not args.restart)
 
     sys.stderr.write('Fitting encoder-decoder...\n\n')
 
     dnnseg_model.fit(
         train_data,
-        args.segtype,
         cv_data=cv_data,
         n_iter=p['n_iter'],
-        ix2label=train_data.ix2label(args.segtype),
+        ix2label=train_data.ix2label(p['segtype']),
     )
