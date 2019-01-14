@@ -285,6 +285,13 @@ class AcousticEncoderDecoder(object):
 
                 self.y_mask = tf.placeholder(self.FLOAT_TF, shape=(None, self.n_timesteps_output), name='y_mask')
 
+                if self.task.lower().startswith('presegmented_autoencoder'):
+                    self.gold_boundaries = tf.placeholder(
+                        self.FLOAT_TF,
+                        shape=(None, self.n_timesteps_input, self.n_layers_encoder - 1),
+                        name='gold_boundaries'
+                    )
+
                 self.global_step = tf.Variable(
                     0,
                     trainable=False,
@@ -388,10 +395,16 @@ class AcousticEncoderDecoder(object):
                             session=self.sess
                         )(encoder)
 
+                    if self.task.lower().startswith('presegmented_autoencoder'):
+                        boundaries = self.gold_boundaries
+                    else:
+                        boundaries = None
+
                     self.segmenter = HMLSTMSegmenter(
                         self.units_encoder + [units_utt],
                         self.n_layers_encoder,
                         training=self.training,
+                        force_boundary=self.task.lower().startswith('presegmented_autoencoder'),
                         activation=self.encoder_inner_activation,
                         inner_activation=self.encoder_inner_activation,
                         recurrent_activation=self.encoder_recurrent_activation,
@@ -411,7 +424,7 @@ class AcousticEncoderDecoder(object):
                         global_step=self.global_step,
                         implementation=2
                     )
-                    self.segmenter_output = self.segmenter(encoder, mask=mask)
+                    self.segmenter_output = self.segmenter(encoder, mask=mask, boundaries=boundaries)
 
                     self.regularizer_losses += self.segmenter.get_regularizer_losses()
                     self.segmentation_probs = self.segmenter_output.boundary(discrete=False, as_logits=False)
@@ -1856,11 +1869,11 @@ class AcousticEncoderDecoder(object):
             X_mask_cv=None,
             y_cv=None,
             y_mask_cv=None,
+            gold_boundaries_cv=None,
             n_plot=10,
             ix2label=None,
             y_means_cv=None,
-            training_batch_norm=False,
-            training_dropout=False,
+            training=False,
             shuffle=False,
             segtype=None,
             plot=True,
@@ -1890,6 +1903,14 @@ class AcousticEncoderDecoder(object):
                 normalize=self.normalize_data,
                 center=self.center_data,
                 resample=self.resample_outputs,
+                max_len=self.max_len
+            )
+        if self.task.lower().startswith('presegmented_autoencoder') and gold_boundaries_cv is None:
+            inner_segment_type = self.task.lower()[-3:]
+            gold_boundaries_cv = cv_data.one_hot_boundaries(
+                inner_segments=inner_segment_type,
+                outer_segments=self.segtype,
+                padding=self.input_padding,
                 max_len=self.max_len
             )
         labels_cv = cv_data.labels(one_hot=False, segment_type=segtype)
@@ -1952,12 +1973,14 @@ class AcousticEncoderDecoder(object):
                                 self.X_mask: X_mask_cv[indices],
                                 self.y: y_cv[indices],
                                 self.y_mask: y_mask_cv[indices],
-                                self.training: training_batch_norm,
-                                self.training: training_dropout
+                                self.training: training
                             }
 
                             if self.speaker_emb_dim:
                                 fd_minibatch[self.speaker] = speaker[indices]
+
+                            if self.task.lower().startswith('presegmented_autoencoder'):
+                                fd_minibatch[self.gold_boundaries] = gold_boundaries_cv[indices]
 
                             segmentation_probs_cur, states_cur = self.sess.run(
                                 [self.segmentation_probs, self.encoder_hidden_states[:-1]],
@@ -2076,12 +2099,14 @@ class AcousticEncoderDecoder(object):
                             self.X_mask: X_mask_cv[self.plot_ix] if self.pad_seqs else [X_mask_cv[ix] for ix in self.plot_ix],
                             self.y: y_cv[self.plot_ix] if self.pad_seqs else [y_cv[ix] for ix in self.plot_ix],
                             self.y_mask: y_mask_cv[self.plot_ix] if self.pad_seqs else [y_mask_cv[ix] for ix in self.plot_ix],
-                            self.training: training_dropout,
-                            self.training: training_dropout
+                            self.training: training
                         }
 
                         if self.speaker_emb_dim:
                             fd_minibatch[self.speaker] = speaker[self.plot_ix]
+
+                        if self.task.lower().startswith('presegmented_autoencoder'):
+                            fd_minibatch[self.gold_boundaries] = gold_boundaries_cv[self.plot_ix]
 
                         out = self.sess.run(
                             to_run,
@@ -2098,9 +2123,14 @@ class AcousticEncoderDecoder(object):
                                 self.X_mask: X_mask_cv[ix],
                                 self.y: y_cv[ix],
                                 self.y_mask: y_mask_cv[ix],
-                                self.training: training_dropout,
-                                self.training: training_dropout
+                                self.training: training
                             }
+
+                            if self.speaker_emb_dim:
+                                fd_minibatch[self.speaker] = speaker[self.plot_ix]
+
+                            if self.task.lower().startswith('presegmented_autoencoder'):
+                                fd_minibatch[self.gold_boundaries] = gold_boundaries_cv[self.plot_ix]
 
                             out_cur = self.sess.run(
                                 to_run,
@@ -2196,6 +2226,17 @@ class AcousticEncoderDecoder(object):
             )
             n_train = len(y)
 
+            if self.task.lower().startswith('presegmented_autoencoder'):
+                inner_segment_type = self.task.lower()[-3:]
+                gold_boundaries_train, _ = train_data.one_hot_boundaries(
+                    inner_segments=inner_segment_type,
+                    outer_segments=self.segtype,
+                    padding=self.input_padding,
+                    max_len=self.max_len
+                )
+            else:
+                gold_boundaries_train = None
+
         if cv_data is None:
             if self.task == 'streaming_autoencoder':
                 X_cv = X
@@ -2204,6 +2245,7 @@ class AcousticEncoderDecoder(object):
                 X_mask_cv = X_mask
                 y_cv = y
                 y_mask_cv = y_mask
+                gold_boundaries_cv = gold_boundaries_train
 
             if self.plot_ix is None or len(self.plot_ix) != n_plot:
                 self.plot_ix = np.random.choice(np.arange(len(X)), size=n_plot)
@@ -2228,9 +2270,26 @@ class AcousticEncoderDecoder(object):
                     center=self.center_data,
                     resample=self.resample_outputs
                 )
+                if self.task.lower().startswith('presegmented_autoencoder'):
+                    inner_segment_type = self.task.lower()[-3:]
+                    gold_boundaries_cv, _ = train_data.one_hot_boundaries(
+                        inner_segments=inner_segment_type,
+                        outer_segments=self.segtype,
+                        padding=self.input_padding,
+                        max_len=self.max_len
+                    )
+                else:
+                    gold_boundaries_cv = None
 
             if self.plot_ix is None or len(self.plot_ix) != n_plot:
                 self.plot_ix = np.random.choice(np.arange(len(X_cv)), size=n_plot)
+
+        print(X_cv.shape)
+        print(y_cv.shape)
+        print(y_mask_cv.shape)
+        print(gold_boundaries_cv.shape)
+        print(gold_boundaries_cv.sum())
+        print(len(train_data.segments(segment_type=inner_segment_type)))
 
         t1 = time.time()
 
@@ -2288,6 +2347,7 @@ class AcousticEncoderDecoder(object):
                 #         X_mask_cv=X_mask_cv,
                 #         y_cv=y_cv,
                 #         y_mask_cv=y_mask_cv,
+                #         gold_boundaries_cv = gold_boundaries_cv,
                 #         ix2label=ix2label,
                 #         y_means_cv=None if y_means_cv is None else y_means_cv,
                 #         segtype=self.segtype,
@@ -2359,6 +2419,9 @@ class AcousticEncoderDecoder(object):
                                 for l in range(len(segment_embeddings)):
                                     fd_minibatch[self.correspondence_embedding_placeholders[l]] = segment_embeddings[l]
                                     fd_minibatch[self.correspondence_feature_placeholders[l]] = segment_spans[l]
+
+                            if self.task.lower().startswith('presegmented_autoencoder'):
+                                fd_minibatch[self.gold_boundaries] = gold_boundaries_train[indices]
 
                         info_dict = self.run_train_step(fd_minibatch)
                         loss_cur = info_dict['loss']
@@ -2467,6 +2530,7 @@ class AcousticEncoderDecoder(object):
                                     X_mask_cv=X_mask_cv,
                                     y_cv=y_cv,
                                     y_mask_cv=y_mask_cv,
+                                    gold_boundaries_cv=gold_boundaries_cv,
                                     ix2label=ix2label,
                                     y_means_cv=None if y_means_cv is None else y_means_cv,
                                     segtype=self.segtype,

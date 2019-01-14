@@ -264,6 +264,7 @@ class HMLSTMCell(LayerRNNCell):
             num_layers,
             training=False,
             forget_bias=1.0,
+            force_boundary=False,
             activation=None,
             inner_activation='tanh',
             recurrent_activation='sigmoid',
@@ -313,6 +314,8 @@ class HMLSTMCell(LayerRNNCell):
 
                 self._forget_bias = forget_bias
 
+                self._force_boundary = force_boundary
+
                 self._activation = get_activation(activation, session=self.session, training=self._training)
                 self._inner_activation = get_activation(inner_activation, session=self.session, training=self._training)
                 self._recurrent_activation = get_activation(recurrent_activation, session=self.session, training=self._training)
@@ -352,9 +355,6 @@ class HMLSTMCell(LayerRNNCell):
                 self._implementation = implementation
 
                 self._epsilon = 1e-8
-
-                print('Training:')
-                print(self._training)
 
     def _regularize(self, var, regularizer):
         if regularizer is not None:
@@ -430,9 +430,14 @@ class HMLSTMCell(LayerRNNCell):
                 if self._implementation == 2:
                     self._kernel_boundary = []
 
+                if self._force_boundary:
+                    n_boundary_dims = self._num_layers - 1
+                else:
+                    n_boundary_dims = 0
+
                 for l in range(self._num_layers):
                     if l == 0:
-                        bottom_up_dim = inputs_shape[1].value
+                        bottom_up_dim = inputs_shape[1].value - n_boundary_dims
                     else:
                         bottom_up_dim = self._num_units[l - 1]
                     bottom_up_dim += self._refeed_boundary and (self._implementation == 1)
@@ -493,37 +498,39 @@ class HMLSTMCell(LayerRNNCell):
                     self._regularize(bias, self._bias_regularizer)
                     self._bias.append(bias)
 
-                    if self._implementation == 1:
-                        bias_boundary = bias[:, -1:]
-                        self._bias_boundary.append(bias_boundary)
+                    if not self._force_boundary:
+                        if self._implementation == 1:
+                            bias_boundary = bias[:, -1:]
+                            self._bias_boundary.append(bias_boundary)
 
-                    if self._implementation == 2:
-                        kernel_boundary = self.add_variable(
-                            'kernel_boundary_%d' % l,
-                            shape=[self._num_units[l] + self._refeed_boundary, 1],
-                            initializer=self._boundary_initializer
-                        )
-                        if self._weight_normalization:
-                            kernel_boundary_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_boundary_g_%d' % l)
-                            kernel_boundary = kernel_boundary / (
-                                        tf.norm(kernel_boundary, axis=0) + self._epsilon) * kernel_boundary_g
-                        self._regularize(kernel_boundary, self._boundary_regularizer)
-                        self._kernel_boundary.append(kernel_boundary)
+                        if self._implementation == 2:
+                            kernel_boundary = self.add_variable(
+                                'kernel_boundary_%d' % l,
+                                shape=[self._num_units[l] + self._refeed_boundary, 1],
+                                initializer=self._boundary_initializer
+                            )
+                            if self._weight_normalization:
+                                kernel_boundary_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_boundary_g_%d' % l)
+                                kernel_boundary = kernel_boundary / (
+                                            tf.norm(kernel_boundary, axis=0) + self._epsilon) * kernel_boundary_g
+                            self._regularize(kernel_boundary, self._boundary_regularizer)
+                            self._kernel_boundary.append(kernel_boundary)
 
-                        bias_boundary = self.add_variable(
-                            'bias_boundary_%d' % l,
-                            shape=[1, 1],
-                            initializer=self._bias_initializer
-                        )
-                        self._regularize(bias_boundary, self._bias_regularizer)
-                        self._bias_boundary.append(bias_boundary)
+                            bias_boundary = self.add_variable(
+                                'bias_boundary_%d' % l,
+                                shape=[1, 1],
+                                initializer=self._bias_initializer
+                            )
+                            self._regularize(bias_boundary, self._bias_regularizer)
+                            self._bias_boundary.append(bias_boundary)
 
-                if self._boundary_slope_annealing_rate and self.global_step is not None:
-                    rate = self._boundary_slope_annealing_rate
-                    if self._slope_annealing_max is None:
-                        self.boundary_slope_coef = 1 + rate * tf.cast(self.global_step, dtype=tf.float32)
-                    else:
-                        self.boundary_slope_coef = tf.minimum(self._slope_annealing_max, 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
+                if not self._force_boundary:
+                    if self._boundary_slope_annealing_rate and self.global_step is not None:
+                        rate = self._boundary_slope_annealing_rate
+                        if self._slope_annealing_max is None:
+                            self.boundary_slope_coef = 1 + rate * tf.cast(self.global_step, dtype=tf.float32)
+                        else:
+                            self.boundary_slope_coef = tf.minimum(self._slope_annealing_max, 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
 
                 if self._state_slope_annealing_rate and self.global_step is not None:
                     rate = self._state_slope_annealing_rate
@@ -540,7 +547,13 @@ class HMLSTMCell(LayerRNNCell):
                 new_output = []
                 new_state = []
 
-                h_below = inputs
+                if self._force_boundary:
+                    n_boundary_dims = self._num_layers - 1
+                    h_below = inputs[:, :-n_boundary_dims]
+                else:
+                    n_boundary_dims = 0
+                    h_below = inputs
+
                 z_below = None
 
                 if self._power:
@@ -667,26 +680,33 @@ class HMLSTMCell(LayerRNNCell):
                     h = copy_prob * h_behind + (1 - copy_prob) * h
 
                     # Compute the current boundary probability
+
                     if l < self._num_layers - 1:
-                        if self._implementation == 2:
-                            z_in = h
-                            if self._refeed_boundary:
-                                z_in = tf.concat([z_behind, z_in], axis=1)
-                            # In implementation 2, boundary is a function of the hidden state
-                            z = tf.matmul(z_in, self._kernel_boundary[l])
+                        if self._force_boundary:
+                            inputs_last_dim = inputs.shape[-1]
+                            z = inputs[:, inputs_last_dim + l - 1:inputs_last_dim + l]
                         else:
-                            # In implementation 1, boundary has its own slice of the hidden state preactivations
-                            z = s[:, units * 4:]
+                            if self._implementation == 2:
+                                z_in = h
+                                if self._refeed_boundary:
+                                    z_in = tf.concat([z_behind, z_in], axis=1)
+                                # In implementation 2, boundary is a function of the hidden state
+                                z = tf.matmul(z_in, self._kernel_boundary[l])
+                            else:
+                                # In implementation 1, boundary has its own slice of the hidden state preactivations
+                                z = s[:, units * 4:]
 
-                        z = z + self._bias_boundary[l]
+                            z = z + self._bias_boundary[l]
 
-                        if self._boundary_slope_annealing_rate and self.global_step is not None:
-                            z *= self.boundary_slope_coef
+                            if self._boundary_slope_annealing_rate and self.global_step is not None:
+                                z *= self.boundary_slope_coef
 
-                        z = self._boundary_activation(z)
+                            z = self._boundary_activation(z)
 
-                        # if l > 0:
-                        #     z = z * z_below
+                            # if l > 0:
+                            #     z = z * z_below
+                    else:
+                        z = None
 
                     if l < self._num_layers - 1:
                         output_l = (h, z)
@@ -716,6 +736,7 @@ class HMLSTMSegmenter(object):
             num_layers,
             training=False,
             forget_bias=1.0,
+            force_boundary=False,
             activation=None,
             inner_activation='tanh',
             recurrent_activation='sigmoid',
@@ -760,6 +781,7 @@ class HMLSTMSegmenter(object):
                 self.num_layers = num_layers
                 self.training = training
                 self.forget_bias = forget_bias
+                self.force_boundary = force_boundary
 
                 self.activation = activation
                 self.inner_activation = inner_activation
@@ -809,6 +831,7 @@ class HMLSTMSegmenter(object):
                     self.num_layers,
                     training=self.training,
                     forget_bias=self.forget_bias,
+                    force_boundary=self.force_boundary,
                     activation=self.activation,
                     inner_activation=self.inner_activation,
                     recurrent_activation=self.recurrent_activation,
@@ -842,9 +865,8 @@ class HMLSTMSegmenter(object):
 
         self.built = True
 
-    def __call__(self, inputs, mask=None):
-        if not self.built:
-            self.build(inputs)
+    def __call__(self, inputs, mask=None, boundaries=None):
+        assert self.force_boundary != (boundaries is None), 'A boundaries arg must be provided always and only when force_boundary is true'
 
         with self.session.as_default():
             with self.session.graph.as_default():
@@ -852,6 +874,14 @@ class HMLSTMSegmenter(object):
                     sequence_length = tf.reduce_sum(mask, axis=1)
                 else:
                     sequence_length = None
+
+                if self.force_boundary:
+                    assert boundaries.shape[-1] == (self.num_layers - 1)
+                    inputs = tf.concat([inputs, boundaries], axis=-1)
+
+                if not self.built:
+                    self.build(inputs)
+
                 output, state = tf.nn.dynamic_rnn(
                     self.cell,
                     inputs,
@@ -1537,6 +1567,7 @@ class RNNLayer(object):
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             return_sequences=True,
+            batch_normalization_decay=None,
             name=None,
             session=None
     ):
@@ -1549,7 +1580,9 @@ class RNNLayer(object):
         self.kernel_initializer = kernel_initializer
         self.bias_initializer = bias_initializer
         self.refeed_outputs = refeed_outputs
+        assert not (return_sequences and batch_normalization_decay), 'batch_normalization_decay can only be used when return_sequences=False'
         self.return_sequences = return_sequences
+        self.batch_normalization_decay = batch_normalization_decay
         self.name = name
 
         self.rnn_layer = None
@@ -1584,6 +1617,16 @@ class RNNLayer(object):
             with self.session.graph.as_default():
 
                 H = self.rnn_layer(inputs, mask=mask)
+                if self.batch_normalization_decay:
+                    H = tf.contrib.layers.batch_norm(
+                        H,
+                        decay=self.batch_normalization_decay,
+                        center=True,
+                        scale=True,
+                        zero_debias_moving_mean=True,
+                        is_training=self.training,
+                        updates_collections=None
+                    )
 
                 return H
 
@@ -1722,8 +1765,10 @@ def rnn_encoder(
             for l in range(n_layers):
                 if l < n_layers - 1:
                     activation = inner_activation
+                    batch_normalization_decay_cur = None
                 else:
                     activation = activation
+                    batch_normalization_decay_cur = batch_normalization_decay
 
                 rnn_layer = RNNLayer(
                     training=training,
@@ -1731,6 +1776,7 @@ def rnn_encoder(
                     activation=activation,
                     recurrent_activation=recurrent_activation,
                     return_sequences=False,
+                    batch_normalization_decay=batch_normalization_decay_cur,
                     name='RNNEncoder%s' % l,
                     session=session
                 )
@@ -1988,4 +2034,5 @@ def rnn_decoder(
             out = compose_lambdas(lambdas, **kwargs)
 
             return out
+
 

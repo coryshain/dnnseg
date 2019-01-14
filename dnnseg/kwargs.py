@@ -147,7 +147,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'task',
         'autoencoder',
         str,
-        "Task to perform. One of ``['utterance_classifier', 'autoencoder', 'streaming_autoencoder']``."
+        "Task to perform. One of ``['utterance_classifier', 'autoencoder', 'streaming_autoencoder', 'presegmented_autoencoder_wrd', 'presegmented_autoencoder_phn']``."
     ),
     Kwarg(
         'segtype',

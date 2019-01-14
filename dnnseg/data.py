@@ -177,7 +177,7 @@ def extract_states_at_timestamps(
     assert activation in ['sigmoid', 'softmax', 'tanh', 'linear', None]
     assert not (activation in ['linear', None] and discretize), "States with linear activation can't be discretized."
 
-    ix = np.minimum(np.rint((timestamps * 1000) / offset), len(states) - 1).astype('int')
+    ix = np.minimum(np.floor((timestamps * 1000) / offset), len(states) - 1).astype('int')
     out = states[ix]
 
     if discretize:
@@ -235,16 +235,6 @@ def extract_states_at_timestamps_batch(
         out.append(out_cur)
 
     return out
-
-def split_seq_at_timestamps(
-        timestamps,
-        seq,
-        offset=10
-):
-    ix = np.minimum(np.rint((timestamps * 1000) / offset) + 1, len(seq) - 1).astype('int')
-
-    out = np.split()
-
 
 
 def binary_segments_to_intervals_inner(binary_segments, mask, src_segments=None, labels=None, offset=10):
@@ -642,7 +632,6 @@ class AcousticDataset(object):
                     out_str += '|    ETA - %s     ' % time_str
                 sys.stderr.write(out_str)
 
-
             new_data = AcousticDatafile(
                 wav_file,
                 sr=sr,
@@ -652,6 +641,7 @@ class AcousticDataset(object):
                 order=order,
                 clip_timesteps=clip_timesteps
             )
+
             self.data[new_data.ID] = new_data
             t1 = time.time()
             times.append(t1-t0)
@@ -705,6 +695,7 @@ class AcousticDataset(object):
 
     def segment_and_stack(
             self,
+            feat_type='acoustic',
             segments='vad',
             max_len=None,
             padding='pre',
@@ -724,6 +715,7 @@ class AcousticDataset(object):
             else:
                 segments_cur = segments
             new_feats, new_mask = self.data[f].segment_and_stack(
+                feat_type=feat_type,
                 segments=segments_cur,
                 max_len=max_len,
                 padding=padding,
@@ -786,7 +778,7 @@ class AcousticDataset(object):
             with_deltas=False,
             resample=None
     ):
-        targets, mask = self.segment_and_stack(
+        return self.segment_and_stack(
             segments=segments,
             max_len=max_len,
             padding=padding,
@@ -796,7 +788,22 @@ class AcousticDataset(object):
             with_deltas=with_deltas,
             resample=resample
         )
-        return targets, mask
+
+    def one_hot_boundaries(
+            self,
+            inner_segments='wrd',
+            outer_segments='vad',
+            padding='post',
+            max_len=None,
+            reverse=False
+    ):
+        return self.segment_and_stack(
+            feat_type=inner_segments,
+            segments=outer_segments,
+            max_len=max_len,
+            padding=padding,
+            reverse=reverse
+        )
 
     def segments(self, segment_type='vad'):
         return pd.concat([self.data[f].segments(segment_type=segment_type) for f in self.fileIDs], axis=0)
@@ -1096,8 +1103,9 @@ class AcousticDatafile(object):
             order=order
         )
         feats = np.transpose(feats, [1, 0])
+
         if self.clip_timesteps is not None:
-            feats = feats[:, :clip_timesteps]
+            feats = feats[:clip_timesteps, :]
 
         self.feats = feats
         self.shape = self.feats.shape
@@ -1188,8 +1196,24 @@ class AcousticDatafile(object):
         if segment_type == 'rnd':
             return self.rnd_segments
 
+    def segments_to_one_hot(self, segments):
+        one_hot = np.zeros(len(self))
+        ix = np.array(segments.end)
+        ix *= 1000 / self.offset
+        ix = ix.astype('int')
+        one_hot[ix] = 1
+
+        return one_hot
+
+    def one_hot_boundaries(self, segment_type='vad'):
+        segments = self.segments(segment_type)
+        one_hot = self.segments_to_one_hot(segments)
+
+        return one_hot
+
     def segment_and_stack(
             self,
+            feat_type='acoustic',
             segments='vad',
             max_len=None,
             padding='pre',
@@ -1199,6 +1223,19 @@ class AcousticDatafile(object):
             with_deltas=True,
             resample=None
     ):
+        if not isinstance(feat_type, list):
+            feat_type = [feat_type]
+
+        feats = []
+
+        for f in feat_type:
+            if f.lower() == 'acoustic':
+                feats.append(self.feats)
+            else :
+                feats.append(self.one_hot_boundaries(segment_type=f)[...,None])
+
+        feats = np.concatenate(feats, axis=-1)
+
         assert not (normalize and center), 'normalize and center cannot both be true, since normalize constrains to the interval [0,1] and center recenters at 0.'
         if isinstance(segments, str):
             if segments == 'vad':
@@ -1216,10 +1253,10 @@ class AcousticDatafile(object):
 
         pad_seqs = padding not in ['None', None]
 
-        bounds = np.array(
-            np.rint((segments_arr[['start', 'end']] * 1000 / self.offset)),
-            dtype=np.int32
-        )
+        bounds_left = np.floor(segments_arr.start * 1000 / self.offset)
+        bounds_right = np.ceil(segments_arr.end * 1000 / self.offset)
+        bounds = np.stack([bounds_left, bounds_right], axis=1).astype(np.int32)
+
         feats_split = []
         mask_split = []
         for i in range(len(bounds)):
@@ -1227,7 +1264,12 @@ class AcousticDatafile(object):
             e = bounds[i, 1]
             if max_len is not None:
                 e = min(e, s + max_len)
-            new_feats = self.feats[s:e, :]
+            new_feats = feats[s:e]
+
+            if not ('acoustic' in [f.lower() for f in feat_type]):
+                # Returning 1-hot segments, not acoustics, insert final boundary
+                new_feats[-1] = 1
+
             length = e - s
             if resample and new_feats.shape[0] > 0:
                 length = resample
@@ -1432,9 +1474,9 @@ class AcousticDatafile(object):
     def segs2indicator(self, segs, location='start'):
         out = np.zeros(len(self))
         if location == 'start':
-            ix = np.rint(segs.start * 1000 / self.offset).astype('int')
+            ix = np.floor(segs.start * 1000 / self.offset).astype('int')
         else:
-            ix = np.rint(segs.end * 1000 / self.offset).astype('int') - 1
+            ix = np.floor(segs.end * 1000 / self.offset).astype('int') - 1
 
         out[ix] = 1.
 
@@ -1443,10 +1485,9 @@ class AcousticDatafile(object):
     def segs2mask(self, segs, max_len=None):
         out = np.zeros(len(self))
 
-        bounds = np.array(
-            np.rint((segs[['start', 'end']] * 1000 / self.offset)),
-            dtype=np.int32
-        )
+        bounds_left = np.floor(segs.start * 1000 / self.offset)
+        bounds_right = np.ceil(segs.end * 1000 / self.offset)
+        bounds = np.stack([bounds_left, bounds_right], axis=1).astype(np.int32)
 
         for i in range(len(bounds)):
             s = bounds[i, 0]
