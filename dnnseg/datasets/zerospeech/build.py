@@ -21,12 +21,13 @@ xitsonga_files = []
 with open(args.zs + '/sample_files.txt', 'r') as f:
     for l in f.readlines():
         filename = l.strip()[:-4]
-        if filename != 's0103a':
-            sample_files.append(filename)
+        sample_files.append(filename)
 
 with open(args.zs + '/english_files.txt', 'r') as f:
     for l in f.readlines():
-        english_files.append(l.strip()[:-4])
+        filename = l.strip()[:-4]
+        if filename != 's0103a':
+            english_files.append(filename)
 
 with open(args.zs + '/xitsonga_files.txt', 'r') as f:
     for l in f.readlines():

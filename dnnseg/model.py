@@ -722,7 +722,7 @@ class AcousticEncoderDecoder(object):
                         training=self.training,
                         units=self.frame_dim,
                         activation=self.decoder_activation,
-                        batch_normalization_decay=self.decoder_batch_normalization_decay,
+                        batch_normalization_decay=None,
                         session=self.sess
                     )(decoder)
 
