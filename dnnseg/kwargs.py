@@ -183,7 +183,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'binary_classifier',
         False,
         bool,
-        "Implement the classifier as a binary code in which categories can share bits. If ``False``, implements the classifier using independent categories."
+        "Implement the classifier as a binary code in which categories can share bits. If ``False``, implements the classifier using independent categories. Ignored unless **task** is ``utterance_classifer``."
     ),
     Kwarg(
         'emb_dim',

@@ -92,6 +92,8 @@ def get_regularizer(init, scale=None, session=None):
                 out = getattr(tf.contrib.layers, init)(scale=scale)
             elif isinstance(init, float):
                 out = tf.contrib.layers.l2_regularizer(scale=init)
+            else:
+                raise ValueError('Unrecognized value "%s" for init parameter of get_regularizer()' %init)
 
             return out
 

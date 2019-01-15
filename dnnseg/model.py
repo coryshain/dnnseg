@@ -309,6 +309,7 @@ class AcousticEncoderDecoder(object):
                 self.batch_len = tf.shape(self.inputs)[0]
 
                 self.loss_summary = tf.placeholder(tf.float32, name='loss_summary')
+                self.reg_summary = tf.placeholder(tf.float32, name='regularizer_loss')
                 self.homogeneity = tf.placeholder(tf.float32, name='homogeneity')
                 self.completeness = tf.placeholder(tf.float32, name='completeness')
                 self.v_measure = tf.placeholder(tf.float32, name='v_measure')
@@ -2284,13 +2285,6 @@ class AcousticEncoderDecoder(object):
             if self.plot_ix is None or len(self.plot_ix) != n_plot:
                 self.plot_ix = np.random.choice(np.arange(len(X_cv)), size=n_plot)
 
-        print(X_cv.shape)
-        print(y_cv.shape)
-        print(y_mask_cv.shape)
-        print(gold_boundaries_cv.shape)
-        print(gold_boundaries_cv.sum())
-        print(len(train_data.segments(segment_type=inner_segment_type)))
-
         t1 = time.time()
 
         sys.stderr.write('Training and cross-validation data extracted in %ds\n\n' % (t1 - t0))
@@ -2380,6 +2374,7 @@ class AcousticEncoderDecoder(object):
                         pb = tf.contrib.keras.utils.Progbar(n_minibatch)
 
                     loss_total = 0.
+                    reg_total = 0.
 
                     for i in range(0, n_train, minibatch_size):
                         if self.pad_seqs:
@@ -2388,7 +2383,6 @@ class AcousticEncoderDecoder(object):
                             indices = perm[i]
 
                         fd_minibatch = {
-                            self.training: True,
                             self.training: True
                         }
 
@@ -2432,6 +2426,7 @@ class AcousticEncoderDecoder(object):
                         if not np.isfinite(loss_cur):
                             loss_cur = 0
                         loss_total += loss_cur
+                        reg_total += reg_cur
 
                         self.sess.run(self.incr_global_batch_step)
                         if verbose:
@@ -2505,6 +2500,7 @@ class AcousticEncoderDecoder(object):
                                 )
 
                     loss_total /= n_minibatch
+                    reg_total /= n_minibatch
 
                     self.sess.run(self.incr_global_step)
 
@@ -2539,7 +2535,8 @@ class AcousticEncoderDecoder(object):
                                 )
 
                             fd_summary = {
-                                self.loss_summary: loss_total
+                                self.loss_summary: loss_total,
+                                self.reg_summary: reg_total
                             }
 
                             if self.task == 'utterance_classifier':
