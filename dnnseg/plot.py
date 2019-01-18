@@ -37,6 +37,7 @@ def plot_acoustic_features(
         targets,
         preds,
         segmentation_probs=None,
+        segmentations=None,
         states=None,
         target_means=None,
         sr=16000,
@@ -132,6 +133,15 @@ def plot_acoustic_features(
 
             segmentation_probs_cur = np.swapaxes(segmentation_probs_cur, -2, -1)
 
+            if segmentations is None:
+                segmentations_cur = segmentation_probs_cur
+            else:
+                segmentations_cur = segmentations[i]
+                if drop_zeros:
+                    segmentations_cur = segmentations_cur[inputs_select]
+
+                    segmentations_cur = np.swapaxes(segmentations_cur, -2, -1)
+
             df = pd.DataFrame(
                 segmentation_probs_cur,
                 index=list(range(1, segmentation_probs_cur.shape[0] + 1))
@@ -142,7 +152,7 @@ def plot_acoustic_features(
             ax_seg.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
             ax_seg.set_yticklabels(df.index)
             ax_seg.set_xlabel('Time')
-            ax_seg.set_title('Segmentations')
+            ax_seg.set_title('Segmentation Probabilities')
 
             colors = [plt.get_cmap('gist_rainbow')(1. * j / len(segmentation_probs_cur)) for j in range(len(segmentation_probs_cur))]
             segs_hard = []
@@ -154,7 +164,7 @@ def plot_acoustic_features(
                 smoothing_algorithm = 'rbf'
                 n_points = 1000
 
-            for j, s in enumerate(segmentation_probs_cur):
+            for j, s in enumerate(segmentations_cur):
                 timestamps, basis, segs_smoothed = extract_segment_timestamps(
                     s,
                     algorithm=smoothing_algorithm,

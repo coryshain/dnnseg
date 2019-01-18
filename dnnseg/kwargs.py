@@ -180,6 +180,30 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Coefficient by which to scale correspondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
     ),
     Kwarg(
+        'correspondence_loss_implementation',
+        3,
+        int,
+        "Implementation of correspondence AE loss. One of ``[1, 2, 3]``. Implementation 1: Take average of acoustics of saved segments, weighted by cosine similarity to current states. Implementation 2: Use acoustics of most similar saved segment to current state. Implementation 3: Take average of losses with respect to each saved segment, weighted by cosine similarity to the current state."
+    ),
+    Kwarg(
+        'correspondence_live_targets',
+        True,
+        bool,
+        "Whether to compute correspondence AE loss against targets sampled from segmentations generated for the current minibatch. If ``False``, correspondence targets are sampled from previous minibatch. When used, correspondence targets faithfully represent the current state of the network and losses backpropagate into the representations and boundaries of both segments in the pair, but computing losses is more computationally intensive because Fourier resampling of acoustic features must be performed inside the Tensorflow graph."
+    ),
+    Kwarg(
+        'correspondence_n_timesteps',
+        None,
+        [int, None],
+        "Number of timesteps per utterance to use for computing correspondence loss. If positive integer :math:`k`, use only the math:`k` most probable segmentation points per segmenter network. If ``0`` or ``None``, use all timesteps."
+    ),
+    Kwarg(
+        'correspondence_alpha',
+        1.,
+        float,
+        "Peakiness factor for correspondence AE loss. If ``1``, use cosine similarity weights directly. If ``< 1``, decrease peakiness of weights. If ``> 1``, increase peakiness of weights. Ignored unless **correspondence_implementation** is ``1``."
+    ),
+    Kwarg(
         'binary_classifier',
         False,
         bool,
@@ -255,6 +279,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['boundary_activation']
     ),
     Kwarg(
+        'encoder_boundary_discretizer',
+        None,
+        [str, None],
+        "Discretization function to apply to encoder boundary activations, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
+    ),
+    Kwarg(
         'encoder_weight_regularization',
         None,
         [str, float, None],
@@ -290,7 +320,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'encoder_state_discretizer',
         None,
         [str, None],
-        "Discretization function to apply to encoder hidden states, one of ``None``, ``'bsn_round'``, or ``'bsn_bernoulli'``. If ``None``, no discretization."
+        "Discretization function to apply to encoder hidden states, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
     ),
     Kwarg(
         'encoder_weight_normalization',
@@ -639,10 +669,10 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Frequency (in iterations) with which to save model checkpoints."
     ),
     Kwarg(
-        'segment_eval_freq',
+        'eval_freq',
         1,
         int,
-        "Frequency (in iterations) with which to evaluate segmentations."
+        "Frequency (in iterations) with which to evaluate model."
     ),
     Kwarg(
         'log_graph',

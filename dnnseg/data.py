@@ -714,23 +714,24 @@ class AcousticDataset(object):
                 segments_cur = segments[f]
             else:
                 segments_cur = segments
-            new_feats, new_mask = self.data[f].segment_and_stack(
-                feat_type=feat_type,
-                segments=segments_cur,
-                max_len=max_len,
-                padding=padding,
-                reverse=reverse,
-                normalize=normalize,
-                center=center,
-                with_deltas=with_deltas,
-                resample = resample,
-            )
-            if pad_seqs:
-                feats.append(new_feats)
-                mask.append(new_mask)
-            else:
-                feats += new_feats
-                mask += new_mask
+            if len(segments_cur) > 0:
+                new_feats, new_mask = self.data[f].segment_and_stack(
+                    feat_type=feat_type,
+                    segments=segments_cur,
+                    max_len=max_len,
+                    padding=padding,
+                    reverse=reverse,
+                    normalize=normalize,
+                    center=center,
+                    with_deltas=with_deltas,
+                    resample = resample,
+                )
+                if pad_seqs:
+                    feats.append(new_feats)
+                    mask.append(new_mask)
+                else:
+                    feats += new_feats
+                    mask += new_mask
 
         if pad_seqs:
             if padding not in ['None', None]:
@@ -944,6 +945,7 @@ class AcousticDataset(object):
             offset=10,
             n_points=None,
             mask=None,
+            batch_mask=None,
             padding=None
     ):
         n_levels = len(segmentation_probs)
@@ -970,7 +972,7 @@ class AcousticDataset(object):
                 parent_segment_type=parent_segment_type,
                 states=[s[i:i+n_utt] for s in states],
                 discretize=discretize,
-                mask=mask[i:i+n_utt],
+                mask=mask[i:i + n_utt],
                 state_activation=state_activation,
                 algorithm=algorithm,
                 algorithm_params=algorithm_params,
