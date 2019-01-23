@@ -661,7 +661,7 @@ class AcousticDataset(object):
         self.phn_perm = None
         self.phn_perm_inv = None
 
-    def features(self, fold=None, filter=None):
+    def features(self, fold=None, filter=None, pad_left=None, pad_right=None):
         out = []
         new_series = []
         for f in self.fileIDs:
@@ -714,23 +714,24 @@ class AcousticDataset(object):
                 segments_cur = segments[f]
             else:
                 segments_cur = segments
-            new_feats, new_mask = self.data[f].segment_and_stack(
-                feat_type=feat_type,
-                segments=segments_cur,
-                max_len=max_len,
-                padding=padding,
-                reverse=reverse,
-                normalize=normalize,
-                center=center,
-                with_deltas=with_deltas,
-                resample = resample,
-            )
-            if pad_seqs:
-                feats.append(new_feats)
-                mask.append(new_mask)
-            else:
-                feats += new_feats
-                mask += new_mask
+            if len(segments_cur) > 0:
+                new_feats, new_mask = self.data[f].segment_and_stack(
+                    feat_type=feat_type,
+                    segments=segments_cur,
+                    max_len=max_len,
+                    padding=padding,
+                    reverse=reverse,
+                    normalize=normalize,
+                    center=center,
+                    with_deltas=with_deltas,
+                    resample = resample,
+                )
+                if pad_seqs:
+                    feats.append(new_feats)
+                    mask.append(new_mask)
+                else:
+                    feats += new_feats
+                    mask += new_mask
 
         if pad_seqs:
             if padding not in ['None', None]:
@@ -807,6 +808,29 @@ class AcousticDataset(object):
 
     def segments(self, segment_type='vad'):
         return pd.concat([self.data[f].segments(segment_type=segment_type) for f in self.fileIDs], axis=0)
+
+    def get_streaming_data_feed(
+            self,
+            left_window_len,
+            right_window_len,
+            minibatch_size,
+            filter=None,
+            randomize=True
+    ):
+        feats, _ = self.features(filter=filter)
+        ix = []
+        for i, f in enumerate(feats):
+            file_ix = np.ones(f.shape[-2]) * i
+            time_ix = np.arange(f.shape[1])
+            print(file_ix.shape)
+            print(time_ix.shape)
+            ix.append(np.stack([file_ix, time_ix], axis=1))
+        for x in ix:
+            print(x.shape)
+        ix = np.concatenate(ix, axis=0)
+        print(ix.shape)
+
+
 
     def ix2label(self, segment_type='wrd'):
         labels = self.segments(segment_type=segment_type).label
@@ -944,6 +968,7 @@ class AcousticDataset(object):
             offset=10,
             n_points=None,
             mask=None,
+            batch_mask=None,
             padding=None
     ):
         n_levels = len(segmentation_probs)
@@ -970,7 +995,7 @@ class AcousticDataset(object):
                 parent_segment_type=parent_segment_type,
                 states=[s[i:i+n_utt] for s in states],
                 discretize=discretize,
-                mask=mask[i:i+n_utt],
+                mask=mask[i:i + n_utt],
                 state_activation=state_activation,
                 algorithm=algorithm,
                 algorithm_params=algorithm_params,
@@ -1017,10 +1042,12 @@ class AcousticDataset(object):
 
     def dump_segmentations_to_textgrid(self, outdir=None, suffix='', segments=None):
         for f in self.fileIDs:
-            if isinstance(segments, str):
-                segments_cur = segments
-            else:
-                segments_cur = segments[f]
+            segments_cur = []
+            for seg in segments:
+                if isinstance(seg, str):
+                    segments_cur.append(seg)
+                else:
+                    segments_cur.append(seg[f])
 
             self.data[f].dump_segmentations_to_textgrid(
                 outdir=outdir,
@@ -1502,40 +1529,46 @@ class AcousticDatafile(object):
         if outdir is None:
             outdir = self.dir
 
-        if isinstance(segments, str):
-            segment_type = segments
-            segments = self.segments(segment_type)
-        else:
-            segment_type = 'pred'
+        if not isinstance(segments, list):
+            segments = [segments]
 
-        path = outdir + '/' + self.ID + '_' + segment_type + suffix + '.TextGrid'
+        path = outdir + '/' + self.ID + '_segmentations' + suffix + '.TextGrid'
         with open(path, 'w') as f:
-            f.write('File type = "ooTextFile"\n')
-            f.write('Object class = "TextGrid"\n')
-            f.write('\n')
-            f.write('xmin = %.3f\n' % segments.start.iloc[0])
-            f.write('xmax = %.3f\n' % segments.end.iloc[-1])
-            f.write('tiers? <exists>\n')
-            f.write('size = 1\n')
-            f.write('item []:\n')
-            f.write('    item [1]:\n')
-            f.write('        class = "IntervalTier"\n')
-            f.write('        class = "segmentations"\n')
-            f.write('        xmin = %.3f\n' % segments.start.iloc[0])
-            f.write('        xmax = %.3f\n' % segments.end.iloc[-1])
-            f.write('        intervals: size = %d\n' % len(segments))
+            for i, seg in enumerate(segments):
+                if isinstance(seg, str):
+                    segment_type = seg
+                    seg = self.segments(segment_type)
+                else:
+                    segment_type = 'pred'
 
-            row_str = '        intervals [%d]:\n' + \
-                '            xmin = %.3f\n' + \
-                '            xmax = %.3f\n' + \
-                '            text = "%s"\n\n'
+                if i == 0:
+                    f.write('File type = "ooTextFile"\n')
+                    f.write('Object class = "TextGrid"\n')
+                    f.write('\n')
+                    f.write('xmin = %.3f\n' % seg.start.iloc[0])
+                    f.write('xmax = %.3f\n' % seg.end.iloc[-1])
+                    f.write('tiers? <exists>\n')
+                    f.write('size = %d\n' %len(segments))
+                    f.write('item []:\n')
 
-            if 'label' in segments.columns:
-                for i, r in segments[['start', 'end', 'label']].iterrows():
-                    f.write(row_str % (i, r.start, r.end, r.label))
-            else:
-                for i, r in segments[['start', 'end']].iterrows():
-                    f.write(row_str % (i, r.start, r.end, ''))
+                f.write('    item [%d]:\n' %i)
+                f.write('        class = "IntervalTier"\n')
+                f.write('        class = "segmentations_%s"\n' %segment_type)
+                f.write('        xmin = %.3f\n' % seg.start.iloc[0])
+                f.write('        xmax = %.3f\n' % seg.end.iloc[-1])
+                f.write('        intervals: size = %d\n' % len(seg))
+
+                row_str = '        intervals [%d]:\n' + \
+                    '            xmin = %.3f\n' + \
+                    '            xmax = %.3f\n' + \
+                    '            text = "%s"\n\n'
+
+                if 'label' in seg.columns:
+                    for j, r in seg[['start', 'end', 'label']].iterrows():
+                        f.write(row_str % (j, r.start, r.end, r.label))
+                else:
+                    for j, r in seg[['start', 'end']].iterrows():
+                        f.write(row_str % (j, r.start, r.end, ''))
 
     def score_segmentation(self, true, pred, tol=0.02):
         if isinstance(true, str):

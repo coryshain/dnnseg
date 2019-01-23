@@ -271,6 +271,7 @@ class HMLSTMCell(LayerRNNCell):
             inner_activation='tanh',
             recurrent_activation='sigmoid',
             boundary_activation='hard_sigmoid',
+            boundary_discretizer=None,
             bottomup_initializer='glorot_uniform_initializer',
             recurrent_initializer='orthogonal_initializer',
             topdown_initializer='glorot_uniform_initializer',
@@ -322,6 +323,15 @@ class HMLSTMCell(LayerRNNCell):
                 self._inner_activation = get_activation(inner_activation, session=self.session, training=self._training)
                 self._recurrent_activation = get_activation(recurrent_activation, session=self.session, training=self._training)
                 self._boundary_activation = get_activation(boundary_activation, session=self.session, training=self._training)
+                if boundary_discretizer:
+                    self._boundary_discretizer = get_activation(
+                        boundary_discretizer,
+                        session=self.session,
+                        training=self._training,
+                        from_logits=False
+                    )
+                else:
+                    self._boundary_discretizer = None
 
                 self._bottomup_initializer = get_initializer(bottomup_initializer, session=self.session)
                 self._recurrent_initializer = get_initializer(recurrent_initializer, session=self.session)
@@ -373,7 +383,7 @@ class HMLSTMCell(LayerRNNCell):
         out = []
         for l in range(self._num_layers):
             if l < self._num_layers - 1:
-                size = (self._num_units[l], self._num_units[l], 1)
+                size = (self._num_units[l], self._num_units[l], 1, 1)
             else:
                 size = (self._num_units[l], self._num_units[l])
 
@@ -388,7 +398,7 @@ class HMLSTMCell(LayerRNNCell):
         out = []
         for l in range(self._num_layers):
             if l < self._num_layers - 1:
-                size = (self._num_units[l], 1)
+                size = (self._num_units[l], 1, 1)
             else:
                 size = (self._num_units[l],)
 
@@ -553,7 +563,6 @@ class HMLSTMCell(LayerRNNCell):
                     n_boundary_dims = self._num_layers - 1
                     h_below = inputs[:, :-n_boundary_dims]
                 else:
-                    n_boundary_dims = 0
                     h_below = inputs
 
                 z_below = None
@@ -589,7 +598,7 @@ class HMLSTMCell(LayerRNNCell):
 
                     # z_behind: Previous boundary probability at current layer (implicitly 1 if final layer)
                     if l < self._num_layers - 1:
-                        z_behind = layer[2]
+                        z_behind = layer[3]
                     else:
                         z_behind = None
 
@@ -686,7 +695,8 @@ class HMLSTMCell(LayerRNNCell):
                     if l < self._num_layers - 1:
                         if self._force_boundary:
                             inputs_last_dim = inputs.shape[-1]
-                            z = inputs[:, inputs_last_dim + l - 1:inputs_last_dim + l]
+                            z_prob = inputs[:, inputs_last_dim + l - 1:inputs_last_dim + l]
+                            z = z_prob
                         else:
                             if self._implementation == 2:
                                 z_in = h
@@ -703,16 +713,22 @@ class HMLSTMCell(LayerRNNCell):
                             if self._boundary_slope_annealing_rate and self.global_step is not None:
                                 z *= self.boundary_slope_coef
 
-                            z = self._boundary_activation(z)
+                            z_prob = self._boundary_activation(z)
+
+                            if self._boundary_discretizer:
+                                z = self._boundary_discretizer(z_prob)
+                            else:
+                                z = z_prob
 
                             # if l > 0:
                             #     z = z * z_below
                     else:
+                        z_prob = None
                         z = None
 
                     if l < self._num_layers - 1:
-                        output_l = (h, z)
-                        new_state_l = (c, h, z)
+                        output_l = (h, z_prob, z)
+                        new_state_l = (c, h, z_prob, z)
                     else:
                         output_l = (h,)
                         new_state_l = (c, h,)
@@ -743,6 +759,7 @@ class HMLSTMSegmenter(object):
             inner_activation='tanh',
             recurrent_activation='sigmoid',
             boundary_activation='hard_sigmoid',
+            boundary_discretizer=None,
             bottomup_initializer='glorot_uniform_initializer',
             recurrent_initializer='orthogonal_initializer',
             topdown_initializer='glorot_uniform_initializer',
@@ -789,6 +806,7 @@ class HMLSTMSegmenter(object):
                 self.inner_activation = inner_activation
                 self.recurrent_activation = recurrent_activation
                 self.boundary_activation = boundary_activation
+                self.boundary_discretizer = boundary_discretizer
 
                 self.bottomup_initializer = bottomup_initializer
                 self.recurrent_initializer = recurrent_initializer
@@ -838,6 +856,7 @@ class HMLSTMSegmenter(object):
                     inner_activation=self.inner_activation,
                     recurrent_activation=self.recurrent_activation,
                     boundary_activation=self.boundary_activation,
+                    boundary_discretizer=self.boundary_discretizer,
                     bottomup_initializer=self.bottomup_initializer,
                     recurrent_initializer=self.recurrent_initializer,
                     topdown_initializer=self.topdown_initializer,
@@ -903,20 +922,28 @@ class HMLSTMOutput(object):
         self.num_layers = len(output)
         self.l = [HMLSTMOutputLevel(level, session=self.session) for level in output]
 
-    def state(self, level=None, discrete=False, method='round'):
+    def state(self, level=None, discrete=False, method='round', mask=None):
         if level is None:
-            out = tuple([l.state(discrete=discrete, discretization_method=method) for l in self.l])
+            out = tuple([l.state(discrete=discrete, discretization_method=method, mask=mask) for l in self.l])
         else:
-            out = self.l[level].state(discrete=discrete, discretization_method=method)
+            out = self.l[level].state(discrete=discrete, discretization_method=method, mask=mask)
 
         return out
 
-    def boundary(self, level=None, discrete=False, method='round', as_logits=False):
+    def boundary(self, level=None, discrete=False, method='round', as_logits=False, mask=None):
         if level is None:
             out = tuple(
-                [l.boundary(discrete=discrete, discretization_method=method, as_logits=as_logits) for l in self.l[:-1]])
+                [l.boundary(discrete=discrete, discretization_method=method, as_logits=as_logits, mask=mask) for l in self.l[:-1]])
         else:
-            out = self.l[level].boundary(discrete=discrete, discretization_method=method, as_logits=as_logits)
+            out = self.l[level].boundary(discrete=discrete, discretization_method=method, as_logits=as_logits, mask=mask)
+
+        return out
+
+    def boundary_probs(self, level=None, as_logits=False, mask=None):
+        if level is None:
+            out = tuple([l.boundary_probs(as_logits=as_logits, mask=mask) for l in self.l[:-1]])
+        else:
+            out = self.l[level].boundary_probs(as_logits=as_logits, mask=mask)
 
         return out
 
@@ -937,11 +964,13 @@ class HMLSTMOutputLevel(object):
             with self.session.graph.as_default():
                 self.h = output[0]
                 if len(output) > 1:
-                    self.z = output[1]
+                    self.z_prob = output[1]
+                    self.z = output[2]
                 else:
+                    self.z_prob = None
                     self.z = None
 
-    def state(self, discrete=False, discretization_method='round'):
+    def state(self, discrete=False, discretization_method='round', mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
                 out = self.h
@@ -951,9 +980,14 @@ class HMLSTMOutputLevel(object):
                     else:
                         raise ValueError('Discretization method "%s" not currently supported' % discretization_method)
 
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
+
                 return out
 
-    def boundary(self, discrete=False, discretization_method='round', as_logits=False):
+    def boundary(self, discrete=False, discretization_method='round', as_logits=False, mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
                 if self.z is None:
@@ -961,7 +995,7 @@ class HMLSTMOutputLevel(object):
                 else:
                     out = self.z[..., 0]
                     if not discrete and as_logits:
-                        out = sigmoid_to_logits(self.z[..., 0], session=self.session)
+                        out = sigmoid_to_logits(out, session=self.session)
 
                 if discrete:
                     if discretization_method == 'round':
@@ -969,8 +1003,29 @@ class HMLSTMOutputLevel(object):
                     else:
                         raise ValueError('Discretization method "%s" not currently supported' % discretization_method)
 
-                if discrete:
                     out = tf.cast(out, dtype=tf.int32)
+
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
+
+                return out
+
+    def boundary_probs(self, as_logits=False, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                if self.z_prob is None:
+                    out = tf.zeros(tf.shape(self.h)[:2])
+                else:
+                    out = self.z_prob[..., 0]
+                    if as_logits:
+                        out = sigmoid_to_logits(out, session=self.session)
+
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
 
                 return out
 
