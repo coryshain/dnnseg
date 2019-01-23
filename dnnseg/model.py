@@ -2472,7 +2472,8 @@ class AcousticEncoderDecoder(object):
                     if verbose:
                         sys.stderr.write('Computing segmentation tables...\n')
 
-                    if self.encoder_boundary_discretizer or self.segment_at_peaks:
+                    if self.encoder_boundary_discretizer or self.segment_at_peaks \
+                            or self.task.lower().startswith('presegmented_autoencoder'):
                         smoothing_algorithm = None
                         n_points = None
                     else:
@@ -3307,7 +3308,9 @@ class AcousticEncoderDecoder(object):
                     segmentations = None
                     states = None
 
-                hard_segmentations = (self.encoder_boundary_discretizer is not None) or (self.segment_at_peaks)
+                hard_segmentations = (self.encoder_boundary_discretizer is not None) \
+                                     or self.segment_at_peaks \
+                                     or self.task.lower().startswith('presegmented_autoencoder')
 
                 plot_acoustic_features(
                     X_cv_plot,
