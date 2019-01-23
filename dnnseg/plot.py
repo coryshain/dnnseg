@@ -4,6 +4,7 @@ import librosa
 import librosa.display
 import pandas as pd
 import matplotlib
+matplotlib.use('Agg')
 from matplotlib import ticker, pyplot as plt
 import seaborn as sns
 from scipy.cluster import hierarchy
