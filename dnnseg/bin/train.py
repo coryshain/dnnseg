@@ -45,6 +45,9 @@ if __name__ == '__main__':
             with open(p.train_data_dir + '/' + data_name, 'wb') as f:
                 pickle.dump(train_data, f, protocol=2)
 
+    # train_data.get_streaming_data_feed(50,50,128,filter='vad')
+    # exit()
+
     sys.stderr.write('=' * 50 + '\n')
     sys.stderr.write('TRAINING DATA SUMMARY\n\n')
     sys.stderr.write(train_data.summary(indent=2))

@@ -34,4 +34,4 @@ def pretty_print_seconds(s):
     h = s // 3600
     m = s % 3600 // 60
     s = s % 3600 % 60
-    return '%s:%s:%s' % (h, m, s)
+    return '%02d:%02d:%02d' % (h, m, s)

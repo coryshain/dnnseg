@@ -922,28 +922,28 @@ class HMLSTMOutput(object):
         self.num_layers = len(output)
         self.l = [HMLSTMOutputLevel(level, session=self.session) for level in output]
 
-    def state(self, level=None, discrete=False, method='round'):
+    def state(self, level=None, discrete=False, method='round', mask=None):
         if level is None:
-            out = tuple([l.state(discrete=discrete, discretization_method=method) for l in self.l])
+            out = tuple([l.state(discrete=discrete, discretization_method=method, mask=mask) for l in self.l])
         else:
-            out = self.l[level].state(discrete=discrete, discretization_method=method)
+            out = self.l[level].state(discrete=discrete, discretization_method=method, mask=mask)
 
         return out
 
-    def boundary(self, level=None, discrete=False, method='round', as_logits=False):
+    def boundary(self, level=None, discrete=False, method='round', as_logits=False, mask=None):
         if level is None:
             out = tuple(
-                [l.boundary(discrete=discrete, discretization_method=method, as_logits=as_logits) for l in self.l[:-1]])
+                [l.boundary(discrete=discrete, discretization_method=method, as_logits=as_logits, mask=mask) for l in self.l[:-1]])
         else:
-            out = self.l[level].boundary(discrete=discrete, discretization_method=method, as_logits=as_logits)
+            out = self.l[level].boundary(discrete=discrete, discretization_method=method, as_logits=as_logits, mask=mask)
 
         return out
 
-    def boundary_probs(self, level=None, as_logits=False):
+    def boundary_probs(self, level=None, as_logits=False, mask=None):
         if level is None:
-            out = tuple([l.boundary_probs(as_logits=as_logits) for l in self.l[:-1]])
+            out = tuple([l.boundary_probs(as_logits=as_logits, mask=mask) for l in self.l[:-1]])
         else:
-            out = self.l[level].boundary_probs(as_logits=as_logits)
+            out = self.l[level].boundary_probs(as_logits=as_logits, mask=mask)
 
         return out
 
@@ -970,7 +970,7 @@ class HMLSTMOutputLevel(object):
                     self.z_prob = None
                     self.z = None
 
-    def state(self, discrete=False, discretization_method='round'):
+    def state(self, discrete=False, discretization_method='round', mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
                 out = self.h
@@ -980,9 +980,14 @@ class HMLSTMOutputLevel(object):
                     else:
                         raise ValueError('Discretization method "%s" not currently supported' % discretization_method)
 
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
+
                 return out
 
-    def boundary(self, discrete=False, discretization_method='round', as_logits=False):
+    def boundary(self, discrete=False, discretization_method='round', as_logits=False, mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
                 if self.z is None:
@@ -1000,9 +1005,14 @@ class HMLSTMOutputLevel(object):
 
                     out = tf.cast(out, dtype=tf.int32)
 
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
+
                 return out
 
-    def boundary_probs(self, as_logits=False):
+    def boundary_probs(self, as_logits=False, mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
                 if self.z_prob is None:
@@ -1011,6 +1021,11 @@ class HMLSTMOutputLevel(object):
                     out = self.z_prob[..., 0]
                     if as_logits:
                         out = sigmoid_to_logits(out, session=self.session)
+
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
 
                 return out
 

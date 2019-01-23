@@ -156,6 +156,30 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'Utterance-level segmentation type used to chunk audio input (one of ["vad", "wrd", "phn"]).'
     ),
     Kwarg(
+        'segment_at_peaks',
+        False,
+        bool,
+        'Re-extracting segment boundaries at peak values of the segmentation probability vector. Does not affect internal segmentation behavior of the HMLSTM cell but changes selection of segments for the correspondence AE.'
+    ),
+    Kwarg(
+        'boundary_prob_discretization_threshold',
+        0.,
+        float,
+        'Minimum value that boundary probabilities must exceed in order to be eligible candidates for a discrete segmentation boundary. Has no effect unless **segment_at_peaks** is ``True``.'
+    ),
+    Kwarg(
+        'boundary_prob_smoothing_order',
+        None,
+        [int, None],
+        'Post-process segmentations by smoothing them with radial basis function interpolation of order **boundary_prob_smoothing_order** (where order ``2`` is a thin-plate spline). If ``None``, no smoothing. Has no effect unless **segment_at_peaks** is ``True``.'
+    ),
+    Kwarg(
+        'boundary_prob_smoothing_factor',
+        0.001,
+        float,
+        'Regularization constant to apply to boundary probability smoothing function. Has no effect unless **segment_at_peaks** is ``True``.'
+    ),
+    Kwarg(
         'n_correspondence',
         None,
         [int, None],
@@ -187,7 +211,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'correspondence_live_targets',
-        True,
+        False,
         bool,
         "Whether to compute correspondence AE loss against targets sampled from segmentations generated for the current minibatch. If ``False``, correspondence targets are sampled from previous minibatch. When used, correspondence targets faithfully represent the current state of the network and losses backpropagate into the representations and boundaries of both segments in the pair, but computing losses is more computationally intensive because Fourier resampling of acoustic features must be performed inside the Tensorflow graph."
     ),
@@ -607,6 +631,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [float, None],
         "Scale of regularizer on binary entropy. If ``None``, no entropy regularization."
+    ),
+    Kwarg(
+        'boundary_prob_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer on boundary activation probabilities. If ``None``, no boundary probability regularization."
     ),
     Kwarg(
         'boundary_regularizer_scale',
