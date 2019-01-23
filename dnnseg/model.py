@@ -2913,6 +2913,9 @@ class AcousticEncoderDecoder(object):
                             self.X_mask: X_mask[indices]
                         }
 
+                        if self.task.lower().startswith('presegmented_autoencoder'):
+                            feed_dict[self.gold_boundaries] = gold_boundaries_train[indices]
+
                         output = self.sess.run(to_run, feed_dict=feed_dict)
 
                         info_dict = {}
