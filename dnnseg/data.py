@@ -661,13 +661,31 @@ class AcousticDataset(object):
         self.phn_perm = None
         self.phn_perm_inv = None
 
-    def features(self, fold=None, filter=None, pad_left=None, pad_right=None):
+        self.cache = {}
+
+    def features(
+            self,
+            fold=None,
+            mask=None,
+            pad_left=None,
+            pad_right=None,
+            normalize=False,
+            center=False
+    ):
+        assert not (normalize and center), 'normalize and center cannot both be true, since normalize constrains to the interval [0,1] and center recenters at 0.'
+
         out = []
         new_series = []
+
+        if pad_left is None:
+            pad_left = 0
+        if pad_right is None:
+            pad_right = 0
+
         for f in self.fileIDs:
-            if filter:
+            if mask:
                 feats, _ = self.data[f].segment_and_stack(
-                    segments=filter,
+                    segments=mask,
                     padding=None
                 )
                 feats = np.concatenate(
@@ -676,6 +694,24 @@ class AcousticDataset(object):
                 )
             else:
                 feats = self.data[f].feats[None, ...]
+
+            if normalize:
+                maximum = feats.max()
+                minimum = feats.min()
+                diff = maximum - minimum
+                feats = (feats - minimum) / diff
+            if center:
+                feats = feats - feats.mean()
+
+            if pad_left or pad_right:
+                pad_width = []
+                for i in range(len(feats.shape)):
+                    if i == len(feats.shape) - 2:
+                        pad_width.append((pad_left, pad_right))
+                    else:
+                        pad_width.append((0, 0))
+                feats = np.pad(feats, pad_width, mode='constant')
+
             if fold:
                 to_add = []
                 for i in range(0, feats.shape[1], fold):
@@ -688,7 +724,7 @@ class AcousticDataset(object):
             else:
                 new_series.append(1)
                 out.append(feats)
-                
+
         new_series = np.array(new_series)
 
         return out, new_series
@@ -747,6 +783,241 @@ class AcousticDataset(object):
             mask = np.concatenate(mask, axis=0)
 
         return feats, mask
+
+    def cache_utterance_data(
+            self,
+            name,
+            segments='vad',
+            max_len=None,
+            normalize=False,
+            center=False,
+            input_padding='pre',
+            input_resampling=None,
+            target_padding='post',
+            target_resampling=None,
+            reverse_targets=True,
+            forced_boundaries=None
+    ):
+        X, X_mask = self.inputs(
+            segments=segments,
+            padding=input_padding,
+            max_len=max_len,
+            normalize=normalize,
+            center=center,
+            resample=input_resampling
+        )
+        y, y_mask = self.targets(
+            segments=segments,
+            padding=target_padding,
+            max_len=max_len,
+            reverse=reverse_targets,
+            normalize=normalize,
+            center=center,
+            resample=target_resampling
+        )
+        speaker = self.segments(segments).speaker.values
+
+        if forced_boundaries:
+            inner_segment_type = forced_boundaries
+            gold_boundaries, _ = self.one_hot_boundaries(
+                inner_segments=inner_segment_type,
+                outer_segments=segments,
+                padding=input_padding,
+                max_len=max_len
+            )
+        else:
+            gold_boundaries = None
+
+        cache_dict = {
+            'type': 'utterance',
+            'n': len(y),
+            'X': X,
+            'X_mask': X_mask,
+            'y': y,
+            'y_mask': y_mask,
+            'speaker': speaker,
+            'gold_boundaries': gold_boundaries
+        }
+
+        self.cache[name] = cache_dict
+
+    def cache_streaming_data(
+            self,
+            name,
+            window_len_input,
+            window_len_bwd,
+            window_len_fwd,
+            normalize=False,
+            center=False,
+            mask=None
+    ):
+        left_pad = max(window_len_input, window_len_bwd) - 1
+        right_pad = window_len_fwd
+
+        feats_tmp, _ = self.features(
+            mask=mask,
+            pad_left=left_pad,
+            pad_right=right_pad,
+            normalize=normalize,
+            center=center
+        )
+        feats = []
+        file_lengths = []
+        for x in feats_tmp:
+            feats.append(x[0])
+            file_lengths.append(len(x[0]) - (left_pad + right_pad))
+        n = sum(file_lengths)
+        feats = pad_sequence(feats, padding='post')
+
+        file_ix = []
+        time_ix = []
+
+        for i, l in enumerate(file_lengths):
+            file_ix_cur = np.ones(l - (left_pad + right_pad), dtype='int') * i
+            time_ix_cur = np.arange(left_pad, l - right_pad)
+
+            file_ix.append(file_ix_cur)
+            time_ix.append(time_ix_cur)
+
+        file_ix = np.concatenate(file_ix, axis=0)[..., None]
+        time_ix = np.concatenate(time_ix, axis=0)
+
+        speaker = []
+        for f in self.fileIDs:
+            speaker.append(self.data[f].speaker)
+        speaker = np.array(speaker)
+
+        cache_dict = {
+            'type': 'streaming',
+            'n': n,
+            'file_lengths': file_lengths,
+            'feats': feats,
+            'file_ix': file_ix,
+            'time_ix': time_ix,
+            'speaker': speaker,
+            'window_len_input': window_len_input,
+            'window_len_bwd': window_len_bwd,
+            'window_len_fwd': window_len_fwd
+        }
+
+        self.cache[name] = cache_dict
+
+    def get_streaming_indices(
+            self,
+            time_ix,
+            window_len_input,
+            window_len_bwd,
+            window_len_fwd
+    ):
+        history_ix = time_ix[..., None] - window_len_input + np.arange(window_len_input)[None, ...] + 1
+        left_context_ix = time_ix[..., None] - np.arange(window_len_bwd)[None, ...]
+        right_context_ix = time_ix[..., None] + np.arange(1, window_len_fwd + 1)[None, ...]
+
+        return history_ix, left_context_ix, right_context_ix
+
+    def get_data_feed(
+        self,
+        name,
+        minibatch_size,
+        randomize=True
+    ):
+        if self.cache[name]['type'] == 'utterance':
+            return self.get_utterance_data_feed(name, minibatch_size, randomize=randomize)
+        elif self.cache[name]['type'] == 'streaming':
+            return self.get_streaming_data_feed(name, minibatch_size, randomize=randomize)
+        elif self.cache[name]['type'] == 'segmenter_only':
+            pass
+        else:
+            raise ValueError('Unrecognized data feed type: "%s".' % self.cache[name]['type'])
+
+    def get_utterance_data_feed(
+            self,
+            name,
+            minibatch_size,
+            randomize=False
+    ):
+        n = self.cache[name]['n']
+        i = 0
+        if randomize:
+            ix, ix_inv = get_random_permutation(n)
+        else:
+            ix = np.arange(n)
+
+        X = self.cache[name]['X']
+        X_mask = self.cache[name]['X_mask']
+        y = self.cache[name]['y']
+        y_mask = self.cache[name]['y_mask']
+        speaker = self.cache[name]['speaker']
+        gold_boundaries = self.cache[name]['gold_boundaries']
+
+        while i < n:
+            indices = ix[i:i + minibatch_size]
+
+            X_cur = X[indices]
+            X_mask_cur = X_mask[indices]
+            y_cur = y[indices]
+            y_mask_cur = y_mask[indices]
+            speaker_cur = speaker[indices]
+            gold_boundaries_cur = None if gold_boundaries is None else gold_boundaries[indices]
+
+            i += minibatch_size
+
+            yield X_cur, X_mask_cur, y_cur, y_mask_cur, speaker_cur, gold_boundaries_cur, indices
+
+    def get_streaming_data_feed(
+            self,
+            name,
+            minibatch_size=1,
+            randomize=True
+    ):
+        n = self.cache[name]['n']
+        feats = self.cache[name]['feats']
+        file_ix = self.cache[name]['file_ix']
+        time_ix = self.cache[name]['time_ix']
+        speaker = self.cache[name]['speaker']
+        window_len_input = self.cache[name]['window_len_input']
+        window_len_bwd = self.cache[name]['window_len_bwd']
+        window_len_fwd = self.cache[name]['window_len_fwd']
+
+        i = 0
+        if randomize:
+            ix, ix_inv = get_random_permutation(n)
+        else:
+            ix = np.arange(n)
+
+        while i < n:
+            indices = ix[i:i+minibatch_size]
+
+            file_ix_cur = file_ix[indices]
+            time_ix_cur = time_ix[indices]
+
+            history_ix, left_context_ix, right_context_ix = self.get_streaming_indices(
+                time_ix_cur,
+                window_len_input,
+                window_len_bwd,
+                window_len_fwd
+            )
+
+            input_cur = feats[file_ix_cur, history_ix]
+            input_mask_cur = np.any(input_cur, axis=-1)
+            bwd_cur = feats[file_ix_cur, left_context_ix]
+            bwd_mask_cur = np.any(bwd_cur, axis=-1)
+            fwd_cur = feats[file_ix_cur, right_context_ix]
+            fwd_mask_cur = np.any(fwd_cur, axis=-1)
+            speaker_cur = speaker[file_ix_cur]
+
+            i += minibatch_size
+
+            yield input_cur, input_mask_cur, bwd_cur, bwd_mask_cur, fwd_cur, fwd_mask_cur, speaker_cur
+
+    def get_n(self, name):
+        return self.cache[name]['n']
+
+    def get_n_minibatch(self, name, minibatch_size):
+        return math.ceil(self.get_n(name) / minibatch_size)
+
+    def cached(self, name):
+        return name in self.cache
 
     def inputs(
             self,
@@ -808,29 +1079,6 @@ class AcousticDataset(object):
 
     def segments(self, segment_type='vad'):
         return pd.concat([self.data[f].segments(segment_type=segment_type) for f in self.fileIDs], axis=0)
-
-    def get_streaming_data_feed(
-            self,
-            left_window_len,
-            right_window_len,
-            minibatch_size,
-            filter=None,
-            randomize=True
-    ):
-        feats, _ = self.features(filter=filter)
-        ix = []
-        for i, f in enumerate(feats):
-            file_ix = np.ones(f.shape[-2]) * i
-            time_ix = np.arange(f.shape[1])
-            print(file_ix.shape)
-            print(time_ix.shape)
-            ix.append(np.stack([file_ix, time_ix], axis=1))
-        for x in ix:
-            print(x.shape)
-        ix = np.concatenate(ix, axis=0)
-        print(ix.shape)
-
-
 
     def ix2label(self, segment_type='wrd'):
         labels = self.segments(segment_type=segment_type).label
@@ -1118,6 +1366,7 @@ class AcousticDatafile(object):
         self.window_len = window_len
         self.n_coef = n_coef
         self.order = order
+        self.speaker = None
 
         self.clip_timesteps = clip_timesteps
 
@@ -1151,6 +1400,8 @@ class AcousticDatafile(object):
             self.vad_segments.speaker = self.vad_segments.speaker.astype('str')
             self.vad_segments.sort_values('start', inplace=True)
             self.vad_segments['label'] = 0
+            if self.speaker is None and 'speaker' in self.vad_segments.columns:
+                self.speaker = self.vad_segments.speaker.iloc[0]
         else:
             self.vad_path = None
             self.vad_segments = pd.DataFrame(
@@ -1170,6 +1421,8 @@ class AcousticDatafile(object):
             self.phn_segments = pd.read_csv(self.phn_path, sep=' ')
             self.phn_segments.speaker = self.phn_segments.speaker.astype('str')
             self.phn_segments.sort_values('start', inplace=True)
+            if self.speaker is None and 'speaker' in self.phn_segments.columns:
+                self.speaker = self.phn_segments.speaker.iloc[0]
         else:
             self.phn_path = None
             if self.vad_path is None:
@@ -1192,6 +1445,8 @@ class AcousticDatafile(object):
             self.wrd_segments = pd.read_csv(self.wrd_path, sep=' ')
             self.wrd_segments.speaker = self.wrd_segments.speaker.astype('str')
             self.wrd_segments.sort_values('start', inplace=True)
+            if self.speaker is None and 'speaker' in self.wrd_segments.columns:
+                self.speaker = self.wrd_segments.speaker.iloc[0]
         else:
             self.wrd_path = None
             if self.vad_path is None:

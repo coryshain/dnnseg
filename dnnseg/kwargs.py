@@ -145,9 +145,45 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'task',
-        'autoencoder',
+        'segmenter',
         str,
-        "Task to perform. One of ``['utterance_classifier', 'autoencoder', 'streaming_autoencoder', 'presegmented_autoencoder_wrd', 'presegmented_autoencoder_phn']``."
+        "Task to perform. One of ``['classifier', 'segmenter']``."
+    ),
+    Kwarg(
+        'streaming',
+        False,
+        bool,
+        "Whether to train in streaming mode. If ``True``, past and/or future acoustic features are reconstructed from each frame in the input. If ``False``, VAD regions are pre-segmented and reconstructed from their final state. Ignored unless **task** is ``'segmenter'``."
+    ),
+    Kwarg(
+        'predict_backward',
+        True,
+        bool,
+        "Whether to predict backward (reconstruct previous inputs). Ignored unless **task** is ``'segmenter'`` and **streaming** is ``True``."
+    ),
+    Kwarg(
+        'predict_forward',
+        True,
+        bool,
+        "Whether to predict forward (predict future inputs). Ignored unless **task** is ``'segmenter'`` and **streaming** is ``True``."
+    ),
+    Kwarg(
+        'window_len_bwd',
+        50,
+        float,
+        "Length of backward-looking prediction targets (in frames). Ignored unless **task** is ``'segmenter'``, **streaming** is ``True``, and **predict_backward** is ``True``."
+    ),
+    Kwarg(
+        'window_len_fwd',
+        50,
+        float,
+        "Length of forward-looking prediction targets (in frames). Ignored unless **task** is ``'segmenter'``, **streaming** is ``True``, and **predict_forward** is ``True``."
+    ),
+    Kwarg(
+        'forced_boundaries',
+        None,
+        [str, None],
+        "Type of forced boundary to use for oracle evaluation (one of ['vad', 'phn', 'wrd', None]). If ``None``, do not use oracle boundaries. Ignored unless **task** is ``'segmenter'``."
     ),
     Kwarg(
         'segtype',
@@ -467,7 +503,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Resample inputs to fixed length **resample** timesteps. If ``None``, no input resampling."
     ),
     Kwarg(
-        'resample_outputs',
+        'resample_targets',
         None,
         [int, None],
         "Resample targets to fixed length **resample** timesteps. If ``None``, no output resampling."

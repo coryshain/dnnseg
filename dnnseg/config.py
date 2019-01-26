@@ -17,7 +17,7 @@ class Config(object):
         # Data
         data = config['data']
         self.train_data_dir = data.get('train_data_dir', './')
-        self.dev_data_dir = data.get('dev_data_dir', './')
+        self.val_data_dir = data.get('val_data_dir', './')
         self.test_data_dir = data.get('test_data_dir', './')
         self.order = data.getint('order', 2)
         self.save_preprocessed_data = data.getboolean('save_preprocessed_data', True)
