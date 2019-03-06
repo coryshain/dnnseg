@@ -8,43 +8,30 @@ matplotlib.use('Agg')
 from matplotlib import ticker, pyplot as plt
 import seaborn as sns
 from scipy.cluster import hierarchy
-
 from .data import extract_segment_timestamps
+
 
 class SmartDict(dict):
     def __missing__(self, key):
         return key
 
 
-def plot_streaming_segmenter(
-        input,
-        segmentation,
-        left_targ,
-        left_pred,
-        right_targ,
-        right_pred,
-        cmap='Blues',
-        titles=None,
-        dir='./',
-        prefix='',
-        suffix='.png'
-):
-    pass
-
-
-
 def plot_acoustic_features(
         inputs,
-        targets,
-        preds,
+        targets_bwd=None,
+        preds_bwd=None,
+        preds_bwd_attn=None,
+        targets_fwd=None,
+        preds_fwd=None,
+        preds_fwd_attn=None,
         segmentation_probs=None,
+        segmentation_probs_smoothed=None,
         segmentations=None,
         states=None,
         target_means=None,
         sr=16000,
         hop_length=160,
         drop_zeros=True,
-        hard_segmentations=False,
         cmap='Blues',
         titles=None,
         label_map=None,
@@ -60,59 +47,131 @@ def plot_acoustic_features(
     if label_map is not None:
         label_map = dict(zip(label_map.source,label_map.target))
 
+    has_targets_bwd = targets_bwd is not None
+    has_preds_bwd = preds_bwd is not None
+    has_preds_bwd_attn = preds_bwd_attn is not None
+    has_targets_fwd = targets_fwd is not None
+    has_preds_fwd = preds_fwd is not None
+    has_preds_fwd_attn = preds_fwd_attn is not None
     has_means = target_means is not None
     has_segs = segmentation_probs is not None
+    has_smoothing = segmentations is None or segmentation_probs_smoothed is not None
     has_states = states is not None
     n_states = len(states) if has_states else 0
 
     fig = plt.figure()
 
-    n_plots = 3
+    n_plots = 1
     if has_means:
         n_plots += 1
     if has_segs:
         n_plots += 2
-        if not hard_segmentations:
+        if has_smoothing:
             n_plots += 1
     if has_states:
         n_plots += n_states
+    if has_targets_bwd:
+        n_plots += 1
+    if has_preds_bwd:
+        n_plots += 1
+    if has_preds_bwd_attn:
+        n_plots += 1
+    if has_targets_fwd:
+        n_plots += 1
+    if has_preds_fwd:
+        n_plots += 1
+    if has_preds_fwd_attn:
+        n_plots += 1
 
     fig.set_size_inches(10, 3 * n_plots)
     axes = []
     for i in range(n_plots):
         axes.append(fig.add_subplot(n_plots, 1, i+1))
 
-    segmentations_offset = 0
-    target_means_offset = 0
-    states_offset = 0
-
     ax_input = axes[0]
+    plot_ix = 1
 
     if has_segs:
-        ax_seg = axes[1]
-        ax_seg_hard = axes[2]
-        segmentations_offset = 2
-        if not hard_segmentations:
-            ax_seg_smoothed = axes[3]
-            segmentations_offset += 1
+        ax_seg = axes[plot_ix]
+        plot_ix += 1
+        ax_seg_hard = axes[plot_ix]
+        plot_ix += 1
+        if has_smoothing:
+            ax_seg_smoothed = axes[plot_ix]
+            plot_ix += 1
 
     if has_means:
-        ax_targ_means = axes[1 + segmentations_offset]
-        target_means_offset = 1
+        ax_targ_means = axes[plot_ix]
+        plot_ix += 1
 
     if has_states:
         ax_states = []
         for i in range(n_states):
-            ax_states.append(axes[1 + segmentations_offset + target_means_offset + i])
-        states_offset = n_states
+            ax_states.append(axes[plot_ix])
+            plot_ix += 1
 
-    ax_targ = axes[1 + segmentations_offset + target_means_offset + states_offset]
-    ax_pred = axes[2 + segmentations_offset + target_means_offset + states_offset]
+    if has_preds_bwd_attn:
+        ax_pred_bwd_attn = axes[plot_ix]
+        plot_ix += 1
+
+        if has_preds_bwd and has_preds_fwd:
+            plot_name = 'Temporal attention (Backward)'
+        else:
+            plot_name = 'Temporal attention'
+
+        preds_bwd_attn_cur = np.swapaxes(preds_bwd_attn, -2, -1)
+
+        if preds_bwd_attn_cur.shape[-1] > 0:
+            librosa.display.specshow(
+                preds_bwd_attn_cur,
+                sr=sr,
+                hop_length=hop_length,
+                fmax=8000,
+                x_axis='time',
+                cmap='Greys',
+                ax=ax_pred_bwd_attn
+            )
+        ax_pred_bwd_attn.set_title(plot_name)
+    if has_targets_bwd:
+        ax_targ_bwd = axes[plot_ix]
+        plot_ix += 1
+    if has_preds_bwd:
+        ax_pred_bwd = axes[plot_ix]
+        plot_ix += 1
+
+    if has_preds_fwd_attn:
+        ax_pred_fwd_attn = axes[plot_ix]
+        plot_ix += 1
+
+        if has_preds_bwd and has_preds_fwd:
+            plot_name = 'Temporal attention (Forward)'
+        else:
+            plot_name = 'Temporal attention'
+
+        preds_fwd_attn_cur = np.swapaxes(preds_fwd_attn, -2, -1)
+
+        if preds_fwd_attn_cur.shape[-1] > 0:
+            librosa.display.specshow(
+                preds_fwd_attn_cur,
+                sr=sr,
+                hop_length=hop_length,
+                fmax=8000,
+                x_axis='time',
+                cmap='Greys',
+                ax=ax_pred_fwd_attn
+            )
+        ax_pred_fwd_attn.set_title(plot_name)
+    if has_targets_fwd:
+        ax_targ_fwd = axes[plot_ix]
+        plot_ix += 1
+    if has_preds_fwd:
+        ax_pred_fwd = axes[plot_ix]
+        plot_ix += 1
 
     for i in range(len(inputs)):
         inputs_cur = inputs[i]
         if drop_zeros:
-            inputs_select = np.where(np.all(np.logical_not(np.isclose(inputs_cur, 0.)), axis=1))[0]
+            inputs_select = np.where(np.any(np.logical_not(np.isclose(inputs_cur[:,:-1], 0.)), axis=1))[0]
             inputs_cur = inputs_cur[inputs_select]
         inputs_cur = np.swapaxes(inputs_cur, -2, -1)
 
@@ -140,8 +199,7 @@ def plot_acoustic_features(
                 segmentations_cur = segmentations[i]
                 if drop_zeros:
                     segmentations_cur = segmentations_cur[inputs_select]
-
-                    segmentations_cur = np.swapaxes(segmentations_cur, -2, -1)
+                segmentations_cur = np.swapaxes(segmentations_cur, -2, -1)
 
             df = pd.DataFrame(
                 segmentation_probs_cur,
@@ -158,26 +216,32 @@ def plot_acoustic_features(
             colors = [plt.get_cmap('gist_rainbow')(1. * j / len(segmentation_probs_cur)) for j in range(len(segmentation_probs_cur))]
             segs_hard = []
 
-            if hard_segmentations:
-                smoothing_algorithm = None
-                n_points = None
-            else:
+            if segmentations is None:
                 smoothing_algorithm = 'rbf'
                 n_points = 1000
+            else:
+                smoothing_algorithm = None
+                n_points = None
 
             for j, s in enumerate(segmentations_cur):
                 timestamps, basis, segs_smoothed = extract_segment_timestamps(
                     s,
                     algorithm=smoothing_algorithm,
                     n_points=n_points,
+                    seconds_per_step=float(hop_length)/sr,
                     return_plot=True
                 )
+                if segmentation_probs_smoothed is not None:
+                    segs_smoothed = segmentation_probs_smoothed[i][:,j]
+                    if drop_zeros:
+                        segs_smoothed = segs_smoothed[inputs_select]
                 segs_hard.append(timestamps)
-                if not hard_segmentations:
-                    ax_seg_smoothed.plot(basis, segs_smoothed, color=colors[j], label=str(j+1))
+                if has_smoothing:
+                    ax_seg_smoothed.plot(basis, segmentation_probs_cur[j], color=list(colors[j][:-1]) + [0.5], linestyle=':', label='L%d source' %(j+1))
+                    ax_seg_smoothed.plot(basis, segs_smoothed, color=colors[j], label='L%d smoothed' %(j+1))
                 ax_seg_hard.vlines(timestamps, j, j+1, color='k')
 
-            if not hard_segmentations:
+            if has_smoothing:
                 ax_seg_smoothed.set_xlim(0., basis[-1])
                 ax_seg_smoothed.legend(fancybox=True, framealpha=0.75, frameon=True, facecolor='white', edgecolor='gray')
                 ax_seg_smoothed.set_xlabel('Time')
@@ -213,7 +277,7 @@ def plot_acoustic_features(
         if has_means:
             target_means_cur = target_means[i]
             if drop_zeros:
-                target_means_select = np.where(np.all(np.logical_not(np.isclose(target_means_cur, 0.)), axis=1))[0]
+                target_means_select = np.where(np.any(np.logical_not(np.isclose(target_means_cur[:,:-1], 0.)), axis=1))[0]
                 target_means_cur = target_means_cur[target_means_select]
             target_means_cur = np.swapaxes(target_means_cur, -2, -1)
 
@@ -228,39 +292,107 @@ def plot_acoustic_features(
             )
             ax_targ_means.set_title('Target means')
 
-        targets_cur = targets[i]
-        if drop_zeros:
-            targets_select = np.where(np.all(np.logical_not(np.isclose(targets_cur, 0.)), axis=1))[0]
-            targets_cur = targets_cur[targets_select]
-        targets_cur = np.swapaxes(targets_cur, -2, -1)
+        if has_targets_bwd:
+            if has_targets_bwd and has_targets_fwd:
+                plot_name = 'Targets (Backward)'
+            else:
+                plot_name = 'Targets'
 
-        librosa.display.specshow(
-            targets_cur,
-            sr=sr,
-            hop_length=hop_length,
-            fmax=8000,
-            x_axis='time',
-            cmap=cmap,
-            ax=ax_targ
-        )
-        ax_targ.set_title('Targets')
+            targets_cur = targets_bwd[i]
+            if drop_zeros:
+                targets_select = np.where(np.any(np.logical_not(np.isclose(targets_cur[:,:-1], 0.)), axis=1))[0]
+                targets_cur = targets_cur[targets_select]
+            targets_cur = np.swapaxes(targets_cur, -2, -1)
 
-        preds_cur = preds[i]
-        if drop_zeros:
-            preds_select = np.where(np.all(np.logical_not(np.isclose(preds_cur, 0.)), axis=1))[0]
-            preds_cur = preds_cur[preds_select]
-        preds_cur = np.swapaxes(preds_cur, -2, -1)
+            if targets_cur.shape[-1] > 0:
+                librosa.display.specshow(
+                    targets_cur,
+                    sr=sr,
+                    hop_length=hop_length,
+                    fmax=8000,
+                    x_axis='time',
+                    cmap=cmap,
+                    ax=ax_targ_bwd
+                )
+            ax_targ_bwd.set_title(plot_name)
 
-        librosa.display.specshow(
-            preds_cur,
-            sr=sr,
-            hop_length=hop_length,
-            fmax=8000,
-            x_axis='time',
-            cmap=cmap,
-            ax=ax_pred
-        )
-        ax_pred.set_title('Predictions')
+        if has_preds_bwd:
+            if has_preds_bwd and has_preds_fwd:
+                plot_name = 'Predictions (Backward)'
+            else:
+                plot_name = 'Predictions'
+
+            preds_cur = preds_bwd[i]
+            if drop_zeros:
+                if has_targets_bwd:
+                    preds_select = targets_select
+                else:
+                    preds_select = np.where(np.any(np.logical_not(np.isclose(preds_cur[:,:-1], 0.)), axis=1))[0]
+                preds_cur = preds_cur[preds_select]
+            preds_cur = np.swapaxes(preds_cur, -2, -1)
+
+            if preds_cur.shape[-1] > 0:
+                librosa.display.specshow(
+                    preds_cur,
+                    sr=sr,
+                    hop_length=hop_length,
+                    fmax=8000,
+                    x_axis='time',
+                    cmap=cmap,
+                    ax=ax_pred_bwd
+                )
+            ax_pred_bwd.set_title(plot_name)
+
+        if has_targets_fwd:
+            if has_targets_bwd and has_targets_fwd:
+                plot_name = 'Targets (Forward)'
+            else:
+                plot_name = 'Targets'
+
+            targets_cur = targets_fwd[i]
+            if drop_zeros:
+                targets_select = np.where(np.any(np.logical_not(np.isclose(targets_cur[:,:-1], 0.)), axis=1))[0]
+                targets_cur = targets_cur[targets_select]
+            targets_cur = np.swapaxes(targets_cur, -2, -1)
+
+            if targets_cur.shape[-1] > 0:
+                librosa.display.specshow(
+                    targets_cur,
+                    sr=sr,
+                    hop_length=hop_length,
+                    fmax=8000,
+                    x_axis='time',
+                    cmap=cmap,
+                    ax=ax_targ_fwd
+                )
+            ax_targ_fwd.set_title(plot_name)
+
+        if has_preds_fwd:
+            if has_preds_bwd and has_preds_fwd:
+                plot_name = 'Predictions (Forward)'
+            else:
+                plot_name = 'Predictions'
+
+            preds_cur = preds_fwd[i]
+            if drop_zeros:
+                if has_targets_fwd:
+                    preds_select = targets_select
+                else:
+                    preds_select = np.where(np.all(np.logical_not(np.isclose(preds_cur, 0.)), axis=1))[0]
+                preds_cur = preds_cur[preds_select]
+            preds_cur = np.swapaxes(preds_cur, -2, -1)
+
+            if preds_cur.shape[-1] > 0:
+                librosa.display.specshow(
+                    preds_cur,
+                    sr=sr,
+                    hop_length=hop_length,
+                    fmax=8000,
+                    x_axis='time',
+                    cmap=cmap,
+                    ax=ax_pred_fwd
+                )
+            ax_pred_fwd.set_title(plot_name)
 
         if titles[i] is not None:
             title = titles[i]
@@ -270,22 +402,28 @@ def plot_acoustic_features(
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         try:
             fig.savefig(dir + '/' + prefix + 'featureplot_%d'%i + suffix)
-        except:
+        except Exception:
             sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
 
         ax_input.clear()
         if has_segs:
             ax_seg.clear()
             ax_seg_hard.clear()
-            if not hard_segmentations:
+            if has_smoothing:
                 ax_seg_smoothed.clear()
         if has_states:
             for ax in ax_states:
                 ax.clear()
         if has_means:
             ax_targ_means.clear()
-        ax_targ.clear()
-        ax_pred.clear()
+        if has_targets_bwd:
+            ax_targ_bwd.clear()
+        if has_preds_bwd:
+            ax_pred_bwd.clear()
+        if has_targets_fwd:
+            ax_targ_fwd.clear()
+        if has_preds_fwd:
+            ax_pred_fwd.clear()
 
     plt.close(fig)
 
@@ -378,14 +516,14 @@ def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cm
     # Try correlation first, then fall back to default distance metric if it fails.
     try:
         cm = sns.clustermap(data=df, metric='correlation', cmap=cmap, figsize=(width,height))
-    except:
+    except Exception:
         cm = sns.clustermap(data=df, cmap=cmap, figsize=(width,height))
     cm.cax.set_visible(False)
     cm.ax_col_dendrogram.set_visible(False)
 
     try:
         cm.savefig(dir + '/' + prefix + 'binary_unit_heatmap' + suffix)
-    except:
+    except Exception:
         sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
 
     plt.close('all')

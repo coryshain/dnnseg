@@ -9,7 +9,7 @@ from scipy.interpolate import Rbf
 from .audio import wav_to_mfcc
 
 
-def binary2integer_np(b, int_type='int32'):
+def binary_to_integer_np(b, int_type='int32'):
     np_int_type = getattr(np, int_type)
 
     k = int(b.shape[-1])
@@ -22,6 +22,13 @@ def binary2integer_np(b, int_type='int32'):
         base2 = np.expand_dims(base2, 0)
 
     return (b.astype(np_int_type) * base2).sum(axis=-1)
+
+
+def binary_to_string_np(b):
+    b_str = np.char.mod('%d', b.astype('int'))
+    string = list(map(''.join, b_str))
+
+    return string
 
 
 def get_segmentation_smoother(times, segs, smoothing_factor=1., function='multiquadric'):
@@ -41,9 +48,9 @@ def extract_peak_ix(y):
     return ix
 
 
-def smooth_segmentations(segs, smoothing_factor=1., function='multiquadric', offset=10, n_points=None):
+def smooth_segmentations(segs, smoothing_factor=1., function='multiquadric', seconds_per_step=0.01, n_points=None):
     n_frames = len(segs)
-    max_len = n_frames * float(offset) / 1000
+    max_len = n_frames * seconds_per_step
     x = np.linspace(0, max_len, n_frames)
     y = segs
     if n_points is None:
@@ -59,13 +66,13 @@ def extract_segment_timestamps(
         segs,
         algorithm=None,
         algorithm_params=None,
-        offset=10,
+        seconds_per_step=0.01,
         n_points=None,
         return_plot=False
 ):
     assert not (algorithm is None and n_points), 'Extraction at custom timepoints (n_points != None) is not supported when smoothing is turned of (algorithm==None).'
     n_frames = len(segs)
-    max_len = n_frames * float(offset) / 1000
+    max_len = n_frames * seconds_per_step
     x = np.linspace(0, max_len, n_frames)
     y = segs
     if algorithm_params is None:
@@ -97,7 +104,7 @@ def extract_segment_timestamps(
         basis = np.linspace(0, max_len, n_points)
         response = segs
         if len(seg_ix) > 0:
-            timestamps = seg_ix * float(offset) / 1000 + float(offset) / (1000 * 2)
+            timestamps = seg_ix * seconds_per_step + seconds_per_step / 2
         else:
             timestamps = np.array([max_len])
 
@@ -117,7 +124,7 @@ def extract_segment_timestamps_batch(
         segs,
         algorithm=None,
         algorithm_params=None,
-        offset=10,
+        seconds_per_step=0.01,
         n_points=None,
         return_plot=False,
         mask=None,
@@ -143,7 +150,7 @@ def extract_segment_timestamps_batch(
             segs_i,
             algorithm=algorithm,
             algorithm_params=algorithm_params,
-            offset=offset,
+            seconds_per_step=seconds_per_step,
             n_points=n_points,
             return_plot=return_plot
         )
@@ -169,15 +176,17 @@ def extract_segment_timestamps_batch(
 def extract_states_at_timestamps(
         timestamps,
         states,
-        offset=10,
+        steps_per_second=100.,
         activation='tanh',
         discretize=True,
-        as_categories=True
+        as_categories=False,
+        as_onehot=True
 ):
     assert activation in ['sigmoid', 'softmax', 'tanh', 'linear', None]
     assert not (activation in ['linear', None] and discretize), "States with linear activation can't be discretized."
+    assert not as_categories and as_onehot, 'Labels cannot be both categorical (integer) and one-hot.'
 
-    ix = np.minimum(np.floor((timestamps * 1000) / offset), len(states) - 1).astype('int')
+    ix = np.minimum(np.floor(timestamps * steps_per_second), len(states) - 1).astype('int')
     out = states[ix]
 
     if discretize:
@@ -187,7 +196,9 @@ def extract_states_at_timestamps(
             out = np.rint(out).astype('int')
 
             if as_categories:
-                out = binary2integer_np(out)
+                out = binary_to_integer_np(out)
+            elif as_onehot:
+                out = binary_to_string_np(out)
 
         elif activation == 'softmax':
             if as_categories:
@@ -203,10 +214,11 @@ def extract_states_at_timestamps(
 def extract_states_at_timestamps_batch(
         timestamps,
         states,
-        offset=10,
+        steps_per_second=100.,
         activation='tanh',
         discretize=True,
         as_categories=True,
+        as_onehot=True,
         mask=None,
         padding=None
 ):
@@ -226,10 +238,11 @@ def extract_states_at_timestamps_batch(
         out_cur = extract_states_at_timestamps(
             timestamps[i],
             states_i,
-            offset=offset,
+            steps_per_second=steps_per_second,
             activation=activation,
             discretize=discretize,
-            as_categories=as_categories
+            as_categories=as_categories,
+            as_onehot=as_onehot
         )
 
         out.append(out_cur)
@@ -237,18 +250,18 @@ def extract_states_at_timestamps_batch(
     return out
 
 
-def binary_segments_to_intervals_inner(binary_segments, mask, src_segments=None, labels=None, offset=10):
+def binary_segments_to_intervals_inner(binary_segments, mask, src_segments=None, labels=None, seconds_per_step=0.01):
     assert binary_segments.shape == mask.shape, 'binary_segments and mask must have the same shape'
 
     seg_indices1, seg_indices2 = np.where(binary_segments * mask)
 
     if src_segments is None:
-        timestamps_ends = (np.reshape(mask.cumsum(), mask.shape)) / 1000 * offset
+        timestamps_ends = (np.reshape(mask.cumsum(), mask.shape)) * seconds_per_step
         ends = timestamps_ends[seg_indices1, seg_indices2]
         out = pd.DataFrame({'end': ends})
         out['start'] = out.end.shift().fillna(0.)
     else:
-        timestamps_ends = mask.cumsum(axis=1) / 1000 * offset
+        timestamps_ends = mask.cumsum(axis=1) * seconds_per_step
         assert len(src_segments) == len(timestamps_ends), 'Length mismatch between inputs (%d) and input segment boundaries (%d)' % (len(timestamps_ends), len(src_segments))
 
         src_segments_starts = np.array(src_segments.start)[seg_indices1]
@@ -276,7 +289,7 @@ def binary_segments_to_intervals_inner(binary_segments, mask, src_segments=None,
     return out
 
 
-def binary_segments_to_intervals(binary_segments, mask, file_indices, src_segments=None, labels=None, offset=10):
+def binary_segments_to_intervals(binary_segments, mask, file_indices, src_segments=None, labels=None, seconds_per_step=0.01):
     fileIDs = sorted(list(file_indices.keys()))
     out = []
     for f in fileIDs:
@@ -293,7 +306,7 @@ def binary_segments_to_intervals(binary_segments, mask, file_indices, src_segmen
             file_mask,
             src_segments=file_src_segments,
             labels=labels,
-            offset=offset
+            seconds_per_step=seconds_per_step
         )
         file_intervals['fileID'] = f
         out.append(file_intervals)
@@ -377,7 +390,7 @@ def get_random_permutation(n):
     return p, p_inv
 
 
-def segment_length_summary(segs, indent=0, offset=None):
+def segment_length_summary(segs, indent=0, steps_per_second=100.):
     seg_min = (segs.end - segs.start).min()
     seg_max = (segs.end - segs.start).max()
     seg_95 = (segs.end - segs.start).quantile(q=0.95)
@@ -393,15 +406,15 @@ def segment_length_summary(segs, indent=0, offset=None):
     out += ' ' * (indent + 4) + '99.9th percentile: %.4f\n' % (seg_999)
     out += ' ' * (indent + 4) + 'Mean: %.4f\n' % (seg_mean)
 
-    if offset:
+    if steps_per_second:
         out += ' ' * (indent + 2) + 'Frames:\n'
-        out += ' ' * (indent + 4) + 'Min: %.4f\n' % (seg_min / offset * 1000)
-        out += ' ' * (indent + 4) + 'Max: %.4f\n' % (seg_max / offset * 1000)
-        out += ' ' * (indent + 4) + 'Max: %.4f\n' % (seg_max / offset * 1000)
-        out += ' ' * (indent + 4) + '95th percentile: %.4f\n' % (seg_95 / offset * 1000)
-        out += ' ' * (indent + 4) + '99th percentile: %.4f\n' % (seg_99 / offset * 1000)
-        out += ' ' * (indent + 4) + '99.9th percentile: %.4f\n' % (seg_999 / offset * 1000)
-        out += ' ' * (indent + 4) + 'Mean: %.4f\n' % (seg_mean / offset * 1000)
+        out += ' ' * (indent + 4) + 'Min: %.4f\n' % (seg_min * steps_per_second)
+        out += ' ' * (indent + 4) + 'Max: %.4f\n' % (seg_max * steps_per_second)
+        out += ' ' * (indent + 4) + 'Max: %.4f\n' % (seg_max * steps_per_second)
+        out += ' ' * (indent + 4) + '95th percentile: %.4f\n' % (seg_95 * steps_per_second)
+        out += ' ' * (indent + 4) + '99th percentile: %.4f\n' % (seg_99 * steps_per_second)
+        out += ' ' * (indent + 4) + '99.9th percentile: %.4f\n' % (seg_999 * steps_per_second)
+        out += ' ' * (indent + 4) + 'Mean: %.4f\n' % (seg_mean * steps_per_second)
 
     return out
 
@@ -549,6 +562,214 @@ def score_segmentation(true, pred, tol=0.02):
     return out
 
 
+def precision_recall(n_matched, n_true, n_pred):
+    """Calculates the classification precision and recall, given
+    the number of true positives, the number of existing positives,
+    and the number of proposed positives."""
+
+    if n_true > 0:
+        recall = n_matched / n_true
+    else:
+        recall = 0.0
+
+    if n_pred > 0:
+        precision = n_matched / n_pred
+    else:
+        precision = 0.0
+
+    return precision, recall
+
+
+def fscore(precision, recall, beta=1.0):
+    """Calculates the f-score (default is balanced f-score; beta > 1
+    favors precision), the harmonic mean of precision and recall."""
+
+    num = (beta**2 + 1) * precision * recall
+    denom = (beta**2) * precision + recall
+    if denom == 0:
+        return 0.0
+    else:
+        return num / denom
+
+
+def precision_recall_f(n_matched, n_true, n_pred, beta=1.0):
+    """Calculates precision, recall and f-score."""
+
+    prec,rec = precision_recall(n_matched, n_true, n_pred)
+    f = fscore(prec, rec, beta=beta)
+
+    return prec,rec,f
+
+
+def get_text_boundaries(words):
+    breaks = []
+    soFar = 0
+    # Don't count the first break (utterance beginning)
+    for word in words:
+        soFar += len(word)
+        breaks.append(soFar)
+    # Don't count the last break (utterance end)
+    breaks.pop(-1)
+    return breaks
+
+
+def get_text_word_starts_and_ends(words):
+    bounds = []
+
+    x0 = 0
+    for ii, wi in enumerate(words):
+        (b1,b2) = (x0, x0 + len(words[ii]))
+        bounds.append((b1, b2))
+        x0 += len(words[ii])
+
+    return bounds
+
+
+def score_text_words(true, pred):
+    tp = 0
+    fp = 0
+    fn = 0
+
+    for w_true, w_pred in zip(true, pred):
+        bounds_true = set(get_text_word_starts_and_ends(w_true))
+        bounds_pred = set(get_text_word_starts_and_ends(w_pred))
+
+        tp += len(bounds_true.intersection(bounds_pred))
+        fp += len(bounds_pred - bounds_true)
+        fn += len(bounds_true - bounds_pred)
+
+    return tp, fp, fn
+
+
+def score_text_lexicon(true, pred):
+    lex_true = set()
+    lex_pred = set()
+
+    for w_true, w_pred in zip(true, pred):
+        for word in w_true:
+            if type(word) == list:
+                word = tuple(word)
+            lex_true.add(word)
+
+        for word in w_pred:
+            if type(word) == list:
+                word = tuple(word)
+            lex_pred.add(word)
+
+    tp = len(lex_true.intersection(lex_pred))
+    fp = len(lex_pred - lex_true)
+    fn = len(lex_true - lex_pred)
+
+    return tp, fp, fn
+
+
+def score_text_boundaries(true, pred):
+    tp = 0
+    fp = 0
+    fn = 0
+
+    warned = 0
+
+    for w_true, w_pred in zip(true, pred):
+        # print "true:", w_true
+        # print "pred:", w_pred
+
+        if type(w_true[0]) == str:
+            cat1 = "".join(w_true)
+            cat2 = "".join(w_pred)
+        else:
+            cat1 = sum(w_true, [])
+            cat2 = sum(w_pred, [])
+
+        if cat1 != cat2:
+            if not warned:
+                print("Warning: surface string mismatch:", cat1, cat2)
+                warned = 1
+            elif warned == 1:
+                print("Warning: more mismatches")
+                warned += 1
+
+        boundaries_true = set(get_text_boundaries(w_true))
+        boundaries_pred = set(get_text_boundaries(w_pred))
+
+        tp += len(boundaries_true.intersection(boundaries_pred))
+        fp += len(boundaries_pred - boundaries_true)
+        fn += len(boundaries_true - boundaries_pred)
+
+    return tp, fp, fn
+
+
+def text_to_wordlists(text):
+    out = []
+    for l in text.splitlines():
+        out.append(l.split())
+    return out
+
+
+def score_text_segmentation(true, pred):
+    p = text_to_wordlists(pred)
+    t = text_to_wordlists(true)
+
+    b_tp, b_fp, b_fn = score_text_boundaries(t, p)
+    w_tp, w_fp, w_fn = score_text_words(t, p)
+    l_tp, l_fp, l_fn = score_text_lexicon(t, p)
+
+    out = {
+        'b_tp': b_tp,
+        'b_fp': b_fp,
+        'b_fn': b_fn,
+        'w_tp': w_tp,
+        'w_fp': w_fp,
+        'w_fn': w_fn,
+        'l_tp': l_tp,
+        'l_fp': l_fp,
+        'l_fn': l_fn,
+    }
+
+    return out
+
+
+def compute_unsupervised_classification_targets(true, pred):
+    true_src = true
+    true = np.array(true[['start','end','label']])
+    pred = np.array(pred[['start','end','label']])
+
+    i = 0
+    j = 0
+
+    true_labels = []
+    candidates = []
+
+    while i < len(true) and j < len(pred):
+
+        s_t, e_t, l_t = true[i]
+        s_p, e_p, l_p = pred[j]
+
+        inside_l = s_t >= s_p and s_t < e_p
+        inside_r = e_t > s_p and e_t <= e_p
+        inside = inside_l or inside_r
+
+        if inside:
+            overlap = min(e_t, e_p) - max(s_t, s_p)
+            candidates.append((overlap, l_t))
+            i += 1
+        else:
+            assert len(candidates) > 0, 'Position %d has no label candidates and no overlapping true segments' % j
+            winner = max(candidates, key = lambda x: x[0])[1]
+            true_labels.append(winner)
+            candidates = []
+            j += 1
+
+    assert len(candidates) > 0, 'Position %d has no label candidates and no overlapping true segments' % j
+    winner = max(candidates, key=lambda x: x[0])[1]
+    true_labels.append(winner)
+
+    out = true_src.copy()
+    out.label = true_labels
+
+    return out
+
+
 def get_padded_lags(X, n, backward=True, clip_feat=None):
     # X is an array with shape [batch, time, feat] or list of such arrays
     out = []
@@ -581,41 +802,66 @@ def get_padded_lags(X, n, backward=True, clip_feat=None):
     return out
 
 
-class AcousticDataset(object):
+class Dataset(object):
+    def __new__(cls, *args, **kwargs):
+        if cls is Datafile:
+            raise TypeError("Dataset is an abstract class and may not be instantiated")
+        return object.__new__(cls)
+
     def __init__(
             self,
             dir_path,
-            sr = 16000,
-            offset = 10,
-            window_len = 25,
-            n_coef = 13,
-            order = 2,
+            datatype='acoustic',
             clip_timesteps=None,
-            verbose=True
+            verbose=True,
+            **kwargs
     ):
-        assert sr % 1000 == 0, 'Must use a sampling rate that is a multiple of 1000'
 
         self.dir_path = dir_path
-        self.sr = sr
-        self.offset = offset
-        self.window_len = window_len
-        self.n_coef = n_coef
-        self.order = order
+        self.datatype = datatype.lower()
+        assert self.datatype in ['acoustic', 'text'], 'Unrecognized datatype requested: "%s"' % self.datatype
         self.clip_timesteps = clip_timesteps
 
         self.data = {}
+        self.cache = {}
 
-        wav_files = ['%s/%s' %(self.dir_path, x) for x in os.listdir(self.dir_path) if (x.endswith('.wav') or x.endswith('.WAV'))]
-        n = len(wav_files)
+        data_kwargs = {}
+        if self.datatype == 'acoustic':
+            suffix = '.wav'
+            datafile = AcousticDatafile
+            defaults = {
+                'sr': 16000,
+                'offset': 10,
+                'window_len': 25,
+                'n_coef': 13,
+                'order': 2
+            }
+            for x in ['sr', 'offset', 'window_len', 'n_coef', 'order']:
+                if x in kwargs:
+                    data_kwargs[x] = kwargs[x]
+                    setattr(self, x, kwargs[x])
+                else:
+                    setattr(self, x, defaults[x])
+        else:
+            suffix = '.txt'
+            datafile = TextDatafile
+            if 'lower' in kwargs:
+                data_kwargs['lower'] = kwargs['lower']
+                setattr(self, 'lower', kwargs['lower'])
+            else:
+                setattr(self, 'lower', False)
+
+        files = ['%s/%s' % (self.dir_path, x) for x in os.listdir(self.dir_path) if x.lower().endswith(suffix)]
+        n = len(files)
 
         times = []
-        for i, wav_file in enumerate(wav_files):
+        for i, f in enumerate(files):
             t0 = time.time()
             if verbose:
-                file_name = wav_file.split('/')[-1]
+                file_name = f.split('/')[-1]
                 if len(file_name) > 10:
                     file_name = file_name[:7] + '...'
-                out_str = '\rProcessing file "%s" %d/%d' %(file_name, i + 1, n)
+                out_str = '\rProcessing file "%s" %d/%d' % (file_name, i + 1, n)
                 out_str += ' ' * (40 - len(out_str))
                 if i > 0:
                     h = int(eta / 3600)
@@ -632,19 +878,15 @@ class AcousticDataset(object):
                     out_str += '|    ETA - %s     ' % time_str
                 sys.stderr.write(out_str)
 
-            new_data = AcousticDatafile(
-                wav_file,
-                sr=sr,
-                offset=offset,
-                window_len=window_len,
-                n_coef=n_coef,
-                order=order,
-                clip_timesteps=clip_timesteps
+            new_data = datafile(
+                f,
+                clip_timesteps=clip_timesteps,
+                **data_kwargs
             )
 
             self.data[new_data.ID] = new_data
             t1 = time.time()
-            times.append(t1-t0)
+            times.append(t1 - t0)
             mean_time = sum(times) / len(times)
             eta = (n - i + 1) * mean_time
 
@@ -652,7 +894,20 @@ class AcousticDataset(object):
             sys.stderr.write('\n')
 
         self.fileIDs = sorted(list(self.data.keys()))
-        self.built = False
+
+        if self.datatype == 'text':
+            ix2char = set()
+            for f in self.fileIDs:
+                ix2char = ix2char.union(set(self.data[f].ix2char))
+            self.ix2char = sorted(list(ix2char))
+            self.char2ix = {}
+            for i, x in enumerate(self.ix2char):
+                self.char2ix[x] = i
+            assert not ' ' in self.ix2char, 'Space " " is a reserved character and cannot be used in text inputs to DNNSeg.'
+            self.char2ix[' '] = len(self.ix2char)
+            self.ix2char.append(' ')
+            for f in self.fileIDs:
+                self.data[f].update_charset(self.ix2char, self.char2ix)
 
         self.vad_perm = None
         self.vad_perm_inv = None
@@ -661,20 +916,28 @@ class AcousticDataset(object):
         self.phn_perm = None
         self.phn_perm_inv = None
 
-        self.cache = {}
+        if self.datatype == 'acoustic':
+            self.steps_per_second = 1000. / self.offset
+            self.seconds_per_step = float(self.offset) / 1000.
+        else:
+            self.offset = 1.
+            self.steps_per_second = 1.
+            self.seconds_per_step = 1.
 
     def features(
             self,
+            features=None,
+            boundaries_as_features=False,
             fold=None,
             mask=None,
             pad_left=None,
             pad_right=None,
+            pad_final_one=False,
             normalize=False,
             center=False
     ):
-        assert not (normalize and center), 'normalize and center cannot both be true, since normalize constrains to the interval [0,1] and center recenters at 0.'
-
         out = []
+        boundaries = []
         new_series = []
 
         if pad_left is None:
@@ -686,14 +949,27 @@ class AcousticDataset(object):
             if mask:
                 feats, _ = self.data[f].segment_and_stack(
                     segments=mask,
-                    padding=None
+                    features=features,
+                    boundaries_as_features=boundaries_as_features,
+                    padding=None,
+                    pad_final_one=pad_final_one,
                 )
+
+                boundaries_file = []
+                for x in feats:
+                    boundaries_cur = np.zeros(x.shape[:-1])
+                    boundaries_cur[..., -1] = 1
+                    boundaries_file.append(boundaries_cur)
+
                 feats = np.concatenate(
                     feats,
                     axis=1
                 )
+                boundaries_file = np.concatenate(boundaries_file, axis=1)
+
             else:
-                feats = self.data[f].feats[None, ...]
+                feats = self.data[f].data()[None, ...]
+                boundaries_file = np.zeros(feats.shape[:-1])
 
             if normalize:
                 maximum = feats.max()
@@ -711,30 +987,37 @@ class AcousticDataset(object):
                     else:
                         pad_width.append((0, 0))
                 feats = np.pad(feats, pad_width, mode='constant')
+                boundaries_file = np.pad(boundaries_file, pad_width[:-1], mode='constant')
 
             if fold:
-                to_add = []
+                to_add_feats = []
+                to_add_boundaries = []
                 for i in range(0, feats.shape[1], fold):
                     if i == 0:
                         new_series.append(1)
                     else:
                         new_series.append(0)
-                    to_add.append(feats[:, i:i+fold])
-                out += to_add
+                    to_add_feats.append(feats[:, i:i+fold])
+                    to_add_boundaries.append(boundaries_file[:, i:i+fold])
+                out += to_add_feats
+                boundaries += to_add_boundaries
             else:
                 new_series.append(1)
                 out.append(feats)
+                boundaries.append(boundaries_file)
 
         new_series = np.array(new_series)
 
-        return out, new_series
+        return out, boundaries, new_series
 
     def segment_and_stack(
             self,
-            feat_type='acoustic',
+            features=None,
+            boundaries_as_features=False,
             segments='vad',
             max_len=None,
             padding='pre',
+            pad_final_one=False,
             reverse=False,
             normalize=False,
             center=False,
@@ -752,10 +1035,12 @@ class AcousticDataset(object):
                 segments_cur = segments
             if len(segments_cur) > 0:
                 new_feats, new_mask = self.data[f].segment_and_stack(
-                    feat_type=feat_type,
+                    features=features[f],
+                    boundaries_as_features=boundaries_as_features,
                     segments=segments_cur,
                     max_len=max_len,
                     padding=padding,
+                    pad_final_one=pad_final_one,
                     reverse=reverse,
                     normalize=normalize,
                     center=center,
@@ -789,21 +1074,24 @@ class AcousticDataset(object):
             name,
             segments='vad',
             max_len=None,
-            normalize=False,
-            center=False,
+            normalize_inputs=False,
+            center_inputs=False,
+            normalize_targets=False,
+            center_targets=False,
             input_padding='pre',
             input_resampling=None,
             target_padding='post',
             target_resampling=None,
             reverse_targets=True,
+            predict_deltas=False,
             forced_boundaries=None
     ):
         X, X_mask = self.inputs(
             segments=segments,
             padding=input_padding,
             max_len=max_len,
-            normalize=normalize,
-            center=center,
+            normalize=normalize_inputs,
+            center=center_inputs,
             resample=input_resampling
         )
         y, y_mask = self.targets(
@@ -811,8 +1099,9 @@ class AcousticDataset(object):
             padding=target_padding,
             max_len=max_len,
             reverse=reverse_targets,
-            normalize=normalize,
-            center=center,
+            normalize=normalize_targets,
+            center=center_targets,
+            with_deltas=predict_deltas,
             resample=target_resampling
         )
         speaker = self.segments(segments).speaker.values
@@ -847,39 +1136,67 @@ class AcousticDataset(object):
             window_len_input,
             window_len_bwd,
             window_len_fwd,
-            normalize=False,
-            center=False,
+            normalize_inputs=False,
+            center_inputs=False,
+            normalize_targets=False,
+            center_targets=False,
+            target_bwd_resampling=None,
+            target_fwd_resampling = None,
+            predict_deltas=False,
+            forced_boundaries=None,
             mask=None
     ):
         left_pad = max(window_len_input, window_len_bwd) - 1
         right_pad = window_len_fwd
 
-        feats_tmp, _ = self.features(
+        feats_tmp, boundaries_tmp, _ = self.features(
             mask=mask,
             pad_left=left_pad,
             pad_right=right_pad,
-            normalize=normalize,
-            center=center
+            normalize=normalize_inputs,
+            center=center_inputs
         )
-        feats = []
+        feats_inputs = []
+        boundaries = []
         file_lengths = []
-        for x in feats_tmp:
-            feats.append(x[0])
+        for i, x in enumerate(feats_tmp):
             file_lengths.append(len(x[0]) - (left_pad + right_pad))
+            feats_inputs.append(x[0])
+            boundaries.append(boundaries_tmp[i][0])
+
         n = sum(file_lengths)
-        feats = pad_sequence(feats, padding='post')
+        feats_inputs = pad_sequence(feats_inputs, padding='post')
+        boundaries = pad_sequence(boundaries, padding='post')
+
+        if (normalize_inputs == normalize_targets) and (center_inputs == center_targets):
+            feats_targets = feats_inputs
+        else:
+            feats_tmp, _, _ = self.features(
+                mask=mask,
+                pad_left=left_pad,
+                pad_right=right_pad,
+                normalize=normalize_targets,
+                center=center_targets
+            )
+            feats_targets = []
+            file_lengths = []
+            for i, x in enumerate(feats_tmp):
+                file_lengths.append(len(x[0]) - (left_pad + right_pad))
+                feats_targets.append(x[0])
+
+            feats_targets = pad_sequence(feats_targets, padding='post')
 
         file_ix = []
         time_ix = []
 
         for i, l in enumerate(file_lengths):
-            file_ix_cur = np.ones(l - (left_pad + right_pad), dtype='int') * i
-            time_ix_cur = np.arange(left_pad, l - right_pad)
+            file_ix_cur = np.ones(l, dtype='int') * i
+            time_ix_cur = np.arange(left_pad, left_pad + l)
 
             file_ix.append(file_ix_cur)
             time_ix.append(time_ix_cur)
 
-        file_ix = np.concatenate(file_ix, axis=0)[..., None]
+        file_ix = np.concatenate(file_ix, axis=0)
         time_ix = np.concatenate(time_ix, axis=0)
 
         speaker = []
@@ -887,17 +1204,68 @@ class AcousticDataset(object):
             speaker.append(self.data[f].speaker)
         speaker = np.array(speaker)
 
+        if forced_boundaries:
+            gold_boundaries_tmp, _ = self.one_hot_boundaries(
+                inner_segments=forced_boundaries,
+                outer_segments=mask,
+                padding=None
+            )
+            gold_boundaries = []
+            for i, x in enumerate(gold_boundaries_tmp):
+                gold_boundaries.append(x[0])
+            gold_boundaries = pad_sequence(gold_boundaries, padding='post')
+        else:
+            gold_boundaries = None
+
         cache_dict = {
             'type': 'streaming',
             'n': n,
             'file_lengths': file_lengths,
-            'feats': feats,
+            'feats_inputs': feats_inputs,
+            'feats_targets': feats_targets,
+            'boundaries': boundaries,
             'file_ix': file_ix,
             'time_ix': time_ix,
             'speaker': speaker,
+            'forced_boundaries': gold_boundaries,
             'window_len_input': window_len_input,
             'window_len_bwd': window_len_bwd,
-            'window_len_fwd': window_len_fwd
+            'window_len_fwd': window_len_fwd,
+            'target_bwd_resampling': target_bwd_resampling,
+            'target_fwd_resampling': target_fwd_resampling,
+            'predict_deltas': predict_deltas,
+        }
+
+        self.cache[name] = cache_dict
+
+    def cache_files_data(
+            self,
+            name,
+            mask,
+            normalize_inputs=False,
+            center_inputs=False
+    ):
+        feats, boundaries, _ = self.features(
+            mask=mask,
+            normalize=normalize_inputs,
+            center=center_inputs
+        )
+
+        file_lengths = [len(x[0]) for x in feats]
+        n = len(file_lengths)
+
+        speaker = []
+        for f in self.fileIDs:
+            speaker.append(self.data[f].speaker)
+        speaker = np.array(speaker)
+
+        cache_dict = {
+            'type': 'files',
+            'n': n,
+            'file_lengths': file_lengths,
+            'feats': feats,
+            'fixed_boundaries': boundaries,
+            'speaker': speaker
         }
 
         self.cache[name] = cache_dict
@@ -910,23 +1278,23 @@ class AcousticDataset(object):
             window_len_fwd
     ):
         history_ix = time_ix[..., None] - window_len_input + np.arange(window_len_input)[None, ...] + 1
-        left_context_ix = time_ix[..., None] - np.arange(window_len_bwd)[None, ...]
-        right_context_ix = time_ix[..., None] + np.arange(1, window_len_fwd + 1)[None, ...]
+        bwd_context_ix = time_ix[..., None] - np.arange(window_len_bwd)[None, ...]
+        fwd_context_ix = time_ix[..., None] + np.arange(1, window_len_fwd + 1)[None, ...]
 
-        return history_ix, left_context_ix, right_context_ix
+        return history_ix, bwd_context_ix, fwd_context_ix
 
     def get_data_feed(
         self,
         name,
-        minibatch_size,
+        minibatch_size=None,
         randomize=True
     ):
         if self.cache[name]['type'] == 'utterance':
             return self.get_utterance_data_feed(name, minibatch_size, randomize=randomize)
         elif self.cache[name]['type'] == 'streaming':
             return self.get_streaming_data_feed(name, minibatch_size, randomize=randomize)
-        elif self.cache[name]['type'] == 'segmenter_only':
-            pass
+        elif self.cache[name]['type'] == 'files':
+            return self.get_files_data_feed(name, randomize=randomize)
         else:
             raise ValueError('Unrecognized data feed type: "%s".' % self.cache[name]['type'])
 
@@ -953,16 +1321,19 @@ class AcousticDataset(object):
         while i < n:
             indices = ix[i:i + minibatch_size]
 
-            X_cur = X[indices]
-            X_mask_cur = X_mask[indices]
-            y_cur = y[indices]
-            y_mask_cur = y_mask[indices]
-            speaker_cur = speaker[indices]
-            gold_boundaries_cur = None if gold_boundaries is None else gold_boundaries[indices]
+            out = {
+                'X': X[indices],
+                'X_mask': X_mask[indices],
+                'y': y[indices],
+                'y_mask': y_mask[indices],
+                'speaker': speaker[indices],
+                'gold_boundaries': None if gold_boundaries is None else gold_boundaries[indices],
+                'indices': indices
+            }
 
             i += minibatch_size
 
-            yield X_cur, X_mask_cur, y_cur, y_mask_cur, speaker_cur, gold_boundaries_cur, indices
+            yield out
 
     def get_streaming_data_feed(
             self,
@@ -971,13 +1342,19 @@ class AcousticDataset(object):
             randomize=True
     ):
         n = self.cache[name]['n']
-        feats = self.cache[name]['feats']
+        feats_inputs = self.cache[name]['feats_inputs']
+        feats_targets = self.cache[name]['feats_targets']
+        fixed_boundaries = self.cache[name]['boundaries']
         file_ix = self.cache[name]['file_ix']
         time_ix = self.cache[name]['time_ix']
         speaker = self.cache[name]['speaker']
+        forced_boundaries = self.cache[name]['forced_boundaries']
         window_len_input = self.cache[name]['window_len_input']
         window_len_bwd = self.cache[name]['window_len_bwd']
         window_len_fwd = self.cache[name]['window_len_fwd']
+        target_bwd_resampling = self.cache[name]['target_bwd_resampling']
+        target_fwd_resampling = self.cache[name]['target_fwd_resampling']
+        predict_deltas = self.cache[name]['predict_deltas']
 
         i = 0
         if randomize:
@@ -991,24 +1368,86 @@ class AcousticDataset(object):
             file_ix_cur = file_ix[indices]
             time_ix_cur = time_ix[indices]
 
-            history_ix, left_context_ix, right_context_ix = self.get_streaming_indices(
+            history_ix, bwd_context_ix, fwd_context_ix = self.get_streaming_indices(
                 time_ix_cur,
                 window_len_input,
                 window_len_bwd,
                 window_len_fwd
             )
 
-            input_cur = feats[file_ix_cur, history_ix]
-            input_mask_cur = np.any(input_cur, axis=-1)
-            bwd_cur = feats[file_ix_cur, left_context_ix]
-            bwd_mask_cur = np.any(bwd_cur, axis=-1)
-            fwd_cur = feats[file_ix_cur, right_context_ix]
-            fwd_mask_cur = np.any(fwd_cur, axis=-1)
-            speaker_cur = speaker[file_ix_cur]
+            X_cur = feats_inputs[file_ix_cur[..., None], history_ix]
+
+            if self.datatype == 'acoustic':
+                if predict_deltas:
+                    frame_slice = slice(None)
+                else:
+                    frame_slice = slice(0, self.n_coef)
+            else:
+                frame_slice = slice(0, len(self.ix2char))
+
+            if forced_boundaries is not None:
+                forced_boundaries_cur = forced_boundaries[file_ix_cur[..., None], history_ix]
+            else:
+                forced_boundaries_cur = None
+
+            y_bwd_cur = feats_targets[file_ix_cur[..., None], bwd_context_ix, frame_slice]
+            if target_bwd_resampling:
+                y_bwd_cur = scipy.signal.resample(y_bwd_cur, target_bwd_resampling, axis=1)
+                y_bwd_mask_cur = np.ones(y_bwd_cur.shape[:-1])
+            else:
+                y_bwd_mask_cur = np.any(y_bwd_cur, axis=-1)
+
+            y_fwd_cur = feats_targets[file_ix_cur[..., None], fwd_context_ix, frame_slice]
+            if target_fwd_resampling:
+                y_fwd_cur = scipy.signal.resample(y_fwd_cur, target_fwd_resampling, axis=1)
+                y_fwd_mask_cur = np.ones(y_fwd_cur.shape[:-1])
+            else:
+                y_fwd_mask_cur = np.any(y_fwd_cur, axis=-1)
+
+            out = {
+                'X': X_cur,
+                'X_mask': np.any(X_cur, axis=-1),
+                'forced_boundaries': forced_boundaries_cur,
+                'fixed_boundaries': fixed_boundaries[file_ix_cur[..., None], history_ix],
+                'y_bwd': y_bwd_cur,
+                'y_bwd_mask': y_bwd_mask_cur,
+                'y_fwd': y_fwd_cur,
+                'y_fwd_mask': y_fwd_mask_cur,
+                'speaker': speaker[file_ix_cur]
+            }
 
             i += minibatch_size
 
-            yield input_cur, input_mask_cur, bwd_cur, bwd_mask_cur, fwd_cur, fwd_mask_cur, speaker_cur
+            yield out
+
+    def get_files_data_feed(
+            self,
+            name,
+            randomize=True
+    ):
+        n = self.cache[name]['n']
+        feats = self.cache[name]['feats']
+        fixed_boundaries = self.cache[name]['fixed_boundaries']
+        speaker = self.cache[name]['speaker']
+
+        i = 0
+        if randomize:
+            ix, ix_inv = get_random_permutation(n)
+        else:
+            ix = np.arange(n)
+
+        while i < n:
+            index = ix[i]
+
+            out = {
+                'X': feats[index],
+                'fixed_boundaries': fixed_boundaries[index],
+                'speaker': speaker[index:index+1],
+            }
+
+            i += 1
+
+            yield out
 
     def get_n(self, name):
         return self.cache[name]['n']
@@ -1018,6 +1457,17 @@ class AcousticDataset(object):
 
     def cached(self, name):
         return name in self.cache
+
+    def as_text(self):
+        if self.datatype.lower() == 'text':
+            out = ''
+            for f in self.fileIDs:
+                out += self.data[f].as_text()
+        else:
+            sys.stderr.write('Converting to text not supported for acoustic-type data. Skipping...\n')
+            out = None
+
+        return out
 
     def inputs(
             self,
@@ -1069,8 +1519,13 @@ class AcousticDataset(object):
             max_len=None,
             reverse=False
     ):
+        features = {}
+        for f in self.fileIDs:
+            features[f] = self.data[f].one_hot_boundaries(segments=inner_segments)[..., None]
+
         return self.segment_and_stack(
-            feat_type=inner_segments,
+            features=features,
+            boundaries_as_features=True,
             segments=outer_segments,
             max_len=max_len,
             padding=padding,
@@ -1079,6 +1534,25 @@ class AcousticDataset(object):
 
     def segments(self, segment_type='vad'):
         return pd.concat([self.data[f].segments(segment_type=segment_type) for f in self.fileIDs], axis=0)
+
+    def align_gold_labels_to_segments(self, true, pred):
+        out = []
+
+        for f in self.fileIDs:
+            if isinstance(true, str):
+                true_cur = true
+            else:
+                # ``true`` is a dictionary
+                true_cur = true[f]
+
+            if isinstance(pred, str):
+                pred_cur = pred
+            else:
+                pred_cur = pred[f]
+
+            out.append(self.data[f].align_gold_labels_to_segments(true_cur, pred_cur))
+
+        return pd.concat(out, axis=0)
 
     def ix2label(self, segment_type='wrd'):
         labels = self.segments(segment_type=segment_type).label
@@ -1206,20 +1680,22 @@ class AcousticDataset(object):
 
     def get_segment_tables_from_segmenter_states(
             self,
-            segmentation_probs,
+            segmentations,
             parent_segment_type='vad',
             states=None,
             discretize=True,
             state_activation='tanh',
-            algorithm=None,
-            algorithm_params=None,
-            offset=10,
+            smoothing_algorithm=None,
+            smoothing_algorithm_params=None,
+            seconds_per_step=None,
             n_points=None,
             mask=None,
-            batch_mask=None,
             padding=None
     ):
-        n_levels = len(segmentation_probs)
+        if seconds_per_step is None:
+            seconds_per_step = self.seconds_per_step
+
+        n_levels = len(segmentations)
         out = []
 
         for i in range(n_levels):
@@ -1239,21 +1715,22 @@ class AcousticDataset(object):
                 n_utt = len(F.rnd_segments)
 
             dfs = F.get_segment_tables_from_segmenter_states(
-                [s[i:i+n_utt] for s in segmentation_probs],
+                [s[i:i+n_utt] for s in segmentations],
                 parent_segment_type=parent_segment_type,
                 states=[s[i:i+n_utt] for s in states],
                 discretize=discretize,
-                mask=mask[i:i + n_utt],
+                mask=None if mask is None else mask[i:i + n_utt],
                 state_activation=state_activation,
-                algorithm=algorithm,
-                algorithm_params=algorithm_params,
-                offset=offset,
+                smoothing_algorithm=smoothing_algorithm,
+                smoothing_algorithm_params=smoothing_algorithm_params,
+                seconds_per_step=seconds_per_step,
                 n_points=n_points,
                 padding=padding
             )
 
             for j in range(n_levels):
-                out[j][f] = dfs[j]
+                if len(dfs) > 0:
+                    out[j][f] = dfs[j]
 
             i += n_utt
 
@@ -1272,9 +1749,23 @@ class AcousticDataset(object):
                 pred_cur = self.data[f].segments(pred)
             else:
                 # ``true`` is a dictionary
-                pred_cur = pred[f]
+                if f in pred:
+                    pred_cur = pred[f]
+                else:
+                    pred_cur = None
 
-            score_dict[f] = self.data[f].score_segmentation(true_cur, pred_cur, tol=tol)
+            if pred_cur is None:
+                fn = len(true_cur)
+                score_dict[f] = {
+                    'b_tp': 0.,
+                    'b_fp': 0.,
+                    'b_fn': fn,
+                    'w_tp': 0.,
+                    'w_fp': 0.,
+                    'w_fn': fn,
+                }
+            else:
+                score_dict[f] = self.data[f].score_segmentation(true_cur, pred_cur, tol=tol)
 
         global_score_dict = {
             'b_tp': sum([score_dict[f]['b_tp'] for f in self.fileIDs]),
@@ -1287,34 +1778,125 @@ class AcousticDataset(object):
 
         return global_score_dict, score_dict
 
+    def score_text_segmentation(self, true, pred):
+        score_dict = {}
+        for f in self.fileIDs:
+            if isinstance(true, str):
+                true_cur = self.data[f].segments(true)
+            else:
+                # ``true`` is a dictionary
+                true_cur = true[f]
+
+            if isinstance(pred, str):
+                pred_cur = self.data[f].segments(pred)
+            else:
+                # ``true`` is a dictionary
+                if f in pred:
+                    pred_cur = pred[f]
+                else:
+                    pred_cur = None
+
+            if pred_cur is None:
+                fn = len(true_cur)
+                score_dict[f] = {
+                    'b_tp': 0.,
+                    'b_fp': 0.,
+                    'b_fn': fn,
+                    'w_tp': 0.,
+                    'w_fp': 0.,
+                    'w_fn': fn,
+                    'l_tp': 0.,
+                    'l_fp': 0.,
+                    'l_fn': fn,
+                }
+            else:
+                score_dict[f] = self.data[f].score_text_segmentation(true_cur, pred_cur)
+
+        global_score_dict = {
+            'b_tp': sum([score_dict[f]['b_tp'] for f in self.fileIDs]),
+            'b_fp': sum([score_dict[f]['b_fp'] for f in self.fileIDs]),
+            'b_fn': sum([score_dict[f]['b_fn'] for f in self.fileIDs]),
+            'w_tp': sum([score_dict[f]['w_tp'] for f in self.fileIDs]),
+            'w_fp': sum([score_dict[f]['w_fp'] for f in self.fileIDs]),
+            'w_fn': sum([score_dict[f]['w_fn'] for f in self.fileIDs]),
+            'l_tp': sum([score_dict[f]['l_tp'] for f in self.fileIDs]),
+            'l_fp': sum([score_dict[f]['l_fp'] for f in self.fileIDs]),
+            'l_fn': sum([score_dict[f]['l_fn'] for f in self.fileIDs]),
+        }
+
+        return global_score_dict, score_dict
+
+
+    def segmentations_to_string(self, segments, parent_segments=None):
+        if self.datatype == 'text':
+            out = ''
+            for f in self.fileIDs:
+                out += self.data[f].segmentations_to_string(segments, parent_segments=parent_segments)
+
+        else:
+            sys.stderr.write('Converting data to string not supported for acoustic-type datasets. Skipping...\n')
+            out = None
+
+        return out
 
     def dump_segmentations_to_textgrid(self, outdir=None, suffix='', segments=None):
-        for f in self.fileIDs:
-            segments_cur = []
-            for seg in segments:
-                if isinstance(seg, str):
-                    segments_cur.append(seg)
-                else:
-                    segments_cur.append(seg[f])
+        if self.datatype == 'acoustic':
+            for f in self.fileIDs:
+                segments_cur = []
+                for seg in segments:
+                    if isinstance(seg, str):
+                        segments_cur.append(seg)
+                    else:
+                        segments_cur.append(seg[f])
 
-            self.data[f].dump_segmentations_to_textgrid(
-                outdir=outdir,
-                suffix=suffix,
-                segments=segments_cur
-            )
+                self.data[f].dump_segmentations_to_textgrid(
+                    outdir=outdir,
+                    suffix=suffix,
+                    segments=segments_cur
+                )
+        else:
+            sys.stderr.write('Dumping to textgrid not supported for text-type datasets. Skipping...\n')
+
+    def dump_segmentations_to_textfile(self, outdir=None, suffix='', segments=None, parent_segments=None):
+        if self.datatype == 'text':
+            for f in self.fileIDs:
+                segments_cur = []
+                for seg in segments:
+                    if isinstance(seg, str):
+                        segments_cur.append(seg)
+                    else:
+                        segments_cur.append(seg[f])
+                if isinstance(parent_segments, str):
+                    parent_segments_cur = parent_segments
+                else:
+                    parent_segments_cur = parent_segments[f]
+
+                self.data[f].dump_segmentations_to_textfile(
+                    outdir=outdir,
+                    suffix=suffix,
+                    segments=segments_cur,
+                    parent_segments=parent_segments_cur
+                )
+        else:
+            sys.stderr.write('Dumping to text file not supported for acoustic-type datasets. Skipping...\n')
 
     def summary(self, indent=0, summarize_components=False):
         out = ' ' * indent + 'DATASET SUMMARY:\n\n'
+        out += ' ' * indent + 'Data type: %s\n' % self.datatype
         out += ' ' * (indent + 2) + 'Source directory: %s\n' %self.dir_path
-        duration = sum([self.data[f].duration for f in self.data])
         length = sum([len(self.data[f]) for f in self.data])
-        out += ' ' * (indent + 2) + 'Total duration (seconds): %.4f\n' %duration
-        out += ' ' * (indent + 2) + 'Total length (frames): %.4f\n' %length
-        out += ' ' * (indent + 2) + 'Sampling rate: %s\n' %self.sr
-        out += ' ' * (indent + 2) + 'Frame length: %sms\n' %self.window_len
-        out += ' ' * (indent + 2) + 'Step size: %sms\n' %self.offset
-        out += ' ' * (indent + 2) + 'Number of cepstral coefficients: %s\n' %self.n_coef
-        out += ' ' * (indent + 2) + 'Number of derivatives: %s\n' %self.order
+
+        if self.datatype == 'acoustic':
+            duration = sum([self.data[f].duration for f in self.data])
+            out += ' ' * (indent + 2) + 'Total duration (seconds): %.4f\n' %duration
+            out += ' ' * (indent + 2) + 'Total length (frames): %.4f\n' %length
+            out += ' ' * (indent + 2) + 'Sampling rate: %s\n' %self.sr
+            out += ' ' * (indent + 2) + 'Frame length: %sms\n' %self.window_len
+            out += ' ' * (indent + 2) + 'Step size: %sms\n' %self.offset
+            out += ' ' * (indent + 2) + 'Number of cepstral coefficients: %s\n' %self.n_coef
+            out += ' ' * (indent + 2) + 'Number of derivatives: %s\n' %self.order
+        else:
+            out += ' ' * (indent + 2) + 'Total length (characters): %.4f\n' %length
 
         if self.clip_timesteps:
             out += ' ' * (indent + 2) + 'Frame clipping limit: %s\n' %self.clip_timesteps
@@ -1322,19 +1904,19 @@ class AcousticDataset(object):
         out += '\n'
         vad_segments = self.segments('vad')
         out += ' ' * (indent + 2) + 'Number of VAD segments: %s\n' % len(vad_segments)
-        out += segment_length_summary(vad_segments, indent=indent+2, offset=self.offset)
+        out += segment_length_summary(vad_segments, indent=indent+2, steps_per_second=self.steps_per_second)
 
         out += '\n'
         phn_segments = self.segments('phn')
         out += ' ' * (indent + 2) + 'Number of phone segments: %s\n' % len(phn_segments)
         out += ' ' * (indent + 2) + 'Number of phone types: %s\n' % len(phn_segments.label.unique())
-        out += segment_length_summary(phn_segments, indent=indent+2, offset=self.offset)
+        out += segment_length_summary(phn_segments, indent=indent+2, steps_per_second=self.steps_per_second)
 
         out += '\n'
         wrd_segments = self.segments('wrd')
         out += ' ' * (indent + 2) + 'Number of word segments: %s\n' % len(wrd_segments)
         out += ' ' * (indent + 2) + 'Number of word types: %s\n' % len(wrd_segments.label.unique())
-        out += segment_length_summary(wrd_segments, indent=indent+2, offset=self.offset)
+        out += segment_length_summary(wrd_segments, indent=indent+2, steps_per_second=self.steps_per_second)
 
         if summarize_components:
             out += '\n' + ' ' * (indent + 2) + 'COMPONENT DATA FILE SUMMARIES:\n\n'
@@ -1345,9 +1927,388 @@ class AcousticDataset(object):
         return out
 
 
+class Datafile(object):
+    def __new__(cls, *args, **kwargs):
+        if cls is Datafile:
+            raise TypeError("Datafile is an abstract class and may not be instantiated")
+        return object.__new__(cls)
+
+    def __init__(
+            self,
+            path,
+            clip_timesteps=None
+    ):
+        self.clip_timesteps = clip_timesteps
+
+        self.ID = os.path.basename(path)[:-4]
+        self.dir = os.path.dirname(path)
+        self.text_path = path
+
+        self.vad_segments = None
+        self.phn_segments = None
+        self.wrd_segments = None
+
+        self.data_src = None
+
+    def __len__(self):
+        return self.len
+
+    def data(self):
+        raise NotImplementedError
+
+    def segments(self, segment_type='vad'):
+        if isinstance(segment_type, str):
+            if segment_type == 'vad':
+                return self.vad_segments
+            if segment_type == 'wrd':
+                return self.wrd_segments
+            if segment_type == 'phn':
+                return self.phn_segments
+            if segment_type == 'rnd':
+                return self.rnd_segments
+            raise ValueError('Unrecognized segment type name "%s".' % segment_type)
+        return segment_type
+
+    def align_gold_labels_to_segments(self, true, pred):
+        if isinstance(true, str):
+            true = self.segments(segment_type=true)
+        if isinstance(pred, str):
+            pred = self.segments(sgement_type=pred)
+
+        aligned = compute_unsupervised_classification_targets(true, pred)
+
+        return aligned
+
+    def segments_to_one_hot(self, segments):
+        one_hot = np.zeros(len(self))
+        ix = np.array(segments.end - 1e-8) # epsilon guarantees no exact integer values of ix, which can introduce a fencepost problem
+        ix *= self.steps_per_second
+        ix = ix.astype('int')
+        one_hot[ix] = 1
+
+        return one_hot
+
+    def one_hot_boundaries(self, segments='vad'):
+        segments = self.segments(segments)
+        one_hot = self.segments_to_one_hot(segments)
+
+        return one_hot
+
+    def segment_and_stack(
+            self,
+            features=None,
+            boundaries_as_features=False,
+            segments='vad',
+            max_len=None,
+            padding='pre',
+            pad_final_one=False,
+            reverse=False,
+            normalize=False,
+            center=False,
+            with_deltas=True,
+            resample=None
+    ):
+        if features is None:
+            feats = self.data()
+
+            if normalize:
+                maximum = feats.max()
+                minimum = feats.min()
+                diff = maximum - minimum
+                feats = (feats - minimum) / diff
+            if center:
+                feats = feats - feats.mean()
+        else:
+            feats = features
+
+        if isinstance(segments, str):
+            if segments == 'vad':
+                segments_arr = self.vad_segments
+            elif segments == 'wrd':
+                segments_arr = self.wrd_segments
+            elif segments == 'phn':
+                segments_arr = self.phn_segments
+            elif segments == 'rnd':
+                segments_arr = self.rnd_segments
+            else:
+                raise ValueError('Segment type "%s" not recognized.' %segments)
+        else:
+            segments_arr = segments
+
+        pad_seqs = padding not in ['None', None]
+
+        bounds_left = np.floor(segments_arr.start * self.steps_per_second)
+        bounds_right = np.ceil(segments_arr.end * self.steps_per_second)
+        bounds = np.stack([bounds_left, bounds_right], axis=1).astype(np.int32)
+
+        feats_split = []
+        mask_split = []
+        for i in range(len(bounds)):
+            s = bounds[i, 0]
+            e = bounds[i, 1]
+            if max_len is not None:
+                e = min(e, s + max_len)
+            new_feats = feats[s:e]
+
+            if boundaries_as_features:
+                # Returning 1-hot segments, not acoustics, insert final boundary
+                new_feats[-1] = 1
+
+            length = e - s
+            if resample and new_feats.shape[0] > 0:
+                length = resample
+                new_feats = scipy.signal.resample(new_feats, resample, axis=0)
+
+            if not with_deltas:
+                new_feats = new_feats[:,:self.n_coef]
+
+            if not pad_seqs:
+                new_feats = new_feats[None, ...]
+                mask = np.ones((1, length))
+            else:
+                mask = np.ones(length)
+
+            feats_split.append(new_feats)
+            mask_split.append(mask)
+
+        if pad_seqs:
+            feats = pad_sequence(feats_split, padding=padding, reverse=reverse)
+            mask = pad_sequence(mask_split, padding=padding, reverse=reverse)
+        else:
+            feats = feats_split
+            mask = mask_split
+
+        return feats, mask
+
+    def generate_random_segmentation(self, mean_frames_per_segment, parent_segment_type='vad'):
+        if parent_segment_type == 'vad':
+            parent_segments = self.vad_segments
+        elif parent_segment_type == 'wrd':
+            parent_segments = self.wrd_segments
+        elif parent_segment_type == 'phn':
+            parent_segments = self.phn_segments
+        elif parent_segment_type == 'rnd':
+            parent_segments = self.rnd_segments
+
+        out_start = []
+        out_end = []
+        for x in parent_segments[['start', 'end']].as_matrix():
+            s_p, e_p = x
+            s = s_p
+            e = s
+            while e < e_p:
+                e = min(e + np.random.uniform(0., mean_frames_per_segment * self.seconds_per_step * 2), e_p)
+                out_start.append(s)
+                out_end.append(e)
+                s = e
+
+        out = {
+            'start': out_start,
+            'end': out_end,
+            'label': 0
+        }
+
+        out = pd.DataFrame(out)
+
+        return out
+
+    def initialize_random_segmentation(self, rate):
+        self.rnd_segments = self.generate_random_segmentation(rate)
+
+    def get_segment_tables_from_segmenter_states(
+            self,
+            segmentations,
+            parent_segment_type='vad',
+            states=None,
+            discretize=True,
+            state_activation='tanh',
+            smoothing_algorithm=None,
+            smoothing_algorithm_params=None,
+            seconds_per_step=None,
+            n_points=None,
+            mask=None,
+            padding=None,
+            snap_ends=True
+    ):
+        if seconds_per_step is None:
+            seconds_per_step = self.seconds_per_step
+
+        if parent_segment_type == 'vad':
+            parent_segs = self.vad_segments
+        elif parent_segment_type == 'wrd':
+            parent_segs = self.wrd_segments
+        elif parent_segment_type == 'phn':
+            parent_segs = self.phn_segments
+        elif parent_segment_type == 'rnd':
+            parent_segs = self.rnd_segments
+
+        out = []
+
+        parent_starts = parent_segs.start.as_matrix()
+        parent_ends = parent_segs.end.as_matrix()
+
+        n_layers = len(segmentations)
+
+        if len(segmentations[0]) > 0:
+            for i in range(n_layers):
+                starts = []
+                ends = []
+                labels = []
+
+                timestamps = extract_segment_timestamps_batch(
+                    segmentations[i],
+                    algorithm=smoothing_algorithm,
+                    algorithm_params=smoothing_algorithm_params,
+                    seconds_per_step=seconds_per_step,
+                    n_points=n_points,
+                    mask=mask,
+                    padding=padding
+                )
+
+                if states is not None:
+                    states_extracted = extract_states_at_timestamps_batch(
+                        timestamps,
+                        states[i],
+                        steps_per_second=seconds_per_step,
+                        activation=state_activation,
+                        discretize=discretize,
+                        as_categories=False,
+                        as_onehot=True,
+                        mask=mask,
+                        padding=padding
+                    )
+
+                for j, s in enumerate(timestamps):
+                    s = np.concatenate([[0.], s], axis=0)
+                    segs = s + parent_starts[j]
+                    starts_cur = segs[:-1]
+                    ends_cur = segs[1:]
+                    if snap_ends:
+                        ends_cur[-1] = parent_ends[j]
+                    starts.append(starts_cur)
+                    ends.append(ends_cur)
+                    if states is not None:
+                        labels.append(states_extracted[j])
+
+                starts = np.concatenate(starts, axis=0)
+                ends = np.concatenate(ends, axis=0)
+
+                if states is not None:
+                    labels = np.concatenate(labels, axis=0)
+                else:
+                    labels = 0
+
+                df = {
+                    'start': starts,
+                    'end': ends
+                }
+
+                if discretize:
+                    df['label'] = labels
+                else:
+                    df['label'] = 0
+                    for j in range(labels.shape[1]):
+                        df['d%s' %j] = labels[:,j]
+
+                df = pd.DataFrame(df)
+
+                out.append(df)
+        else:
+            df = pd.DataFrame(columns=['start', 'end', 'label'])
+
+        return out
+
+    def indicator2segs(self, indicator, mask=None, mask_starts=None, mask_ends=None, labels=None, location='start'):
+        start = np.zeros_like(indicator)
+        end = np.zeros_like(indicator)
+        if location == 'start':
+            start += indicator
+            end[:-1] += indicator[1:]
+
+        else:
+            start[1:] += indicator[:-1]
+            end += indicator
+
+        start[0] = 1
+        if mask is not None:
+            start = (start + mask_starts) * mask
+        start = np.where((np.arange(len(start))) * start)[0] * self.seconds_per_step
+
+        end[-1] = 1
+        if mask is not None:
+            end = (end + mask_ends) * mask
+        end = (np.where((np.arange(len(end))) * end)[0] + 1) * self.seconds_per_step
+
+        out = {
+            'start': start,
+            'end': end,
+            'speaker': 0,
+            'index': 0
+        }
+
+        if labels is None:
+            out['label'] = 0
+        else:
+            out['label'] = labels
+
+        out = pd.DataFrame(out)
+
+        return out
+
+    def segs2indicator(self, segs, location='start'):
+        out = np.zeros(len(self))
+        if location == 'start':
+            ix = np.floor(segs.start * self.steps_per_second).astype('int')
+        else:
+            ix = np.floor(segs.end * self.steps_per_second).astype('int') - 1
+
+        out[ix] = 1.
+
+        return out
+
+    def segs2mask(self, segs, max_len=None):
+        out = np.zeros(len(self))
+
+        bounds_left = np.floor(segs.start * self.steps_per_second)
+        bounds_right = np.ceil(segs.end * self.steps_per_second)
+        bounds = np.stack([bounds_left, bounds_right], axis=1).astype(np.int32)
+
+        for i in range(len(bounds)):
+            s = bounds[i, 0]
+            e = bounds[i, 1]
+            if max_len is not None:
+                e = min(e, s + max_len)
+            out[s:e] = 1
+
+        return out
+
+    def score_segmentation(self, true, pred, tol=0.02):
+        if isinstance(true, str):
+            if true == 'vad':
+                true = self.vad_segments
+            elif true == 'wrd':
+                true = self.wrd_segments
+            elif true == 'phn':
+                true = self.phn_segments
+            elif true == 'rnd':
+                true = self.rnd_segments
+
+        if isinstance(pred, str):
+            if pred == 'vad':
+                pred = self.vad_segments
+            elif pred == 'wrd':
+                pred = self.wrd_segments
+            elif pred == 'phn':
+                pred = self.phn_segments
+            elif pred == 'rnd':
+                pred = self.rnd_segments
+
+        score_dict = score_segmentation(true, pred, tol=tol)
+
+        return score_dict
 
 
-class AcousticDatafile(object):
+class AcousticDatafile(Datafile):
     def __init__(
             self,
             path,
@@ -1358,7 +2319,9 @@ class AcousticDatafile(object):
             order = 2,
             clip_timesteps=None,
     ):
-        assert path.endswith('.wav') or path.endswith('.WAV'), 'Input file "%s" was not .wav.' %path
+        super(AcousticDatafile, self).__init__(path, clip_timesteps=clip_timesteps)
+
+        assert path.lower().endswith('.wav'), 'Input file "%s" was not .wav.' %path
         assert sr % 1000 == 0, 'Must use a sampling rate that is a multiple of 1000'
 
         self.sr = sr
@@ -1368,9 +2331,7 @@ class AcousticDatafile(object):
         self.order = order
         self.speaker = None
 
-        self.clip_timesteps = clip_timesteps
-
-        feats, duration = wav_to_mfcc(
+        data_src, duration = wav_to_mfcc(
             path,
             sr=sr,
             offset=offset,
@@ -1378,20 +2339,16 @@ class AcousticDatafile(object):
             n_coef=n_coef,
             order=order
         )
-        feats = np.transpose(feats, [1, 0])
+        data_src = np.transpose(data_src, [1, 0])
 
         if self.clip_timesteps is not None:
-            feats = feats[:clip_timesteps, :]
+            data_src = data_src[:clip_timesteps, :]
 
-        self.feats = feats
-        self.shape = self.feats.shape
+        self.data_src = data_src
+        self.shape = self.data_src.shape
 
-        self.len = feats.shape[0]
+        self.len = data_src.shape[0]
         self.duration = duration
-
-        self.ID = os.path.basename(path)[:-4]
-        self.dir = os.path.dirname(path)
-        self.wav_path = path
 
         vad_path = self.dir + '/' + self.ID + '.vad'
         if os.path.exists(vad_path):
@@ -1465,320 +2422,11 @@ class AcousticDatafile(object):
 
         self.rnd_segments = None
 
-    def __len__(self):
-        return self.len
+        self.steps_per_second = 1000. / self.offset
+        self.seconds_per_step = float(self.offset) / 1000.
 
-    def segments(self, segment_type='vad'):
-        if segment_type == 'vad':
-            return self.vad_segments
-        if segment_type == 'wrd':
-            return self.wrd_segments
-        if segment_type == 'phn':
-            return self.phn_segments
-        if segment_type == 'rnd':
-            return self.rnd_segments
-
-    def segments_to_one_hot(self, segments):
-        one_hot = np.zeros(len(self))
-        ix = np.array(segments.end)
-        ix *= 1000 / self.offset
-        ix = ix.astype('int')
-        one_hot[ix] = 1
-
-        return one_hot
-
-    def one_hot_boundaries(self, segment_type='vad'):
-        segments = self.segments(segment_type)
-        one_hot = self.segments_to_one_hot(segments)
-
-        return one_hot
-
-    def segment_and_stack(
-            self,
-            feat_type='acoustic',
-            segments='vad',
-            max_len=None,
-            padding='pre',
-            reverse=False,
-            normalize=False,
-            center=False,
-            with_deltas=True,
-            resample=None
-    ):
-        if not isinstance(feat_type, list):
-            feat_type = [feat_type]
-
-        feats = []
-
-        for f in feat_type:
-            if f.lower() == 'acoustic':
-                feats.append(self.feats)
-            else :
-                feats.append(self.one_hot_boundaries(segment_type=f)[...,None])
-
-        feats = np.concatenate(feats, axis=-1)
-
-        assert not (normalize and center), 'normalize and center cannot both be true, since normalize constrains to the interval [0,1] and center recenters at 0.'
-        if isinstance(segments, str):
-            if segments == 'vad':
-                segments_arr = self.vad_segments
-            elif segments == 'wrd':
-                segments_arr = self.wrd_segments
-            elif segments == 'phn':
-                segments_arr = self.phn_segments
-            elif segments == 'rnd':
-                segments_arr = self.rnd_segments
-            else:
-                raise ValueError('Segment type "%s" not recognized.' %segments)
-        else:
-            segments_arr = segments
-
-        pad_seqs = padding not in ['None', None]
-
-        bounds_left = np.floor(segments_arr.start * 1000 / self.offset)
-        bounds_right = np.ceil(segments_arr.end * 1000 / self.offset)
-        bounds = np.stack([bounds_left, bounds_right], axis=1).astype(np.int32)
-
-        feats_split = []
-        mask_split = []
-        for i in range(len(bounds)):
-            s = bounds[i, 0]
-            e = bounds[i, 1]
-            if max_len is not None:
-                e = min(e, s + max_len)
-            new_feats = feats[s:e]
-
-            if not ('acoustic' in [f.lower() for f in feat_type]):
-                # Returning 1-hot segments, not acoustics, insert final boundary
-                new_feats[-1] = 1
-
-            length = e - s
-            if resample and new_feats.shape[0] > 0:
-                length = resample
-                new_feats = scipy.signal.resample(new_feats, resample, axis=0)
-
-            if not with_deltas:
-                new_feats = new_feats[:,:self.n_coef]
-
-            if normalize:
-                maximum = new_feats.max()
-                minimum = new_feats.min()
-                diff = maximum - minimum
-                new_feats = (new_feats - minimum) / diff
-            if center:
-                new_feats = new_feats - new_feats.mean()
-
-            if not pad_seqs:
-                new_feats = new_feats[None, ...]
-                mask = np.ones((1, length))
-            else:
-                mask = np.ones(length)
-
-            feats_split.append(new_feats)
-            mask_split.append(mask)
-
-        if pad_seqs:
-            feats = pad_sequence(feats_split, padding=padding, reverse=reverse)
-            mask = pad_sequence(mask_split, padding=padding, reverse=reverse)
-        else:
-            feats = feats_split
-            mask = mask_split
-
-        return feats, mask
-
-    def generate_random_segmentation(self, mean_frames_per_segment, parent_segment_type='vad'):
-        if parent_segment_type == 'vad':
-            parent_segments = self.vad_segments
-        elif parent_segment_type == 'wrd':
-            parent_segments = self.wrd_segments
-        elif parent_segment_type == 'phn':
-            parent_segments = self.phn_segments
-        elif parent_segment_type == 'rnd':
-            parent_segments = self.rnd_segments
-
-        out_start = []
-        out_end = []
-        for x in parent_segments[['start', 'end']].as_matrix():
-            s_p, e_p = x
-            s = s_p
-            e = s
-            while e < e_p:
-                e = min(e + np.random.uniform(0., mean_frames_per_segment * self.offset / 1000 * 2), e_p)
-                out_start.append(s)
-                out_end.append(e)
-                s = e
-
-        out = {
-            'start': out_start,
-            'end': out_end,
-            'label': 0
-        }
-
-        out = pd.DataFrame(out)
-
-        return out
-
-    def initialize_random_segmentation(self, rate):
-        self.rnd_segments = self.generate_random_segmentation(rate)
-
-    def get_segment_tables_from_segmenter_states(
-            self,
-            segmentation_probs,
-            parent_segment_type='vad',
-            states=None,
-            discretize=True,
-            state_activation='tanh',
-            algorithm=None,
-            algorithm_params=None,
-            offset=10,
-            n_points=None,
-            mask=None,
-            padding=None,
-            snap_ends=True
-    ):
-        if parent_segment_type == 'vad':
-            parent_segs = self.vad_segments
-        elif parent_segment_type == 'wrd':
-            parent_segs = self.wrd_segments
-        elif parent_segment_type == 'phn':
-            parent_segs = self.phn_segments
-        elif parent_segment_type == 'rnd':
-            parent_segs = self.rnd_segments
-
-        out = []
-
-        parent_starts = parent_segs.start.as_matrix()
-        parent_ends = parent_segs.end.as_matrix()
-
-        n_layers = len(segmentation_probs)
-
-        for i in range(n_layers):
-            starts = []
-            ends = []
-            labels = []
-
-            timestamps = extract_segment_timestamps_batch(
-                segmentation_probs[i],
-                algorithm=algorithm,
-                algorithm_params=algorithm_params,
-                offset=offset,
-                n_points=n_points,
-                mask=mask,
-                padding=padding
-            )
-
-            if states is not None:
-                states_extracted = extract_states_at_timestamps_batch(
-                    timestamps,
-                    states[i],
-                    offset=offset,
-                    activation=state_activation,
-                    discretize=discretize,
-                    as_categories=True,
-                    mask=mask,
-                    padding=padding
-                )
-
-            for j, s in enumerate(timestamps):
-                s = np.concatenate([[0.], s], axis=0)
-                segs = s + parent_starts[j]
-                starts_cur = segs[:-1]
-                ends_cur = segs[1:]
-                if snap_ends:
-                    ends_cur[-1] = parent_ends[j]
-                starts.append(starts_cur)
-                ends.append(ends_cur)
-                if states is not None:
-                    labels.append(states_extracted[j])
-
-            starts = np.concatenate(starts, axis=0)
-            ends = np.concatenate(ends, axis=0)
-            if states is not None:
-                labels = np.concatenate(labels, axis=0)
-            else:
-                labels = 0
-
-            df = {
-                'start': starts,
-                'end': ends
-            }
-
-            if discretize:
-                df['label'] = labels
-            else:
-                df['label'] = 0
-                for j in range(labels.shape[1]):
-                    df['d%s' %j] = labels[:,j]
-
-            df = pd.DataFrame(df)
-
-            out.append(df)
-
-        return out
-
-    def indicator2segs(self, indicator, mask=None, mask_starts=None, mask_ends=None, labels=None, location='start'):
-        start = np.zeros_like(indicator)
-        end = np.zeros_like(indicator)
-        if location == 'start':
-            start += indicator
-            end[:-1] += indicator[1:]
-
-        else:
-            start[1:] += indicator[:-1]
-            end += indicator
-
-        start[0] = 1
-        if mask is not None:
-            start = (start + mask_starts) * mask
-        start = np.where((np.arange(len(start))) * start)[0] * self.offset / 1000
-
-        end[-1] = 1
-        if mask is not None:
-            end = (end + mask_ends) * mask
-        end = (np.where((np.arange(len(end))) * end)[0] + 1) * self.offset / 1000
-
-        out = {
-            'start': start,
-            'end': end,
-            'speaker': 0,
-            'index': 0
-        }
-
-        if labels is None:
-            out['label'] = 0
-        else:
-            out['label'] = labels
-
-        out = pd.DataFrame(out)
-
-        return out
-
-    def segs2indicator(self, segs, location='start'):
-        out = np.zeros(len(self))
-        if location == 'start':
-            ix = np.floor(segs.start * 1000 / self.offset).astype('int')
-        else:
-            ix = np.floor(segs.end * 1000 / self.offset).astype('int') - 1
-
-        out[ix] = 1.
-
-        return out
-
-    def segs2mask(self, segs, max_len=None):
-        out = np.zeros(len(self))
-
-        bounds_left = np.floor(segs.start * 1000 / self.offset)
-        bounds_right = np.ceil(segs.end * 1000 / self.offset)
-        bounds = np.stack([bounds_left, bounds_right], axis=1).astype(np.int32)
-
-        for i in range(len(bounds)):
-            s = bounds[i, 0]
-            e = bounds[i, 1]
-            if max_len is not None:
-                e = min(e, s + max_len)
-            out[s:e] = 1
-
-        return out
+    def data(self):
+        return self.data_src
 
     def dump_segmentations_to_textgrid(self, outdir=None, suffix='', segments=None):
         if outdir is None:
@@ -1825,35 +2473,9 @@ class AcousticDatafile(object):
                     for j, r in seg[['start', 'end']].iterrows():
                         f.write(row_str % (j, r.start, r.end, ''))
 
-    def score_segmentation(self, true, pred, tol=0.02):
-        if isinstance(true, str):
-            if true == 'vad':
-                true = self.vad_segments
-            elif true == 'wrd':
-                true = self.wrd_segments
-            elif true == 'phn':
-                true = self.phn_segments
-            elif true == 'rnd':
-                true = self.rnd_segments
-
-        if isinstance(pred, str):
-            if pred == 'vad':
-                pred = self.vad_segments
-            elif pred == 'wrd':
-                pred = self.wrd_segments
-            elif pred == 'phn':
-                pred = self.phn_segments
-            elif pred == 'rnd':
-                pred = self.rnd_segments
-
-        score_dict = score_segmentation(true, pred, tol=tol)
-
-        return score_dict
-
-
     def summary(self, indent=0, report_metadata=True):
         out = ' ' * indent + 'DATA FILE SUMMARY: %s\n\n' %self.ID
-        out += ' ' * (indent + 2) + 'Source location: %s\n' %self.wav_path
+        out += ' ' * (indent + 2) + 'Source location: %s\n' %self.path
         out += ' ' * (indent + 2) + 'Duration (seconds): %.4f\n' %(self.duration)
         out += ' ' * (indent + 2) + 'Length (frames): %.4f\n' %len(self)
 
@@ -1872,7 +2494,7 @@ class AcousticDatafile(object):
         else:
             out += '\n' + ' ' * (indent + 2) + 'No VAD segmentation file provided.\n'
         out += ' ' * (indent + 2) + 'Number of VAD segments: %s\n' % len(self.vad_segments)
-        out += segment_length_summary(self.vad_segments, indent=indent+2, offset=self.offset)
+        out += segment_length_summary(self.vad_segments, indent=indent+2, steps_per_second=self.steps_per_second)
 
         if self.phn_path:
             out += '\n' + ' ' * (indent + 2) + 'Phone segmentation file location: %s\n' %self.phn_path
@@ -1880,7 +2502,7 @@ class AcousticDatafile(object):
             out += '\n' + ' ' * (indent + 2) + 'No phone segmentation file provided.\n'
         out += ' ' * (indent + 2) + 'Number of phone segments: %s\n' % len(self.phn_segments)
         out += ' ' * (indent + 2) + 'Number of phone types: %s\n' % len(self.phn_segments.label.unique())
-        out += segment_length_summary(self.phn_segments, indent=indent+2, offset=self.offset)
+        out += segment_length_summary(self.phn_segments, indent=indent+2, steps_per_second=self.steps_per_second)
 
         if self.wrd_path:
             out += '\n' + ' ' * (indent + 2) + 'Word segmentation file location: %s\n' %self.wrd_path
@@ -1888,10 +2510,220 @@ class AcousticDatafile(object):
             out += '\n' + ' ' * (indent + 2) + 'No word segmentation file provided.\n'
         out += ' ' * (indent + 2) + 'Number of word segments: %s\n' % len(self.wrd_segments)
         out += ' ' * (indent + 2) + 'Number of word types: %s\n' % len(self.wrd_segments.label.unique())
-        out += segment_length_summary(self.wrd_segments, indent=indent+2, offset=self.offset)
+        out += segment_length_summary(self.wrd_segments, indent=indent+2, steps_per_second=self.steps_per_second)
 
         return out
 
+
+class TextDatafile(Datafile):
+    def __init__(
+            self,
+            path,
+            lower=False,
+            clip_timesteps=None,
+            speaker=None,
+    ):
+        super(TextDatafile, self).__init__(path, clip_timesteps=clip_timesteps)
+
+        if speaker is None:
+            self.speaker = '0'
+        else:
+            self.speaker = speaker
+
+        self.lower = lower
+
+        data_src = []
+        words = []
+        word_start = []
+        word_end = []
+        utt_start = []
+        utt_end = []
+        with open(path, 'r') as f:
+            for l in f.readlines():
+                if l.strip():
+                    line = l.strip()
+                    if self.lower:
+                        line = line.lower()
+                    new_words = line.split()
+                    utt_start.append(float(len(data_src)))
+                    utt_end_new = float(len(data_src))
+                    for j, w in enumerate(new_words):
+                        words.append(w)
+                        word_start.append(float(len(data_src)))
+                        word_end.append(float(len(data_src)) + len(w))
+                        utt_end_new += float(len(w))
+                        data_src += w
+                    utt_end.append(utt_end_new)
+
+        self.data_src = data_src
+
+        self.vad_segments = pd.DataFrame(
+            {
+                'start': utt_start,
+                'end': utt_end,
+                'label': range(len(utt_start)),
+                'speaker': self.speaker,
+                'index': range(len(utt_start))
+            }
+        )
+        self.vad_segments['fileID'] = self.ID
+
+        self.wrd_segments = pd.DataFrame(
+            {
+                'start': word_start,
+                'end': word_end,
+                'label': words,
+                'speaker': self.speaker,
+                'index': range(len(word_start))
+            }
+        )
+        self.wrd_segments['fileID'] = self.ID
+
+        self.phn_segments = pd.DataFrame(
+            {
+                'start': np.array(list(range(len(data_src))), dtype='float'),
+                'end': np.array(list(range(1,len(data_src)+1)), dtype='float'),
+                'label': data_src,
+                'speaker': speaker if speaker else '0',
+                'index': np.array(range(len(data_src)))
+            }
+        )
+        self.phn_segments['fileID'] = self.ID
+
+        self.ix2char = sorted(list(set(data_src)))
+        self.len = len(data_src)
+
+        self.offset = 1.
+        self.seconds_per_step = 1.
+        self.steps_per_second = 1.
+
+    def data(self):
+        n_char = len(self.ix2char)
+        indices = []
+        for c in self.data_src:
+            indices.append(self.char2ix[c])
+        data = np.zeros((len(self), n_char))
+        data[np.arange(len(self)), indices] = 1
+
+        return data
+
+    def update_charset(self, ix2char, char2ix=None):
+        assert isinstance(ix2char, list), 'New charset c must be of type ``list``.'
+        self.ix2char = ix2char
+        if char2ix is None:
+            self.char2ix = {}
+            for i, x in enumerate(self.ix2char):
+                self.char2ix[i] = x
+        else:
+            self.char2ix = char2ix
+
+    def decode_utterance(self, one_hot, boundaries=None):
+        out = ''
+        for i, x in enumerate(np.argmax(one_hot, axis=-1)):
+            c = self.ix2char[x]
+            if c != ' ':
+                out += c
+            if boundaries is not None:
+                if boundaries[i] == 1:
+                    out += ' '
+
+        return out
+
+    def segmentations_to_string(self, segments, parent_segments=None):
+        segment_ends = self.one_hot_boundaries(segments=segments)
+        if parent_segments is not None:
+            utts, _ = self.segment_and_stack(
+                segments=parent_segments,
+                padding=None,
+            )
+            bounds, _ = self.segment_and_stack(
+                features=segment_ends,
+                boundaries_as_features=True,
+                segments=parent_segments,
+                padding=None,
+            )
+        else:
+            utts = self.data()
+
+        out = ''
+        for i, u in enumerate(utts):
+            out += self.decode_utterance(u[0], bounds[i][0]) + '\n'
+
+        return out
+
+    def as_text(self):
+        out = self.segmentations_to_string('wrd', parent_segments='vad')
+
+        return out
+
+    def score_text_segmentation(self, true, pred):
+        if isinstance(true, str):
+            if true == 'vad':
+                true = self.vad_segments
+            elif true == 'wrd':
+                true = self.wrd_segments
+            elif true == 'phn':
+                true = self.phn_segments
+            elif true == 'rnd':
+                true = self.rnd_segments
+
+        true = self.segmentations_to_string(true, parent_segments='vad')
+
+        if isinstance(pred, str):
+            if pred == 'vad':
+                pred = self.vad_segments
+            elif pred == 'wrd':
+                pred = self.wrd_segments
+            elif pred == 'phn':
+                pred = self.phn_segments
+            elif pred == 'rnd':
+                pred = self.rnd_segments
+
+        pred = self.segmentations_to_string(pred, parent_segments='vad')
+
+        score_dict = score_text_segmentation(true, pred)
+
+        return score_dict
+
+    def dump_segmentations_to_textfile(self, segments, outdir=None, suffix='', parent_segments=None):
+        if outdir is None:
+            outdir = self.dir
+
+        for i, seg in enumerate(segments):
+            if isinstance(seg, str):
+                segment_type = seg
+                seg = self.segments(seg)
+            else:
+                segment_type = 'pred'
+
+            out = self.segmentations_to_string(seg, parent_segments=parent_segments)
+
+            path = outdir + '/' + self.ID + '_segmentations_' + segment_type + '_' + suffix + '.txt'
+
+            with open(path, 'w') as f:
+                f.write(out)
+
+    def summary(self, indent=0, report_metadata=True):
+        out = ' ' * indent + 'DATA FILE SUMMARY: %s\n\n' % self.ID
+        out += ' ' * (indent + 2) + 'Source location: %s\n' % self.path
+        out += ' ' * (indent + 2) + 'Length (characters): %.4f\n' % len(self)
+
+        if report_metadata:
+            if self.clip_timesteps:
+                out += ' ' * (indent + 2) + 'Frame clipping limit: %s\n' % self.clip_timesteps
+
+        out += ' ' * (indent + 2) + 'Number of utterances: %s\n' % len(self.vad_segments)
+        out += segment_length_summary(self.vad_segments, indent=indent+2, steps_per_second=self.steps_per_second)
+
+        out += ' ' * (indent + 2) + 'Number of phones (characters): %s\n' % len(self.phn_segments)
+        out += ' ' * (indent + 2) + 'Number of phone types: %s\n' % len(self.phn_segments.label.unique())
+        out += segment_length_summary(self.phn_segments, indent=indent+2, steps_per_second=self.steps_per_second)
+
+        out += ' ' * (indent + 2) + 'Number of words: %s\n' % len(self.wrd_segments)
+        out += ' ' * (indent + 2) + 'Number of word types: %s\n' % len(self.wrd_segments.label.unique())
+        out += segment_length_summary(self.wrd_segments, indent=indent+2, steps_per_second=self.steps_per_second)
+
+        return out
 
 
 

@@ -10,7 +10,7 @@ import argparse
 sys.setrecursionlimit(2000)
 
 from dnnseg.config import Config
-from dnnseg.data import AcousticDataset, score_segmentation
+from dnnseg.data import Dataset, score_segmentation, score_text_segmentation
 from dnnseg.kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
 from dnnseg.plot import plot_acoustic_features
 
@@ -21,23 +21,30 @@ if __name__ == '__main__':
     argparser.add_argument('config', help='Path to configuration file.')
     argparser.add_argument('-p', '--preprocess', action='store_true', help='Preprocess data (even if saved data object exists in the model directory)')
     argparser.add_argument('-r', '--restart', action='store_true', help='Restart training even if model checkpoint exists (this will overwrite existing checkpoint)')
+    argparser.add_argument('-c', '--force_cpu', action='store_true', help='Do not use GPU. If not specified, GPU usage defaults to the value of the **use_gpu_if_available** configuration parameter.')
     args = argparser.parse_args()
 
     p = Config(args.config)
 
-    if not p['use_gpu_if_available']:
+    if args.force_cpu or not p['use_gpu_if_available']:
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
     t0 = time.time()
-    data_name = 'data_f%s_d%s.obj' %(p['n_coef'], p['order'])
+
+    if p['data_type'].lower() == 'acoustic':
+        data_name = 'data_f%s_d%s.obj' %(p['n_coef'], p['order'])
+    else:
+        data_name = 'data.obj'
+
     if not args.preprocess and os.path.exists(p.train_data_dir + '/' + data_name):
         sys.stderr.write('Loading saved training data...\n')
         sys.stderr.flush()
         with open(p.train_data_dir + '/' + data_name, 'rb') as f:
             train_data = pickle.load(f)
     else:
-        train_data = AcousticDataset(
+        train_data = Dataset(
             p.train_data_dir,
+            datatype=p['data_type'].lower(),
             n_coef=p['n_coef'],
             order=p['order'],
         )
@@ -70,6 +77,25 @@ if __name__ == '__main__':
     # #     input()
     # exit()
 
+    # from dnnseg.data import compute_unsupervised_classifications
+    #
+    # phn_segs = train_data.data['s2801a'].segments('phn')
+    # wrd_segs = train_data.data['s2801a'].segments('wrd')
+    #
+    # phn_realigned = compute_unsupervised_classifications(phn_segs, phn_segs)
+    #
+    # print(phn_realigned)
+    #
+    # phn_realigned = compute_unsupervised_classifications(phn_segs, wrd_segs)
+    #
+    # print(phn_realigned)
+    #
+    # phn_realigned = compute_unsupervised_classifications(wrd_segs, phn_segs)
+    #
+    # print(phn_realigned)
+    #
+    # exit()
+
     sys.stderr.write('=' * 50 + '\n')
     sys.stderr.write('TRAINING DATA SUMMARY\n\n')
     sys.stderr.write(train_data.summary(indent=2))
@@ -82,8 +108,9 @@ if __name__ == '__main__':
             with open(p.val_data_dir + '/' + data_name, 'rb') as f:
                 val_data = pickle.load(f)
         else:
-            val_data = AcousticDataset(
+            val_data = Dataset(
                 p.val_data_dir,
+                datatype=p['data_type'].lower(),
                 n_coef=p['n_coef'],
                 order=p['order'],
             )
@@ -93,7 +120,7 @@ if __name__ == '__main__':
                     pickle.dump(val_data, f, protocol=2)
 
             sys.stderr.write('=' * 50 + '\n')
-            sys.stderr.write('CROSS-VALIDATION DATA SUMMARY\n\n')
+            sys.stderr.write('VALIDATION DATA SUMMARY\n\n')
             sys.stderr.write(val_data.summary(indent=2))
             sys.stderr.write('=' * 50 + '\n\n')
 
@@ -120,6 +147,10 @@ if __name__ == '__main__':
     for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
         kwargs[kwarg.key] = p[kwarg.key]
 
+    if p['data_type'] == 'text':
+        kwargs['n_coef'] = len(train_data.ix2char)
+        kwargs['predict_deltas'] = False
+
     if p['network_type'] == 'mle':
         from dnnseg.model import AcousticEncoderDecoderMLE
 
@@ -142,6 +173,7 @@ if __name__ == '__main__':
             train_data,
             **kwargs
         )
+
 
     dnnseg_model.build(len(train_data.segments(segment_type=p['segtype'])), outdir=p.outdir, restore=not args.restart)
 

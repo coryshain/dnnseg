@@ -51,7 +51,7 @@ class Config(object):
 
 
     def __getitem__(self, item):
-            return self.model_settings[item]
+        return self.model_settings[item]
 
     def build_unsupervised_word_classifier_settings(self, settings):
         out = {}

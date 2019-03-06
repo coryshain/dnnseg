@@ -95,9 +95,9 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                         self.encoding_q = Bernoulli(logits = self.encoder[:,:self.k], dtype=self.FLOAT_TF)
                     if self.declare_priors:
                         if self.relaxed:
-                            self.encoding = RelaxedBernoulli(temp, probs = tf.ones([tf.shape(self.y)[0], self.k]) * 0.5)
+                            self.encoding = RelaxedBernoulli(temp, probs =tf.ones([tf.shape(self.y_bwd)[0], self.k]) * 0.5)
                         else:
-                            self.encoding = Bernoulli(probs = tf.ones([tf.shape(self.y)[0], self.k]) * 0.5, dtype=self.FLOAT_TF)
+                            self.encoding = Bernoulli(probs =tf.ones([tf.shape(self.y_bwd)[0], self.k]) * 0.5, dtype=self.FLOAT_TF)
                         if self.k:
                             self.inference_map[self.encoding] = self.encoding_q
                     else:
@@ -109,9 +109,9 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                         self.encoding_q = OneHotCategorical(logits = self.encoder[:,:self.k], dtype=self.FLOAT_TF)
                     if self.declare_priors:
                         if self.relaxed:
-                            self.encoding = RelaxedOneHotCategorical(temp, probs = tf.ones([tf.shape(self.y)[0], self.k]) / self.k)
+                            self.encoding = RelaxedOneHotCategorical(temp, probs =tf.ones([tf.shape(self.y_bwd)[0], self.k]) / self.k)
                         else:
-                            self.encoding = OneHotCategorical(probs = tf.ones([tf.shape(self.y)[0], self.k]) / self.k, dtype=self.FLOAT_TF)
+                            self.encoding = OneHotCategorical(probs =tf.ones([tf.shape(self.y_bwd)[0], self.k]) / self.k, dtype=self.FLOAT_TF)
                         if self.k:
                             self.inference_map[self.encoding] = self.encoding_q
                     else:
@@ -120,7 +120,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
     def _initialize_decoder_scale(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                dim = self.n_timesteps_output * self.frame_dim
+                dim = self.n_timesteps_output_bwd * self.frame_dim
 
                 if self.decoder_type == 'rnn':
 
@@ -134,10 +134,10 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                     )
 
                 elif self.decoder_type == 'cnn':
-                    assert self.n_timesteps_output is not None, 'n_timesteps_output must be defined when decoder_type == "cnn"'
+                    assert self.n_timesteps_output_bwd is not None, 'n_timesteps_output must be defined when decoder_type == "cnn"'
 
                     decoder_scale = tf.layers.dense(self.decoder_in, self.n_timesteps * self.frame_dim)[..., None]
-                    decoder_scale = tf.reshape(decoder_scale, (self.batch_len, self.n_timesteps_output, self.frame_dim, 1))
+                    decoder_scale = tf.reshape(decoder_scale, (self.batch_len, self.n_timesteps_output_bwd, self.frame_dim, 1))
                     decoder_scale = tf.keras.layers.Conv2D(self.conv_n_filters, self.conv_kernel_size, padding='same', activation='elu')(decoder_scale)
                     decoder_scale = tf.keras.layers.Conv2D(1, self.conv_kernel_size, padding='same', activation='linear')(decoder_scale)
                     decoder_scale = tf.squeeze(decoder_scale, axis=-1)
@@ -148,7 +148,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                     # First layer
                     decoder_scale = DenseLayer(
                         self.decoder_in,
-                        self.n_timesteps_output * self.frame_dim,
+                        self.n_timesteps_output_bwd * self.frame_dim,
                         self.training,
                         activation=tf.nn.elu,
                         batch_normalize=self.batch_normalize,
@@ -160,7 +160,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                         for i in range(1, self.n_layers_decoder - 1):
                             decoder_scale = DenseLayer(
                                 decoder_scale,
-                                self.n_timesteps_output * self.frame_dim,
+                                self.n_timesteps_output_bwd * self.frame_dim,
                                 self.training,
                                 activation=tf.nn.elu,
                                 batch_normalize=self.batch_normalize,
@@ -171,7 +171,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                             decoder_scale = DenseResidualLayer(
                                 decoder_scale,
                                 self.training,
-                                units=self.n_timesteps_output * self.frame_dim,
+                                units=self.n_timesteps_output_bwd * self.frame_dim,
                                 layers_inner=self.resnet_n_layers_inner,
                                 activation_inner=tf.nn.elu,
                                 activation=None,
@@ -183,7 +183,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                     if self.n_layers_decoder > 1:
                         decoder_scale = DenseLayer(
                             decoder_scale,
-                            self.n_timesteps_output * self.frame_dim,
+                            self.n_timesteps_output_bwd * self.frame_dim,
                             self.training,
                             activation=None,
                             batch_normalize=False,
@@ -191,7 +191,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                         )
 
                     # Reshape
-                    decoder_scale = tf.reshape(decoder_scale, (self.batch_len, self.n_timesteps_output, self.frame_dim))
+                    decoder_scale = tf.reshape(decoder_scale, (self.batch_len, self.n_timesteps_output_bwd, self.frame_dim))
 
                 else:
                     raise ValueError('Decoder type "%s" not supported at this time' %self.decoder_type)
@@ -235,11 +235,11 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if self.mv:
-                    y = tf.layers.Flatten()(self.y)
-                    y_mask = tf.layers.Flatten()(self.y_mask[..., None] * tf.ones_like(self.y))
+                    y = tf.layers.Flatten()(self.y_bwd)
+                    y_mask = tf.layers.Flatten()(self.y_bwd_mask[..., None] * tf.ones_like(self.y_bwd))
                 else:
-                    y = self.y
-                    y_mask = self.y_mask
+                    y = self.y_bwd
+                    y_mask = self.y_bwd_mask
 
                 # Define access points to important layers
                 if len(self.inference_map) > 0:
@@ -247,7 +247,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
                 else:
                     self.out_post = self.out
                 if self.mv:
-                    self.reconst = tf.reshape(self.out_post * y_mask, [-1, self.n_timesteps_output, self.frame_dim])
+                    self.reconst = tf.reshape(self.out_post * y_mask, [-1, self.n_timesteps_output_bwd, self.frame_dim])
                     # self.reconst_mean = tf.reshape(self.out_post.mean() * y_mask, [-1, self.n_timesteps_output, self.frame_dim])
                 else:
                     self.reconst = self.out_post * y_mask[..., None]
