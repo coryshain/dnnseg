@@ -683,10 +683,10 @@ def score_text_boundaries(true, pred):
 
         if cat1 != cat2:
             if not warned:
-                print("Warning: surface string mismatch:", cat1, cat2)
+                sys.stderr.write("Warning: surface string mismatch: %s | %s\n", cat1, cat2)
                 warned = 1
             elif warned == 1:
-                print("Warning: more mismatches")
+                sys.stderr.write("Warning: more mismatches\n")
                 warned += 1
 
         boundaries_true = set(get_text_boundaries(w_true))
@@ -932,7 +932,6 @@ class Dataset(object):
             mask=None,
             pad_left=None,
             pad_right=None,
-            pad_final_one=False,
             normalize=False,
             center=False
     ):
@@ -946,13 +945,16 @@ class Dataset(object):
             pad_right = 0
 
         for f in self.fileIDs:
+            if features is None:
+                features_cur = None
+            else:
+                features_cur = features[f]
             if mask:
                 feats, _ = self.data[f].segment_and_stack(
                     segments=mask,
-                    features=features,
+                    features=features_cur,
                     boundaries_as_features=boundaries_as_features,
-                    padding=None,
-                    pad_final_one=pad_final_one,
+                    padding=None
                 )
 
                 boundaries_file = []
@@ -1017,7 +1019,6 @@ class Dataset(object):
             segments='vad',
             max_len=None,
             padding='pre',
-            pad_final_one=False,
             reverse=False,
             normalize=False,
             center=False,
@@ -1040,12 +1041,11 @@ class Dataset(object):
                     segments=segments_cur,
                     max_len=max_len,
                     padding=padding,
-                    pad_final_one=pad_final_one,
                     reverse=reverse,
                     normalize=normalize,
                     center=center,
                     with_deltas=with_deltas,
-                    resample = resample,
+                    resample=resample,
                 )
                 if pad_seqs:
                     feats.append(new_feats)
@@ -1084,7 +1084,7 @@ class Dataset(object):
             target_resampling=None,
             reverse_targets=True,
             predict_deltas=False,
-            forced_boundaries=None
+            oracle_boundaries=None
     ):
         X, X_mask = self.inputs(
             segments=segments,
@@ -1106,16 +1106,16 @@ class Dataset(object):
         )
         speaker = self.segments(segments).speaker.values
 
-        if forced_boundaries:
-            inner_segment_type = forced_boundaries
-            gold_boundaries, _ = self.one_hot_boundaries(
+        if oracle_boundaries:
+            inner_segment_type = oracle_boundaries
+            oracle_boundaries, _ = self.one_hot_boundaries(
                 inner_segments=inner_segment_type,
                 outer_segments=segments,
                 padding=input_padding,
                 max_len=max_len
             )
         else:
-            gold_boundaries = None
+            oracle_boundaries = None
 
         cache_dict = {
             'type': 'utterance',
@@ -1125,7 +1125,7 @@ class Dataset(object):
             'y': y,
             'y_mask': y_mask,
             'speaker': speaker,
-            'gold_boundaries': gold_boundaries
+            'oracle_boundaries': oracle_boundaries
         }
 
         self.cache[name] = cache_dict
@@ -1143,7 +1143,7 @@ class Dataset(object):
             target_bwd_resampling=None,
             target_fwd_resampling = None,
             predict_deltas=False,
-            forced_boundaries=None,
+            oracle_boundaries=None,
             mask=None
     ):
         left_pad = max(window_len_input, window_len_bwd) - 1
@@ -1204,18 +1204,29 @@ class Dataset(object):
             speaker.append(self.data[f].speaker)
         speaker = np.array(speaker)
 
-        if forced_boundaries:
-            gold_boundaries_tmp, _ = self.one_hot_boundaries(
-                inner_segments=forced_boundaries,
-                outer_segments=mask,
+        if oracle_boundaries:
+            oracle_boundaries, _ = self.one_hot_boundaries(
+                inner_segments=oracle_boundaries,
+                outer_segments=None,
                 padding=None
             )
-            gold_boundaries = []
-            for i, x in enumerate(gold_boundaries_tmp):
-                gold_boundaries.append(x[0])
-            gold_boundaries = pad_sequence(gold_boundaries, padding='post')
+            oracle_boundaries_tmp = {}
+            for i, f in enumerate(self.fileIDs):
+                oracle_boundaries_tmp[f] = oracle_boundaries[i]
+            oracle_boundaries = oracle_boundaries_tmp
+            oracle_boundaries, _, _ = self.features(
+                features=oracle_boundaries,
+                boundaries_as_features=True,
+                mask=mask,
+                pad_left=left_pad,
+                pad_right=right_pad
+            )
+            oracle_boundaries_tmp = []
+            for x in oracle_boundaries:
+                oracle_boundaries_tmp.append(x[0])
+            oracle_boundaries = pad_sequence(oracle_boundaries_tmp, padding='post')
         else:
-            gold_boundaries = None
+            oracle_boundaries = None
 
         cache_dict = {
             'type': 'streaming',
@@ -1227,7 +1238,7 @@ class Dataset(object):
             'file_ix': file_ix,
             'time_ix': time_ix,
             'speaker': speaker,
-            'forced_boundaries': gold_boundaries,
+            'oracle_boundaries': oracle_boundaries,
             'window_len_input': window_len_input,
             'window_len_bwd': window_len_bwd,
             'window_len_fwd': window_len_fwd,
@@ -1243,7 +1254,8 @@ class Dataset(object):
             name,
             mask,
             normalize_inputs=False,
-            center_inputs=False
+            center_inputs=False,
+            oracle_boundaries=None
     ):
         feats, boundaries, _ = self.features(
             mask=mask,
@@ -1259,11 +1271,37 @@ class Dataset(object):
             speaker.append(self.data[f].speaker)
         speaker = np.array(speaker)
 
+        if oracle_boundaries:
+            oracle_boundaries, _ = self.one_hot_boundaries(
+                inner_segments=oracle_boundaries,
+                outer_segments=None,
+                padding=None
+            )
+            if mask:
+                oracle_boundaries_tmp = []
+                for i, f in enumerate(self.fileIDs):
+                    oracle_boundaries_cur, _ = self.data[f].segment_and_stack(
+                        segments=mask,
+                        features=oracle_boundaries[i],
+                        boundaries_as_features=True,
+                        padding=None
+                    )
+
+                    oracle_boundaries_cur = np.concatenate(
+                        oracle_boundaries_cur,
+                        axis=1
+                    )
+                    oracle_boundaries_tmp.append(oracle_boundaries_cur)
+                oracle_boundaries = oracle_boundaries_tmp
+        else:
+            oracle_boundaries = None
+
         cache_dict = {
             'type': 'files',
             'n': n,
             'file_lengths': file_lengths,
             'feats': feats,
+            'oracle_boundaries': oracle_boundaries,
             'fixed_boundaries': boundaries,
             'speaker': speaker
         }
@@ -1316,7 +1354,7 @@ class Dataset(object):
         y = self.cache[name]['y']
         y_mask = self.cache[name]['y_mask']
         speaker = self.cache[name]['speaker']
-        gold_boundaries = self.cache[name]['gold_boundaries']
+        oracle_boundaries = self.cache[name]['oracle_boundaries']
 
         while i < n:
             indices = ix[i:i + minibatch_size]
@@ -1327,7 +1365,7 @@ class Dataset(object):
                 'y': y[indices],
                 'y_mask': y_mask[indices],
                 'speaker': speaker[indices],
-                'gold_boundaries': None if gold_boundaries is None else gold_boundaries[indices],
+                'oracle_boundaries': None if oracle_boundaries is None else oracle_boundaries[indices],
                 'indices': indices
             }
 
@@ -1348,7 +1386,7 @@ class Dataset(object):
         file_ix = self.cache[name]['file_ix']
         time_ix = self.cache[name]['time_ix']
         speaker = self.cache[name]['speaker']
-        forced_boundaries = self.cache[name]['forced_boundaries']
+        oracle_boundaries = self.cache[name]['oracle_boundaries']
         window_len_input = self.cache[name]['window_len_input']
         window_len_bwd = self.cache[name]['window_len_bwd']
         window_len_fwd = self.cache[name]['window_len_fwd']
@@ -1385,10 +1423,10 @@ class Dataset(object):
             else:
                 frame_slice = slice(0, len(self.ix2char))
 
-            if forced_boundaries is not None:
-                forced_boundaries_cur = forced_boundaries[file_ix_cur[..., None], history_ix]
+            if oracle_boundaries is not None:
+                oracle_boundaries_cur = oracle_boundaries[file_ix_cur[..., None], history_ix]
             else:
-                forced_boundaries_cur = None
+                oracle_boundaries_cur = None
 
             y_bwd_cur = feats_targets[file_ix_cur[..., None], bwd_context_ix, frame_slice]
             if target_bwd_resampling:
@@ -1407,7 +1445,7 @@ class Dataset(object):
             out = {
                 'X': X_cur,
                 'X_mask': np.any(X_cur, axis=-1),
-                'forced_boundaries': forced_boundaries_cur,
+                'oracle_boundaries': oracle_boundaries_cur,
                 'fixed_boundaries': fixed_boundaries[file_ix_cur[..., None], history_ix],
                 'y_bwd': y_bwd_cur,
                 'y_bwd_mask': y_bwd_mask_cur,
@@ -1429,6 +1467,7 @@ class Dataset(object):
         feats = self.cache[name]['feats']
         fixed_boundaries = self.cache[name]['fixed_boundaries']
         speaker = self.cache[name]['speaker']
+        oracle_boundaries = self.cache[name]['oracle_boundaries']
 
         i = 0
         if randomize:
@@ -1438,9 +1477,14 @@ class Dataset(object):
 
         while i < n:
             index = ix[i]
+            if oracle_boundaries is None:
+                oracle_boundaries_cur = None
+            else:
+                oracle_boundaries_cur = oracle_boundaries[index]
 
             out = {
                 'X': feats[index],
+                'oracle_boundaries': oracle_boundaries_cur,
                 'fixed_boundaries': fixed_boundaries[index],
                 'speaker': speaker[index:index+1],
             }
@@ -1523,14 +1567,28 @@ class Dataset(object):
         for f in self.fileIDs:
             features[f] = self.data[f].one_hot_boundaries(segments=inner_segments)[..., None]
 
-        return self.segment_and_stack(
-            features=features,
-            boundaries_as_features=True,
-            segments=outer_segments,
-            max_len=max_len,
-            padding=padding,
-            reverse=reverse
-        )
+        if outer_segments is None:
+            out = []
+            mask = []
+            for f in self.fileIDs:
+                feats_cur = features[f]
+                if max_len:
+                    feats_cur = feats_cur[:max_len]
+                if reverse:
+                    feats_cur = feats_cur[::-1]
+                out.append(feats_cur)
+                mask.append(np.ones((len(feats_cur),)))
+        else:
+            out, mask = self.segment_and_stack(
+                features=features,
+                boundaries_as_features=True,
+                segments=outer_segments,
+                max_len=max_len,
+                padding=padding,
+                reverse=reverse
+            )
+
+        return out, mask
 
     def segments(self, segment_type='vad'):
         return pd.concat([self.data[f].segments(segment_type=segment_type) for f in self.fileIDs], axis=0)
@@ -2001,7 +2059,6 @@ class Datafile(object):
             segments='vad',
             max_len=None,
             padding='pre',
-            pad_final_one=False,
             reverse=False,
             normalize=False,
             center=False,

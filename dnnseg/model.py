@@ -384,11 +384,11 @@ class AcousticEncoderDecoder(object):
                         name='y_fwd_mask'
                     )
 
-                if self.forced_boundaries:
-                    self.gold_boundaries = tf.placeholder(
+                if self.oracle_boundaries:
+                    self.oracle_boundaries_placeholder = tf.placeholder(
                         self.FLOAT_TF,
                         shape=(None, self.n_timesteps_input, self.n_layers_encoder - 1),
-                        name='gold_boundaries'
+                        name='oracle_boundaries'
                     )
 
                 self.global_step = tf.Variable(
@@ -568,8 +568,8 @@ class AcousticEncoderDecoder(object):
                             session=self.sess
                         )(encoder)
 
-                    if self.forced_boundaries:
-                        boundaries = self.gold_boundaries
+                    if self.oracle_boundaries:
+                        boundaries = self.oracle_boundaries_placeholder
                     else:
                         boundaries = None
 
@@ -588,7 +588,7 @@ class AcousticEncoderDecoder(object):
                         self.n_layers_encoder,
                         training=self.training,
                         one_hot_inputs=self.data_type.lower() == 'text' and not self.embed_inputs,
-                        force_boundary=self.forced_boundaries is not None,
+                        oracle_boundary=self.oracle_boundaries is not None,
                         activation=self.encoder_inner_activation,
                         inner_activation=self.encoder_inner_activation,
                         recurrent_activation=self.encoder_recurrent_activation,
@@ -3009,12 +3009,14 @@ class AcousticEncoderDecoder(object):
                         for i, file in enumerate(data_feed):
                             X_batch = file['X']
                             fixed_boundaries_batch = file['fixed_boundaries']
+                            oracle_boundaries_batch = file['oracle_boundaries']
                             speaker_batch = file['speaker']
                             splits = np.where(np.concatenate([np.zeros((1,)), fixed_boundaries_batch[0,:-1]]))[0]
 
                             fd_minibatch = {
                                 self.X: X_batch,
                                 self.fixed_boundaries: fixed_boundaries_batch,
+                                self.oracle_boundaries_placeholder: oracle_boundaries_batch,
                                 self.training: False
                             }
 
@@ -3054,15 +3056,10 @@ class AcousticEncoderDecoder(object):
                         X_mask = []
 
                         for i, batch in enumerate(data_feed):
-                            if self.streaming:
-                                X_batch = batch['X']
-                                X_mask_batch = batch['X_mask']
-                                speaker_batch = batch['speaker']
-                            else:
-                                X_batch = batch['X']
-                                X_mask_batch = batch['X_mask']
-                                speaker_batch = batch['speaker']
-                                gold_boundaries_batch = batch['gold_boundaries']
+                            X_batch = batch['X']
+                            X_mask_batch = batch['X_mask']
+                            speaker_batch = batch['speaker']
+                            oracle_boundaries_batch = batch['oracle_boundaries']
 
                             fd_minibatch = {
                                 self.X: X_batch,
@@ -3075,8 +3072,8 @@ class AcousticEncoderDecoder(object):
                             if self.speaker_emb_dim:
                                 fd_minibatch[self.speaker] = speaker_batch
 
-                            if self.forced_boundaries:
-                                fd_minibatch[self.gold_boundaries] = gold_boundaries_batch
+                            if self.oracle_boundaries:
+                                fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
 
                             [segmentation_probs_cur, segmentations_cur, states_cur] = self.sess.run(
                                 [
@@ -3121,7 +3118,7 @@ class AcousticEncoderDecoder(object):
                         sys.stderr.write('Computing segmentation tables...\n')
 
                     if self.encoder_boundary_discretizer or self.segment_at_peaks \
-                            or self.forced_boundaries or self.boundary_prob_discretization_threshold:
+                            or self.oracle_boundaries or self.boundary_prob_discretization_threshold:
                         smoothing_algorithm = None
                         n_points = None
                     else:
@@ -3234,7 +3231,8 @@ class AcousticEncoderDecoder(object):
                 X_batch = batch['X']
                 X_mask_batch = batch['X_mask']
                 speaker_batch = batch['speaker']
-                gold_boundaries_batch = batch['gold_boundaries']
+                if self.oracle_boundaries:
+                    oracle_boundaries_batch = batch['oracle_boundaries']
 
             to_run = []
             to_run_names = []
@@ -3253,8 +3251,8 @@ class AcousticEncoderDecoder(object):
             if self.speaker_emb_dim:
                 feed_dict[self.speaker] = speaker_batch
 
-            if self.forced_boundaries:
-                feed_dict[self.gold_boundaries] = gold_boundaries_batch
+            if self.oracle_boundaries:
+                feed_dict[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
 
             with self.sess.as_default():
                 with self.sess.graph.as_default():
@@ -3443,7 +3441,7 @@ class AcousticEncoderDecoder(object):
                         predict_deltas=self.predict_deltas,
                         target_bwd_resampling=self.resample_targets_bwd,
                         target_fwd_resampling=self.resample_targets_fwd,
-                        forced_boundaries=self.forced_boundaries
+                        oracle_boundaries=self.oracle_boundaries
                     )
                 else:
                     train_data.cache_utterance_data(
@@ -3458,7 +3456,7 @@ class AcousticEncoderDecoder(object):
                         target_padding=self.target_padding,
                         target_resampling=self.resample_targets_bwd,
                         reverse_targets=self.reverse_targets,
-                        forced_boundaries=self.forced_boundaries
+                        oracle_boundaries=self.oracle_boundaries
                     )
 
             if not val_data.cached('val'):
@@ -3477,7 +3475,8 @@ class AcousticEncoderDecoder(object):
                         center_targets=self.center_data,
                         predict_deltas=self.predict_deltas,
                         target_bwd_resampling=self.resample_targets_bwd,
-                        target_fwd_resampling=self.resample_targets_fwd
+                        target_fwd_resampling=self.resample_targets_fwd,
+                        oracle_boundaries = self.oracle_boundaries
                     )
                 else:
                     val_data.cache_utterance_data(
@@ -3492,13 +3491,14 @@ class AcousticEncoderDecoder(object):
                         target_padding=self.target_padding,
                         target_resampling=self.resample_targets_bwd,
                         reverse_targets=self.reverse_targets,
-                        forced_boundaries=self.forced_boundaries
+                        oracle_boundaries=self.oracle_boundaries
                     )
                 val_data.cache_files_data(
                     'val_files',
                     mask=self.segtype,
                     normalize_inputs=self.normalize_data,
-                    center_inputs=self.center_data
+                    center_inputs=self.center_data,
+                    oracle_boundaries=self.oracle_boundaries
                 )
 
             n_train = train_data.get_n('train')
@@ -3553,7 +3553,7 @@ class AcousticEncoderDecoder(object):
                 else:
                     n_pb = n_minibatch
 
-                if True or not self.initial_evaluation_complete.eval(session=self.sess):
+                if not self.initial_evaluation_complete.eval(session=self.sess):
                     if self.task != 'streaming_autoencoder':
                         self.run_checkpoint(
                             val_data,
@@ -3687,6 +3687,7 @@ class AcousticEncoderDecoder(object):
                             y_fwd_batch = batch['y_fwd']
                             y_fwd_mask_batch = batch['y_fwd_mask']
                             speaker_batch = batch['speaker']
+                            oracle_boundaries_batch = batch['oracle_boundaries']
                             i_pb = i - i_pb_base
                         else:
                             X_batch = batch['X']
@@ -3694,7 +3695,7 @@ class AcousticEncoderDecoder(object):
                             y_bwd_batch = batch['y']
                             y_bwd_mask_batch = batch['y_mask']
                             speaker_batch = batch['speaker']
-                            gold_boundaries_batch = batch['gold_boundaries']
+                            oracle_boundaries_batch = batch['oracle_boundaries']
                             i_pb = i
 
                         fd_minibatch = {
@@ -3717,8 +3718,8 @@ class AcousticEncoderDecoder(object):
                                 fd_minibatch[self.correspondence_hidden_state_placeholders[l]] = segment_embeddings[l]
                                 fd_minibatch[self.correspondence_feature_placeholders[l]] = segment_spans[l]
 
-                        if self.forced_boundaries:
-                            fd_minibatch[self.gold_boundaries] = gold_boundaries_batch
+                        if self.oracle_boundaries:
+                            fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
 
                         info_dict = self.run_train_step(fd_minibatch)
                         loss_cur = info_dict['loss']
@@ -3937,6 +3938,7 @@ class AcousticEncoderDecoder(object):
             y_bwd_mask_plot = batch['y_bwd_mask']
             fixed_boundaries_plot = batch['fixed_boundaries']
             speaker_plot = batch['speaker']
+            oracle_boundaries_plot = batch['oracle_boundaries']
             if self.predict_forward:
                 y_fwd_plot = batch['y_fwd']
                 y_fwd_mask_plot = batch['y_fwd_mask']
@@ -3950,7 +3952,7 @@ class AcousticEncoderDecoder(object):
             y_bwd_mask_plot = batch['y_mask']
             y_fwd_plot = None
             speaker_plot = batch['speaker']
-            gold_boundaries_plot = batch['gold_boundaries']
+            oracle_boundaries_plot = batch['oracle_boundaries']
             ix = batch['indices']
 
         with self.sess.as_default():
@@ -4003,8 +4005,8 @@ class AcousticEncoderDecoder(object):
                     if self.speaker_emb_dim:
                         fd_minibatch[self.speaker] = speaker_plot
 
-                    if self.forced_boundaries:
-                        fd_minibatch[self.gold_boundaries] = gold_boundaries_plot
+                    if self.oracle_boundaries:
+                        fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_plot
 
                     if self.streaming:
                         fd_minibatch[self.fixed_boundaries] = fixed_boundaries_plot
@@ -4035,8 +4037,8 @@ class AcousticEncoderDecoder(object):
                         if self.speaker_emb_dim:
                             fd_minibatch[self.speaker] = speaker[self.plot_ix]
 
-                        if self.forced_boundaries:
-                            fd_minibatch[self.gold_boundaries] = gold_boundaries[self.plot_ix]
+                        if self.oracle_boundaries:
+                            fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries[self.plot_ix]
 
                         out_cur = self.sess.run(
                             to_run,

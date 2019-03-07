@@ -503,7 +503,7 @@ class HMLSTMCell(LayerRNNCell):
             training=False,
             one_hot_inputs=False,
             forget_bias=1.0,
-            force_boundary=False,
+            oracle_boundary=False,
             activation=None,
             inner_activation='tanh',
             recurrent_activation='sigmoid',
@@ -571,7 +571,7 @@ class HMLSTMCell(LayerRNNCell):
 
                     self._forget_bias = forget_bias
 
-                    self._force_boundary = force_boundary
+                    self._oracle_boundary = oracle_boundary
 
                     self._activation = get_activation(activation, session=self._session, training=self._training)
                     self._inner_activation = get_activation(inner_activation, session=self._session, training=self._training)
@@ -743,7 +743,7 @@ class HMLSTMCell(LayerRNNCell):
                     if self._implementation == 2:
                         self._kernel_boundary = []
 
-                    if self._force_boundary:
+                    if self._oracle_boundary:
                         n_boundary_dims = self._num_layers - 1
                     else:
                         n_boundary_dims = 0
@@ -848,7 +848,7 @@ class HMLSTMCell(LayerRNNCell):
                             self._regularize(bias, self._bias_regularizer)
                             self._bias.append(bias)
 
-                        if not self._force_boundary:
+                        if not self._oracle_boundary:
                             if self._implementation == 1 and not self._layer_normalization:
                                 bias_boundary = bias[:, -1:]
                                 self._bias_boundary.append(bias_boundary)
@@ -874,7 +874,7 @@ class HMLSTMCell(LayerRNNCell):
                                 self._regularize(bias_boundary, self._bias_regularizer)
                                 self._bias_boundary.append(bias_boundary)
 
-                    if not self._force_boundary:
+                    if not self._oracle_boundary:
                         if self._boundary_slope_annealing_rate and self.global_step is not None:
                             rate = self._boundary_slope_annealing_rate
                             if self._slope_annealing_max is None:
@@ -904,7 +904,7 @@ class HMLSTMCell(LayerRNNCell):
                     new_output = []
                     new_state = []
 
-                    if self._force_boundary:
+                    if self._oracle_boundary:
                         n_boundary_dims = self._num_layers - 1
                         h_below = inputs[:, :-n_boundary_dims]
                     else:
@@ -1063,7 +1063,6 @@ class HMLSTMCell(LayerRNNCell):
                             s = s[:, :units * 4]
 
                         if self._layer_normalization:
-                            print('Norming layer')
                             s = self.norm(s, 's_ln_%d' % l)
                         else:
                             if self._implementation == 1:
@@ -1117,7 +1116,7 @@ class HMLSTMCell(LayerRNNCell):
 
                         # Compute the current boundary probability
                         if l < self._num_layers - 1:
-                            if self._force_boundary:
+                            if self._oracle_boundary:
                                 inputs_last_dim = inputs.shape[-1]
                                 z_prob = inputs[:, inputs_last_dim + l - 1:inputs_last_dim + l]
                                 z = z_prob
@@ -1183,7 +1182,7 @@ class HMLSTMSegmenter(object):
             training=False,
             one_hot_inputs=False,
             forget_bias=1.0,
-            force_boundary=False,
+            oracle_boundary=False,
             activation=None,
             inner_activation='tanh',
             recurrent_activation='sigmoid',
@@ -1242,7 +1241,7 @@ class HMLSTMSegmenter(object):
                     self.training = training
                     self.one_hot_inputs = one_hot_inputs
                     self.forget_bias = forget_bias
-                    self.force_boundary = force_boundary
+                    self.oracle_boundary = oracle_boundary
 
                     self.activation = activation
                     self.inner_activation = inner_activation
@@ -1308,7 +1307,7 @@ class HMLSTMSegmenter(object):
                         training=self.training,
                         one_hot_inputs=self.one_hot_inputs,
                         forget_bias=self.forget_bias,
-                        force_boundary=self.force_boundary,
+                        oracle_boundary=self.oracle_boundary,
                         activation=self.activation,
                         inner_activation=self.inner_activation,
                         recurrent_activation=self.recurrent_activation,
@@ -1354,7 +1353,7 @@ class HMLSTMSegmenter(object):
         self.built = True
 
     def __call__(self, inputs, mask=None, boundaries=None):
-        assert self.force_boundary != (boundaries is None), 'A boundaries arg must be provided always and only when force_boundary is true'
+        assert self.oracle_boundary != (boundaries is None), 'A boundaries arg must be provided always and only when oracle_boundary is true'
 
         with self.session.as_default():
             with self.session.graph.as_default():
@@ -1364,7 +1363,7 @@ class HMLSTMSegmenter(object):
                     else:
                         sequence_length = None
 
-                    if self.force_boundary:
+                    if self.oracle_boundary:
                         assert boundaries.shape[-1] == (self.num_layers - 1)
                         inputs = tf.concat([inputs, boundaries], axis=-1)
 

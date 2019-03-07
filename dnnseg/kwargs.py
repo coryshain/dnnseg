@@ -527,10 +527,10 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to concatenate the hidden states from all encoder layers as input to the decoder. If ``False``, only the hidden state from the final layer will be used."
     ),
     Kwarg(
-        'forced_boundaries',
+        'oracle_boundaries',
         None,
         [str, None],
-        "Type of forced boundary to use for oracle evaluation (one of ['vad', 'phn', 'wrd', None]). If ``None``, do not use oracle boundaries. Ignored unless **task** is ``'segmenter'``."
+        "Type of boundary to use for oracle evaluation (one of ['vad', 'phn', 'wrd', None]). If ``None``, do not use oracle boundaries. Ignored unless **task** is ``'segmenter'``."
     ),Kwarg(
         'encoder_boundary_power',
         None,
