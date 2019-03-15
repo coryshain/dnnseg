@@ -215,13 +215,19 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'normalize_data',
         False,
         bool,
-        "Normalize utterances to the range :math:`[0, 1]`. Mutually exclusive with **center_data**."
+        "Normalize utterances to the range :math:`[0, 1]`."
     ),
     Kwarg(
         'center_data',
         False,
         bool,
-        "Center data about its mean. Mutually exclusive with **normalize_data**."
+        "Center data about its mean."
+    ),
+    Kwarg(
+        'standardize_data',
+        False,
+        bool,
+        "Convert data into standard units (mean=0, variance=1). Mutually exclusive with **center_data** and **normalize_data**."
     ),
     Kwarg(
         'pad_seqs',
