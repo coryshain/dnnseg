@@ -52,6 +52,9 @@ if __name__ == '__main__':
             sys.stderr.write('Saving preprocessed training data...\n')
             with open(p.train_data_dir + '/' + data_name, 'wb') as f:
                 pickle.dump(train_data, f, protocol=2)
+    if p['oracle_boundaries'] and p['oracle_boundaries'].lower() == 'rnd':
+        assert p['random_oracle_segmentation_rate'], 'random_oracle_segmentation_rate must be provided when oracle_boundaries=="rnd".'
+        train_data.initialize_random_segmentation(p['random_oracle_segmentation_rate'])
 
     # train_data_feed = train_data.get_streaming_data_feed(500,50,50,minibatch_size=100,filter='vad',randomize=True)
     # inputs, left_targets, right_targets, file_ix, time_ix, feats = next(train_data_feed)

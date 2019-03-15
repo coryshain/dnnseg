@@ -530,8 +530,15 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'oracle_boundaries',
         None,
         [str, None],
-        "Type of boundary to use for oracle evaluation (one of ['vad', 'phn', 'wrd', None]). If ``None``, do not use oracle boundaries. Ignored unless **task** is ``'segmenter'``."
-    ),Kwarg(
+        "Type of boundary to use for oracle evaluation (one of ``['vad', 'phn', 'wrd', 'rnd', None]``). If ``None``, do not use oracle boundaries. Ignored unless **task** is ``'segmenter'``."
+    ),
+    Kwarg(
+        'random_oracle_segmentation_rate',
+        None,
+        [float, None],
+        "Rate of segmentation to use if **oracle_boundaries** is ``rnd``."
+    ),
+    Kwarg(
         'encoder_boundary_power',
         None,
         [int, None],

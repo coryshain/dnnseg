@@ -933,8 +933,11 @@ class Dataset(object):
             pad_left=None,
             pad_right=None,
             normalize=False,
-            center=False
+            center=False,
+            standardize=False
     ):
+        assert not (standardize and (normalize or center)), 'standardize is mutually exclusive with normalize and center.'
+
         out = []
         boundaries = []
         new_series = []
@@ -980,6 +983,10 @@ class Dataset(object):
                 feats = (feats - minimum) / diff
             if center:
                 feats = feats - feats.mean()
+            if standardize:
+                sd = feats.std()
+                mu = feats.mean()
+                feats = (feats - mu) / sd
 
             if pad_left or pad_right:
                 pad_width = []
@@ -1021,6 +1028,7 @@ class Dataset(object):
             padding='pre',
             reverse=False,
             normalize=False,
+            standardize=False,
             center=False,
             with_deltas=True,
             resample=None
@@ -1043,6 +1051,7 @@ class Dataset(object):
                     padding=padding,
                     reverse=reverse,
                     normalize=normalize,
+                    standardize=standardize,
                     center=center,
                     with_deltas=with_deltas,
                     resample=resample,
@@ -1076,8 +1085,10 @@ class Dataset(object):
             max_len=None,
             normalize_inputs=False,
             center_inputs=False,
+            standardize_inputs=False,
             normalize_targets=False,
             center_targets=False,
+            standardize_targets=False,
             input_padding='pre',
             input_resampling=None,
             target_padding='post',
@@ -1092,6 +1103,7 @@ class Dataset(object):
             max_len=max_len,
             normalize=normalize_inputs,
             center=center_inputs,
+            standardize=standardize_inputs,
             resample=input_resampling
         )
         y, y_mask = self.targets(
@@ -1101,6 +1113,7 @@ class Dataset(object):
             reverse=reverse_targets,
             normalize=normalize_targets,
             center=center_targets,
+            standardize=standardize_targets,
             with_deltas=predict_deltas,
             resample=target_resampling
         )
@@ -1138,8 +1151,10 @@ class Dataset(object):
             window_len_fwd,
             normalize_inputs=False,
             center_inputs=False,
+            standardize_inputs=False,
             normalize_targets=False,
             center_targets=False,
+            standardize_targets=False,
             target_bwd_resampling=None,
             target_fwd_resampling = None,
             predict_deltas=False,
@@ -1154,7 +1169,8 @@ class Dataset(object):
             pad_left=left_pad,
             pad_right=right_pad,
             normalize=normalize_inputs,
-            center=center_inputs
+            center=center_inputs,
+            standardize=standardize_inputs
         )
         feats_inputs = []
         boundaries = []
@@ -1176,6 +1192,7 @@ class Dataset(object):
                 pad_left=left_pad,
                 pad_right=right_pad,
                 normalize=normalize_targets,
+                standardize=standardize_targets,
                 center=center_targets
             )
             feats_targets = []
@@ -1255,12 +1272,14 @@ class Dataset(object):
             mask,
             normalize_inputs=False,
             center_inputs=False,
+            standardize_inputs=False,
             oracle_boundaries=None
     ):
         feats, boundaries, _ = self.features(
             mask=mask,
             normalize=normalize_inputs,
-            center=center_inputs
+            center=center_inputs,
+            standardize=standardize_inputs,
         )
 
         file_lengths = [len(x[0]) for x in feats]
@@ -1521,6 +1540,7 @@ class Dataset(object):
             reverse=False,
             normalize=False,
             center=False,
+            standardize=False,
             resample=None
     ):
         return self.segment_and_stack(
@@ -1530,6 +1550,7 @@ class Dataset(object):
             reverse=reverse,
             normalize=normalize,
             center=center,
+            standardize=standardize,
             resample = resample
         )
 
@@ -1541,6 +1562,7 @@ class Dataset(object):
             reverse=True,
             normalize=False,
             center=False,
+            standardize=False,
             with_deltas=False,
             resample=None
     ):
@@ -1551,6 +1573,7 @@ class Dataset(object):
             reverse=reverse,
             normalize=normalize,
             center=center,
+            standardize=standardize,
             with_deltas=with_deltas,
             resample=resample
         )
@@ -1732,9 +1755,9 @@ class Dataset(object):
 
         return out
 
-    def initialize_random_segmentation(self, rate):
+    def initialize_random_segmentation(self, mean_frames_per_segment):
         for f in self.data:
-            self.data[f].initialize_random_segmentation(rate)
+            self.data[f].initialize_random_segmentation(mean_frames_per_segment)
 
     def get_segment_tables_from_segmenter_states(
             self,
@@ -2062,9 +2085,12 @@ class Datafile(object):
             reverse=False,
             normalize=False,
             center=False,
+            standardize=False,
             with_deltas=True,
             resample=None
     ):
+        assert not (standardize and (normalize or center)), 'standardize is mutually exclusive with normalize and center.'
+
         if features is None:
             feats = self.data()
 
@@ -2075,6 +2101,11 @@ class Datafile(object):
                 feats = (feats - minimum) / diff
             if center:
                 feats = feats - feats.mean()
+            if standardize:
+                sd = feats.std()
+                mu = feats.mean()
+                feats = (feats - mu) / sd
+
         else:
             feats = features
 
@@ -2169,8 +2200,8 @@ class Datafile(object):
 
         return out
 
-    def initialize_random_segmentation(self, rate):
-        self.rnd_segments = self.generate_random_segmentation(rate)
+    def initialize_random_segmentation(self, mean_frames_per_segment):
+        self.rnd_segments = self.generate_random_segmentation(mean_frames_per_segment)
 
     def get_segment_tables_from_segmenter_states(
             self,

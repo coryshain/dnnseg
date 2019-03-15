@@ -991,10 +991,10 @@ class HMLSTMCell(LayerRNNCell):
                                         logits=lm_logits
                                     )[..., None]
                             elif self._state_discretizer is None:
-                                lm = self._inner_activation(lm_logits)
+                                lm = lm_logits
                                 if self._return_lm_loss:
                                     lm_loss = tf.reduce_mean(
-                                        (tf.stop_gradient(tf.atanh(h_below*(1-1e-9))) - lm_logits) ** 2,
+                                        (h_below - lm) ** 2,
                                         axis=-1,
                                         keep_dims=True
                                     )
@@ -1062,33 +1062,37 @@ class HMLSTMCell(LayerRNNCell):
                             z = s[:, units * 4:]
                             s = s[:, :units * 4]
 
-                        if self._layer_normalization:
-                            s = self.norm(s, 's_ln_%d' % l)
-                        else:
+                        if not self._layer_normalization:
                             if self._implementation == 1:
                                 z += self._bias[l][:, units * 4:]
                             s = s + self._bias[l][:, :units * 4]
 
                         # Forget gate
                         f = s[:, :units]
+                        if self._layer_normalization:
+                            f = self.norm(f, 'f_ln_%d' % l)
                         f = self._recurrent_activation(f + self._forget_bias)
 
                         # Input gate
                         i = s[:, units:units * 2]
+                        if self._layer_normalization:
+                            i = self.norm(i, 'i_ln_%d' % l)
                         i = self._recurrent_activation(i)
 
                         # Output gate
                         o = s[:, units * 2:units * 3]
+                        if self._layer_normalization:
+                            o = self.norm(o, 'o_ln_%d' % l)
                         o = self._recurrent_activation(o)
 
                         # Cell proposal
                         g = s[:, units * 3:units * 4]
+                        if self._layer_normalization:
+                            g = self.norm(g, 'g_ln_%d' % l)
                         g = activation(g)
 
                         # Cell state update (forget-gated previous cell plus input-gated cell proposal)
                         c_update = f * c_behind + i * g
-                        if self._layer_normalization:
-                            c_update = self.norm(c_update, 'c_%d' % l)
 
                         # Compute cell state copy operation
                         c_copy = c_behind

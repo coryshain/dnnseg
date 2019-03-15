@@ -3016,12 +3016,14 @@ class AcousticEncoderDecoder(object):
                             fd_minibatch = {
                                 self.X: X_batch,
                                 self.fixed_boundaries: fixed_boundaries_batch,
-                                self.oracle_boundaries_placeholder: oracle_boundaries_batch,
                                 self.training: False
                             }
 
                             if self.speaker_emb_dim:
                                 fd_minibatch[self.speaker] = speaker_batch
+
+                            if self.oracle_boundaries:
+                                fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
 
                             [segmentation_probs_cur, segmentations_cur, states_cur] = self.sess.run(
                                 [
@@ -3434,10 +3436,12 @@ class AcousticEncoderDecoder(object):
                         mask=self.segtype,
                         normalize_inputs=self.normalize_data,
                         center_inputs=self.center_data,
+                        standardize_inputs=self.standardize_data,
                         # normalize_targets=False,
                         # center_targets=False,
                         normalize_targets=self.normalize_data,
                         center_targets=self.center_data,
+                        standardize_targets=True,
                         predict_deltas=self.predict_deltas,
                         target_bwd_resampling=self.resample_targets_bwd,
                         target_fwd_resampling=self.resample_targets_fwd,
@@ -3450,6 +3454,7 @@ class AcousticEncoderDecoder(object):
                         max_len=self.max_len,
                         normalize_inputs=self.normalize_data,
                         center_inputs=self.center_data,
+                        standardize_targets=self.standardize_data,
                         predict_deltas=self.predict_deltas,
                         input_padding=self.input_padding,
                         input_resampling=self.resample_inputs,
@@ -3469,10 +3474,12 @@ class AcousticEncoderDecoder(object):
                         mask=self.segtype,
                         normalize_inputs=self.normalize_data,
                         center_inputs=self.center_data,
+                        standardize_inputs=self.standardize_data,
                         # normalize_targets=False,
                         # center_targets=False,
                         normalize_targets=self.normalize_data,
                         center_targets=self.center_data,
+                        standardize_targets=True,
                         predict_deltas=self.predict_deltas,
                         target_bwd_resampling=self.resample_targets_bwd,
                         target_fwd_resampling=self.resample_targets_fwd,
@@ -3485,6 +3492,7 @@ class AcousticEncoderDecoder(object):
                         max_len=None,
                         normalize_inputs=self.normalize_data,
                         center_inputs=self.center_data,
+                        standardize_inputs=self.standardize_data,
                         predict_deltas=self.predict_deltas,
                         input_padding=self.input_padding,
                         input_resampling=self.resample_inputs,
@@ -3498,6 +3506,7 @@ class AcousticEncoderDecoder(object):
                     mask=self.segtype,
                     normalize_inputs=self.normalize_data,
                     center_inputs=self.center_data,
+                    standardize_inputs=self.standardize_data,
                     oracle_boundaries=self.oracle_boundaries
                 )
 
@@ -3558,8 +3567,8 @@ class AcousticEncoderDecoder(object):
                         self.run_checkpoint(
                             val_data,
                             save=False,
-                            log=True,
-                            evaluate=True,
+                            log=self.log_freq > 0,
+                            evaluate=self.eval_freq > 0,
                             n_plot=n_plot,
                             ix2label=ix2label,
                             check_numerics=False,
@@ -4536,6 +4545,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
 
                     if self.lm_loss_scale:
                         loss += tf.add_n(self.loss_encoder_lm) * self.lm_loss_scale
+                        # loss += self.loss_encoder_lm[0] * self.lm_loss_scale
 
                 if len(self.regularizer_losses) > 0:
                     self.regularizer_loss_total = tf.add_n(self.regularizer_losses)
