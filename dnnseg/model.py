@@ -297,6 +297,18 @@ class AcousticEncoderDecoder(object):
                             mask=mask,
                             name='decoder_fwd'
                         )
+            else:
+                if self.mask_padding:
+                    mask = self.y_bwd_mask
+                else:
+                    mask = None
+                with tf.variable_scope('decoder_bwd'):
+                    self.decoder_bwd, self.attention_bwd = self._initialize_decoder(
+                        self.decoder_in,
+                        self.n_timesteps_output_bwd,
+                        mask=mask,
+                        name='decoder_bwd'
+                    )
 
             self._initialize_output_model()
         self._initialize_objective(n_train)
@@ -600,7 +612,7 @@ class AcousticEncoderDecoder(object):
                         boundary_regularizer=self.encoder_weight_regularization,
                         bias_regularizer=None,
                         temporal_dropout=self.temporal_dropout_rate,
-                        return_lm_loss=self.lm_loss_scale,
+                        return_lm_predictions=self.lm_loss_scale,
                         temporal_dropout_plug_lm=self.temporal_dropout_plug_lm,
                         bottomup_dropout=self.encoder_dropout,
                         recurrent_dropout=self.encoder_dropout,
@@ -626,11 +638,11 @@ class AcousticEncoderDecoder(object):
                     self.state_slope_coef = self.segmenter.state_slope_coef
 
                     self.regularizer_losses += self.segmenter.get_regularizer_losses()
-                    # self.segmentation_logits = self.segmenter_output.boundary_probs(as_logits=True, mask=self.X_mask)
                     self.segmentation_probs = self.segmenter_output.boundary_probs(as_logits=False, mask=self.X_mask)
+                    self.encoder_segmentations = self.segmenter_output.boundary(mask=self.X_mask)
                     self.mean_segmentation_prob = tf.reduce_sum(self.segmentation_probs) / (tf.reduce_sum(self.X_mask) + self.epsilon)
                     if self.lm_loss_scale:
-                        self.loss_encoder_lm = self.segmenter_output.lm_loss(mask=self.X_mask)
+                        self.encoder_lm_logits = self.segmenter_output.lm_logits(mask=self.X_mask)
 
                     if (not self.encoder_boundary_discretizer) or self.segment_at_peaks or self.boundary_prob_discretization_threshold:
                         self.segmentation_probs_smoothed = []
@@ -1011,26 +1023,28 @@ class AcousticEncoderDecoder(object):
                     # Create a set of periodic functions with trainable phase and frequency
                     elif self.decoder_temporal_encoding_type.lower() == 'periodic':
                         time = tf.range(1., n_timesteps + 1., dtype=self.FLOAT_TF)[None, ..., None]
-                        phase = tf.get_variable(
-                            'phase_%s' % name,
-                            initializer=tf.initializers.random_normal,
-                            shape=[temporal_encoding_units]
-                        )[None, None, ...]
-                        frequency_logits = tf.get_variable(
-                            'frequency_logits_%s' % name,
-                            initializer=tf.linspace(
-                                -2.,
-                                2.,
-                                temporal_encoding_units
-                            )
+                        frequency_logits = tf.linspace(
+                            -2.,
+                            2.,
+                            temporal_encoding_units
                         )
-                        gain = tf.get_variable(
-                            'gain_%s' % name,
-                            initializer=tf.glorot_uniform_initializer(),
-                            shape=[temporal_encoding_units]
-                        )[None, None, ...]
+                        # frequency_logits = tf.get_variable(
+                        #     'frequency_logits_%s' % name,
+                        #     initializer=frequency_logits
+                        # )
+                        # phase = tf.get_variable(
+                        #     'phase_%s' % name,
+                        #     initializer=tf.initializers.random_normal,
+                        #     shape=[temporal_encoding_units]
+                        # )[None, None, ...]
+                        # gain = tf.get_variable(
+                        #     'gain_%s' % name,
+                        #     initializer=tf.glorot_uniform_initializer(),
+                        #     shape=[temporal_encoding_units]
+                        # )[None, None, ...]
                         frequency = tf.exp(frequency_logits)[None, None, ...]
-                        temporal_encoding = tf.sin(time * frequency + phase) * gain
+                        # temporal_encoding = tf.sin(time * frequency + phase) * gain
+                        temporal_encoding = tf.sin(time * frequency)
 
                     else:
                         raise ValueError('Unrecognized decoder temporal encoding type "%s".' % self.decoder_temporal_encoding_type)
@@ -1213,9 +1227,13 @@ class AcousticEncoderDecoder(object):
                         in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(decoder, n_timesteps, self.units_decoder[i], expand_sequence=False)
                         decoder = tf.reshape(decoder, in_shape_flattened)
 
+
+                        print(i)
+                        print(decoder.shape)
+
                         if self.decoder_resnet_n_layers_inner:
-                            if self.units_decoder[i] != self.units_decoder[i-1]:
-                                project_inputs = True
+                            if i > 0 and self.units_decoder[i] != self.units_decoder[i-1]:
+                                    project_inputs = True
                             else:
                                 project_inputs = False
 
@@ -1352,7 +1370,8 @@ class AcousticEncoderDecoder(object):
                         tf.summary.scalar('objective/correspondence_loss_%d' % l, self.loss_correspondence_summary[l], collections=['objective'])
                 if self.lm_loss_scale:
                     for l in range(self.n_layers_encoder):
-                        tf.summary.scalar('objective/encoder_lm_loss_%d' % l, self.loss_encoder_lm_summary[l], collections=['objective'])
+                        tf.summary.scalar('objective/encoder_lm_loss_%d'
+                                          % l, self.loss_encoder_lm_summary[l], collections=['objective'])
 
                 if self.task == 'classifier':
                     tf.summary.scalar('classification/homogeneity', self.homogeneity, collections=['classification'])
@@ -4544,19 +4563,42 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                             loss += cae_loss
 
                     if self.lm_loss_scale:
-                        loss += tf.add_n(self.loss_encoder_lm) * self.lm_loss_scale
-                        # loss += self.loss_encoder_lm[0] * self.lm_loss_scale
+                        # loss += tf.add_n(self.loss_encoder_lm) * self.lm_loss_scale
+                        self.encoder_lm_losses = []
+                        for l in range(len(self.encoder_lm_logits)):
+                            lm_logits = self.encoder_lm_logits[l][:,:-1]
+                            if l == 0:
+                                lm_targets = self.inputs[:,1:]
+                            else:
+                                lm_targets = self.encoder_hidden_states[l-1][:,1:]
+
+                            if l == 0 and self.data_type.lower() == 'text' and not self.embed_inputs:
+                                lm_losses = tf.nn.softmax_cross_entropy_with_logits_v2(
+                                    labels=tf.stop_gradient(lm_targets),
+                                    logits=lm_logits
+                                )
+                            elif self.encoder_state_discretizer is None or l == 0:
+                                lm_losses = (tf.stop_gradient(lm_targets) - lm_logits) ** 2
+                            else:
+                                lm_losses = tf.nn.sigmoid_cross_entropy_with_logits(
+                                    labels=tf.stop_gradient(lm_targets),
+                                    logits = lm_logits
+                                )
+
+                            if l == 0:
+                                mask = self.X_mask[:,1:, None]
+                            else:
+                                mask = self.encoder_segmentations[l-1][:,1:, None]
+                            lm_losses *= mask
+                            lm_losses = tf.reduce_sum(lm_losses) / (tf.reduce_sum(mask) * tf.cast(tf.shape(lm_targets)[-1], dtype=self.FLOAT_TF) + self.epsilon)
+                            self.encoder_lm_losses.append(lm_losses)
+                            loss += lm_losses * self.lm_loss_scale
 
                 if len(self.regularizer_losses) > 0:
                     self.regularizer_loss_total = tf.add_n(self.regularizer_losses)
                     loss += self.regularizer_loss_total
                 else:
                     self.regularizer_loss_total = tf.constant(0., dtype=self.FLOAT_TF)
-
-                # encoder_grad_list = tf.gradients(loss, self.decoder_in)
-                # encoder_grad_sum_list = [tf.reduce_sum(tf.abs(x)) for x in encoder_grad_list if x is not None]
-                # encoder_grad = tf.add_n(encoder_grad_sum_list)
-                # loss = tf.Print(loss, ['encoder gradient', encoder_grad])
 
                 self.loss = loss
                 self.optim = self._initialize_optimizer(self.optim_name)
@@ -4590,7 +4632,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                         to_run_names.append('correspondence_loss_%d' % l)
                 if self.lm_loss_scale:
                     for l in range(self.n_layers_encoder):
-                        to_run.append(self.loss_encoder_lm[l])
+                        to_run.append(self.encoder_lm_losses[l])
                         to_run_names.append('encoder_lm_loss_%d' % l)
             if return_regularizer_loss:
                 to_run.append(self.regularizer_loss_total)

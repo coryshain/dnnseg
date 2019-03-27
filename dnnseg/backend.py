@@ -521,7 +521,7 @@ class HMLSTMCell(LayerRNNCell):
             bias_regularizer=None,
             temporal_dropout=None,
             temporal_dropout_plug_lm=False,
-            return_lm_loss=False,
+            return_lm_predictions=False,
             bottomup_dropout=None,
             recurrent_dropout=None,
             topdown_dropout=None,
@@ -564,8 +564,8 @@ class HMLSTMCell(LayerRNNCell):
 
                     self._training = training
 
-                    self._lm = return_lm_loss or temporal_dropout_plug_lm
-                    self._return_lm_loss = return_lm_loss
+                    self._lm = return_lm_predictions or temporal_dropout_plug_lm
+                    self._return_lm_predictions = return_lm_predictions
                     self._temporal_dropout_plug_lm = temporal_dropout_plug_lm
                     self._one_hot_inputs = one_hot_inputs
 
@@ -668,10 +668,12 @@ class HMLSTMCell(LayerRNNCell):
     def state_size(self):
         out = []
         for l in range(self._num_layers):
+            units_cur = self._num_units[l]
+
             if l < self._num_layers - 1:
-                size = (self._num_units[l], self._num_units[l], 1)
+                size = (units_cur, units_cur, 1)
             else:
-                size = (self._num_units[l], self._num_units[l])
+                size = (units_cur, units_cur)
 
             out.append(size)
 
@@ -683,16 +685,22 @@ class HMLSTMCell(LayerRNNCell):
     def output_size(self):
         out = []
         for l in range(self._num_layers):
-            if l < self._num_layers - 1:
-                if self._return_lm_loss:
-                    size = (self._num_units[l], 1, 1, 1)
-                else:
-                    size = (self._num_units[l], 1, 1)
+            if l == 0:
+                units_below = self._input_dims
             else:
-                if self._return_lm_loss:
-                    size = (self._num_units[l], 1)
+                units_below = self._num_units[l-1]
+            units_cur = self._num_units[l]
+
+            if l < self._num_layers - 1:
+                if self._return_lm_predictions:
+                    size = (units_cur, 1, 1, units_below)
                 else:
-                    size = (self._num_units[l],)
+                    size = (units_cur, 1, 1)
+            else:
+                if self._return_lm_predictions:
+                    size = (units_cur, units_below)
+                else:
+                    size = (units_cur,)
 
             out.append(size)
 
@@ -804,7 +812,7 @@ class HMLSTMCell(LayerRNNCell):
                             self._kernel_topdown.append(kernel_topdown)
 
                         if self._lm:
-                            lm_recurrent_in_dim = 2 * recurrent_dim
+                            lm_recurrent_in_dim = bottom_up_dim + 2 * recurrent_dim
                             kernel_lm_recurrent = self.add_variable(
                                 'kernel_lm_recurrent_%d' % l,
                                 shape=[lm_recurrent_in_dim, bottom_up_dim],
@@ -817,19 +825,19 @@ class HMLSTMCell(LayerRNNCell):
                             self._regularize(kernel_lm_recurrent, self._recurrent_regularizer)
                             self._kernel_lm_recurrent.append(kernel_lm_recurrent)
 
-                            if l < self._num_layers - 1:
-                                lm_topdown_in_dim = top_down_dim
-                                kernel_lm_topdown = self.add_variable(
-                                    'kernel_lm_topdown_%d' % l,
-                                    shape=[lm_topdown_in_dim, bottom_up_dim],
-                                    initializer=self._recurrent_initializer
-                                )
-                                if self._weight_normalization:
-                                    kernel_lm_topdown_g = tf.Variable(tf.ones([1, bottom_up_dim]), name='kernel_lm_topdown_g_%d' % l)
-                                    kernel_lm_topdown_b = tf.Variable(tf.zeros([1, bottom_up_dim]), name='kernel_lm_topdown_b_%d' % l)
-                                    kernel_lm_topdown = tf.nn.l2_normalize(kernel_lm_topdown, axis=-1) * kernel_lm_topdown_g + kernel_lm_topdown_b
-                                self._regularize(kernel_lm_topdown, self._topdown_regularizer)
-                                self._kernel_lm_topdown.append(kernel_lm_topdown)
+                            # if l < self._num_layers - 1:
+                            #     lm_topdown_in_dim = top_down_dim
+                            #     kernel_lm_topdown = self.add_variable(
+                            #         'kernel_lm_topdown_%d' % l,
+                            #         shape=[lm_topdown_in_dim, bottom_up_dim],
+                            #         initializer=self._recurrent_initializer
+                            #     )
+                            #     if self._weight_normalization:
+                            #         kernel_lm_topdown_g = tf.Variable(tf.ones([1, bottom_up_dim]), name='kernel_lm_topdown_g_%d' % l)
+                            #         kernel_lm_topdown_b = tf.Variable(tf.zeros([1, bottom_up_dim]), name='kernel_lm_topdown_b_%d' % l)
+                            #         kernel_lm_topdown = tf.nn.l2_normalize(kernel_lm_topdown, axis=-1) * kernel_lm_topdown_g + kernel_lm_topdown_b
+                            #     self._regularize(kernel_lm_topdown, self._topdown_regularizer)
+                            #     self._kernel_lm_topdown.append(kernel_lm_topdown)
 
                             bias_lm = self.add_variable(
                                 'bias_lm_%d' % l,
@@ -974,38 +982,26 @@ class HMLSTMCell(LayerRNNCell):
                             h_below = 2 * (h_below - 0.5)
                         if self._lm:
                             lm_logits = tf.matmul(
-                                tf.concat([c_behind, h_behind], axis=-1),
+                                tf.concat([
+                                    h_below if z_below is None else h_below * z_below,
+                                    c_behind if z_behind is None else c_behind * (1 - z_behind),
+                                    h_behind if z_behind is None else h_behind * (1 - z_behind)
+                                ], axis=-1),
                                 self._kernel_lm_recurrent[l]
                             )
                             if z_behind is not None:
-                                lm_logits *= (1 - z_behind ** power)
-                                lm_logits += tf.matmul(h_above, self._kernel_lm_topdown[l]) * (z_behind ** power)
+                                lm_logits *= 1 - z_behind
+                                # lm_logits += tf.matmul(h_above, self._kernel_lm_topdown[l]) * (z_behind ** power)
 
                             lm_logits += self._bias_lm[l]
 
                             if self._one_hot_inputs and l == 0:
                                 lm = tf.nn.softmax(lm_logits)
-                                if self._return_lm_loss:
-                                    lm_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
-                                        labels=tf.stop_gradient(h_below),
-                                        logits=lm_logits
-                                    )[..., None]
-                            elif self._state_discretizer is None:
+                            elif self._state_discretizer is None or l == 0:
                                 lm = lm_logits
-                                if self._return_lm_loss:
-                                    lm_loss = tf.reduce_mean(
-                                        (h_below - lm) ** 2,
-                                        axis=-1,
-                                        keep_dims=True
-                                    )
                             else:
                                 lm = tf.sigmoid(lm_logits)
-                                if self._return_lm_loss:
-                                    lm_loss = tf.reduce_mean(
-                                        (tf.stop_gradient(h_below) - lm) ** 2,
-                                        axis=-1,
-                                        keep_dims=True
-                                    )
+
                         if self._implementation == 1 and self._refeed_boundary:
                             h_below = tf.concat([z_behind, h_below], axis=1)
                         if self._temporal_dropout[l]:
@@ -1038,14 +1034,12 @@ class HMLSTMCell(LayerRNNCell):
 
                         s_bottomup = tf.matmul(h_below, self._kernel_bottomup[l])
                         if l > 0:
-                            s_bottomup = s_bottomup * (z_below ** power)
+                            s_bottomup *= z_below ** power
 
                         # Recurrent features
-                        if self._state_discretizer and l < self._num_layers - 1:
-                            s_recurrent_in = 2 * (h_behind - 0.5)
-                        else:
-                            s_recurrent_in = h_behind
-                        s_recurrent = tf.matmul(s_recurrent_in, self._kernel_recurrent[l])
+                        s_recurrent = tf.matmul(h_behind, self._kernel_recurrent[l])
+                        if l < self._num_layers - 1:
+                            s_recurrent *= (1 - z_behind) ** power
 
                         # Sum bottom-up and recurrent features
                         s = s_bottomup + s_recurrent
@@ -1091,14 +1085,14 @@ class HMLSTMCell(LayerRNNCell):
                             g = self.norm(g, 'g_ln_%d' % l)
                         g = activation(g)
 
-                        # Cell state update (forget-gated previous cell plus input-gated cell proposal)
-                        c_update = f * c_behind + i * g
+                        # Compute cell state flush operation
+                        c_flush = i * g
 
                         # Compute cell state copy operation
                         c_copy = c_behind
 
-                        # Compute cell state flush operation
-                        c_flush = i * g
+                        # Cell state update (forget-gated previous cell plus input-gated cell proposal)
+                        c_update = f * c_behind + c_flush
 
                         # Merge cell operations. If boundaries are hard, selects between update, copy, and flush.
                         # If boundaries are soft, sums update copy and flush proportionally to their probs.
@@ -1152,14 +1146,14 @@ class HMLSTMCell(LayerRNNCell):
                             z = None
 
                         if l < self._num_layers - 1:
-                            if self._return_lm_loss:
-                                output_l = (h, z_prob, z, lm_loss)
+                            if self._return_lm_predictions:
+                                output_l = (h, z_prob, z, lm_logits)
                             else:
                                 output_l = (h, z_prob, z)
                             new_state_l = (c, h, z)
                         else:
-                            if self._return_lm_loss:
-                                output_l = (h, lm_loss)
+                            if self._return_lm_predictions:
+                                output_l = (h, lm_logits)
                             else:
                                 output_l = (h,)
                             new_state_l = (c, h,)
@@ -1205,7 +1199,7 @@ class HMLSTMSegmenter(object):
             bottomup_dropout=None,
             temporal_dropout=None,
             temporal_dropout_plug_lm=False,
-            return_lm_loss=False,
+            return_lm_predictions=False,
             recurrent_dropout=None,
             topdown_dropout=None,
             boundary_dropout=None,
@@ -1260,7 +1254,7 @@ class HMLSTMSegmenter(object):
                     self.bias_initializer = bias_initializer
 
                     self.temporal_dropout = temporal_dropout
-                    self.return_lm_loss = return_lm_loss
+                    self.return_lm_predictions = return_lm_predictions
                     self.temporal_dropout_plug_lm = temporal_dropout_plug_lm
                     self.bottomup_dropout = bottomup_dropout
                     self.recurrent_dropout = recurrent_dropout
@@ -1326,7 +1320,7 @@ class HMLSTMSegmenter(object):
                         topdown_regularizer=self.topdown_regularizer,
                         boundary_regularizer=self.boundary_regularizer,
                         temporal_dropout=self.temporal_dropout,
-                        return_lm_loss=self.return_lm_loss,
+                        return_lm_predictions=self.return_lm_predictions,
                         temporal_dropout_plug_lm=self.temporal_dropout_plug_lm,
                         bottomup_dropout=self.bottomup_dropout,
                         recurrent_dropout=self.recurrent_dropout,
@@ -1434,10 +1428,10 @@ class HMLSTMOutput(object):
 
         return out
 
-    def lm_loss(self, mask=None):
+    def lm_logits(self, mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
-                loss = [l.lm_loss(mask=mask) for l in self.l]
+                loss = [l.lm_logits(mask=mask) for l in self.l]
 
                 return loss
 
@@ -1453,16 +1447,16 @@ class HMLSTMOutputLevel(object):
                     self.z_prob = output[1]
                     self.z = output[2]
                     if len(output) > 3:
-                        self.lm_losses = output[3]
+                        self.lm_logits_tensor = output[3]
                     else:
-                        self.lm_losses = None
+                        self.lm_logits_tensor = None
                 else:
                     self.z_prob = None
                     self.z = None
                     if len(output) > 1:
-                        self.lm_losses = output[1]
+                        self.lm_logits_tensor = output[1]
                     else:
-                        self.lm_losses = None
+                        self.lm_logits_tensor = None
 
     def state(self, discrete=False, discretization_method='round', mask=None):
         with self.session.as_default():
@@ -1523,23 +1517,15 @@ class HMLSTMOutputLevel(object):
 
                 return out
 
-    def lm_loss(self, mask=None):
+    def lm_logits(self, mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
-                losses = self.lm_losses
-                if losses is not None:
-                    if mask is None:
-                        loss = tf.reduce_mean(losses)
-                    else:
-                        losses *= mask[..., None]
-                        loss = tf.reduce_sum(losses) / (tf.reduce_sum(mask) + 1e-8)
+                logits = self.lm_logits_tensor
+                if logits is not None:
+                    if mask is not None:
+                        logits *= mask[..., None]
 
-                else:
-                    loss = tf.zeros([])
-
-                # loss = tf.zeros([])
-
-                return loss
+                return logits
 
 
 class MultiLSTMCell(LayerRNNCell):

@@ -524,7 +524,8 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'encoder_conv_kernel_size',
         3,
         int,
-        "Size of kernel to use in convolutional encoder layers. Ignored if no convolutional encoder layers in the model."
+        "Size of kernel to use in convolutional encoder layers. Ignored if no convolutional encoder layers in the model.",
+        aliases=['conv_kernel_size']
     ),
     Kwarg(
         'decoder_concatenate_hidden_states',
