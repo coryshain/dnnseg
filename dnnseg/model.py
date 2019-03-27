@@ -4576,7 +4576,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                 lm_losses = tf.nn.softmax_cross_entropy_with_logits_v2(
                                     labels=tf.stop_gradient(lm_targets),
                                     logits=lm_logits
-                                )
+                                )[..., None]
                             elif self.encoder_state_discretizer is None or l == 0:
                                 lm_losses = (tf.stop_gradient(lm_targets) - lm_logits) ** 2
                             else:
