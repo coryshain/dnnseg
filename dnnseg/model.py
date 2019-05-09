@@ -65,6 +65,12 @@ class AcousticEncoderDecoder(object):
         else:
             self.speaker_list = []
 
+        if self.data_type.lower() == 'acoustic' and self.filter_type.lower() == 'cochleagram':
+            from .cochleagram import invert_cochleagrams
+            self.spectrogram_inverter = invert_cochleagrams
+        else:
+            self.spectrogram_inverter = None
+
         self._initialize_session()
 
     def _initialize_session(self):
@@ -278,7 +284,7 @@ class AcousticEncoderDecoder(object):
                     else:
                         mask = None
                     with tf.variable_scope('decoder_bwd'):
-                        self.decoder_bwd, self.attention_bwd = self._initialize_decoder(
+                        self.decoder_bwd, self.temporal_encoding_bwd = self._initialize_decoder(
                             self.decoder_in,
                             self.n_timesteps_output_bwd,
                             mask=mask,
@@ -291,7 +297,7 @@ class AcousticEncoderDecoder(object):
                     else:
                         mask = None
                     with tf.variable_scope('decoder_fwd'):
-                        self.decoder_fwd, self.attention_fwd = self._initialize_decoder(
+                        self.decoder_fwd, self.temporal_encoding_fwd = self._initialize_decoder(
                             self.decoder_in,
                             self.n_timesteps_output_fwd,
                             mask=mask,
@@ -303,7 +309,7 @@ class AcousticEncoderDecoder(object):
                 else:
                     mask = None
                 with tf.variable_scope('decoder_bwd'):
-                    self.decoder_bwd, self.attention_bwd = self._initialize_decoder(
+                    self.decoder_bwd, self.temporal_encoding_bwd = self._initialize_decoder(
                         self.decoder_in,
                         self.n_timesteps_output_bwd,
                         mask=mask,
@@ -340,6 +346,7 @@ class AcousticEncoderDecoder(object):
                     self.speaker_table, self.speaker_embedding_matrix = initialize_embeddings(
                         self.speaker_list,
                         self.speaker_emb_dim,
+                        name='speaker_embedding',
                         session=self.sess
                     )
                     self.speaker = tf.placeholder(tf.string, shape=[None], name='speaker')
@@ -553,7 +560,8 @@ class AcousticEncoderDecoder(object):
                         units=encoder.shape[-1],
                         activation=tf.tanh if self.data_type.lower() == 'acoustic' else None,
                         batch_normalization_decay=self.encoder_batch_normalization_decay,
-                        session=self.sess
+                        session=self.sess,
+                        name='DenseEncoder'
                     )(encoder)
 
                 if self.temporal_dropout_rate is not None and not self.encoder_type.lower() in ['cnn_hmlstm', 'hmlstm']:
@@ -577,8 +585,37 @@ class AcousticEncoderDecoder(object):
                             padding='same',
                             activation=tf.nn.elu,
                             batch_normalization_decay=self.encoder_batch_normalization_decay,
-                            session=self.sess
+                            session=self.sess,
+                            name='HMLSTM_preCNN'
                         )(encoder)
+
+                    # encoder = DenseResidualLayer(
+                    #     training=self.training,
+                    #     units=encoder.shape[-1],
+                    #     layers_inner=self.encoder_resnet_n_layers_inner,
+                    #     activation=tf.nn.elu,
+                    #     activation_inner=tf.nn.elu,
+                    #     batch_normalization_decay=self.encoder_batch_normalization_decay,
+                    #     session=self.sess
+                    # )(encoder)
+                    #
+                    # encoder = RNNLayer(
+                    #     training=self.training,
+                    #     units=int((int(encoder.shape[-1]) + self.units_encoder[0])/2),
+                    #     activation=self.encoder_inner_activation,
+                    #     batch_normalization_decay=self.encoder_batch_normalization_decay,
+                    #     name='pre_rnn_1',
+                    #     session=self.sess
+                    # )(encoder)
+                    #
+                    # encoder = RNNLayer(
+                    #     training=self.training,
+                    #     units=int((int(encoder.shape[-1]) + self.units_encoder[0])/2),
+                    #     activation=self.encoder_inner_activation,
+                    #     batch_normalization_decay=self.encoder_batch_normalization_decay,
+                    #     name='pre_rnn_2',
+                    #     session=self.sess
+                    # )(encoder)
 
                     if self.oracle_boundaries:
                         boundaries = self.oracle_boundaries_placeholder
@@ -599,13 +636,16 @@ class AcousticEncoderDecoder(object):
                         self.units_encoder + [units_utt],
                         self.n_layers_encoder,
                         training=self.training,
+                        kernel_depth=self.hmlstm_kernel_depth,
+                        resnet_n_layers=self.encoder_resnet_n_layers_inner,
                         one_hot_inputs=self.data_type.lower() == 'text' and not self.embed_inputs,
                         oracle_boundary=self.oracle_boundaries is not None,
-                        activation=self.encoder_inner_activation,
+                        activation=self.encoder_activation,
                         inner_activation=self.encoder_inner_activation,
                         recurrent_activation=self.encoder_recurrent_activation,
                         boundary_activation=self.encoder_boundary_activation,
                         boundary_discretizer=self.encoder_boundary_discretizer,
+                        boundary_noise_sd=self.encoder_boundary_noise_sd,
                         bottomup_regularizer=self.encoder_weight_regularization,
                         recurrent_regularizer=self.encoder_weight_regularization,
                         topdown_regularizer=self.encoder_weight_regularization,
@@ -621,10 +661,12 @@ class AcousticEncoderDecoder(object):
                         layer_normalization=self.encoder_layer_normalization,
                         refeed_boundary=False,
                         power=self.encoder_boundary_power,
+                        use_timing_unit=self.encoder_use_timing_unit,
                         boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                         state_slope_annealing_rate=self.state_slope_annealing_rate,
                         slope_annealing_max=self.slope_annealing_max,
                         state_discretizer=self.encoder_state_discretizer,
+                        state_noise_sd=self.encoder_state_noise_sd,
                         sample_at_train=self.sample_at_train,
                         sample_at_eval=self.sample_at_eval,
                         global_step=self.step,
@@ -678,7 +720,7 @@ class AcousticEncoderDecoder(object):
                         mean_denom = tf.reduce_sum(self.X_mask) + self.epsilon
                         seg_probs_mean = tf.reduce_sum(seg_probs) / mean_denom
                         self._regularize(seg_probs_mean, self.boundary_prob_regularizer)
-                        segs_mean = tf.reduce_sum(segs) / mean_denom
+                        segs_mean = tf.reduce_sum(self.encoder_segmentations[l]) / mean_denom
                         self._regularize(segs_mean, self.boundary_regularizer)
 
                         # if self.lm_scale:
@@ -745,7 +787,8 @@ class AcousticEncoderDecoder(object):
                             padding='same',
                             activation=tf.nn.elu,
                             batch_normalization_decay=self.encoder_batch_normalization_decay,
-                            session=self.sess
+                            session=self.sess,
+                            name='RNN_preCNN'
                         )(encoder)
 
                     encoder = MultiRNNLayer(
@@ -779,18 +822,7 @@ class AcousticEncoderDecoder(object):
                             updates_collections=None
                         )
 
-
                 elif self.encoder_type.lower() == 'cnn':
-                    encoder = Conv1DLayer(
-                        self.conv_kernel_size,
-                        training=self.training,
-                        n_filters=self.frame_dim,
-                        padding='same',
-                        activation=tf.nn.elu,
-                        batch_normalization_decay=self.encoder_batch_normalization_decay,
-                        session=self.sess
-                    )(encoder)
-
                     for i in range(self.n_layers_encoder - 1):
                         if i > 0 and self.encoder_resnet_n_layers_inner:
                             encoder = Conv1DResidualLayer(
@@ -802,7 +834,8 @@ class AcousticEncoderDecoder(object):
                                 activation=self.encoder_inner_activation,
                                 activation_inner=self.encoder_inner_activation,
                                 batch_normalization_decay=self.batch_normalization_decay,
-                                session=self.sess
+                                session=self.sess,
+                                name='CNNEncoder_l%d' % i
                             )(encoder)
                         else:
                             encoder = Conv1DLayer(
@@ -812,7 +845,8 @@ class AcousticEncoderDecoder(object):
                                 padding='causal',
                                 activation=self.encoder_inner_activation,
                                 batch_normalization_decay=self.encoder_batch_normalization_decay,
-                                session=self.sess
+                                session=self.sess,
+                                name='CNNEncoder_l%d' % i
                             )(encoder)
 
                     encoder = DenseLayer(
@@ -820,7 +854,8 @@ class AcousticEncoderDecoder(object):
                         units=units_utt,
                         activation=self.encoder_activation,
                         batch_normalization_decay=encoding_batch_normalization_decay,
-                        session=self.sess
+                        session=self.sess,
+                        name='CNNEncoder_FC'
                     )(tf.layers.Flatten()(encoder))
 
                 elif self.encoder_type.lower() == 'dense':
@@ -835,7 +870,8 @@ class AcousticEncoderDecoder(object):
                                 activation=self.encoder_inner_activation,
                                 activation_inner=self.encoder_inner_activation,
                                 batch_normalization_decay=self.encoder_batch_normalization_decay,
-                                session=self.sess
+                                session=self.sess,
+                                name='DenseEncoder_l%d' % i
                             )(encoder)
                         else:
                             encoder = DenseLayer(
@@ -843,7 +879,8 @@ class AcousticEncoderDecoder(object):
                                 units=self.n_timesteps_input * self.units_encoder[i],
                                 activation=self.encoder_inner_activation,
                                 batch_normalization_decay=self.encoder_batch_normalization_decay,
-                                session=self.sess
+                                session=self.sess,
+                                name='DenseEncoder_l%d' % i
                             )(encoder)
 
                     encoder = DenseLayer(
@@ -851,7 +888,8 @@ class AcousticEncoderDecoder(object):
                         units=units_utt,
                         activation=self.encoder_activation,
                         batch_normalization_decay=encoding_batch_normalization_decay,
-                        session=self.sess
+                        session=self.sess,
+                        name='DenseEncoder_l%d' % self.n_layers_encoder
                     )(encoder)
 
                 else:
@@ -895,7 +933,8 @@ class AcousticEncoderDecoder(object):
                             self.utt_len_emb_mat = tf.identity(
                                 tf.Variable(
                                     tf.random_uniform([int(self.y_bwd_mask.shape[1]) + 1, self.utt_len_emb_dim], -1., 1.),
-                                    dtype=self.FLOAT_TF
+                                    dtype=self.FLOAT_TF,
+                                    name='utterance_length_embedding'
                                 )
                             )
 
@@ -930,185 +969,148 @@ class AcousticEncoderDecoder(object):
                 return decoder_in, extra_dims
 
     def _initialize_decoder(self, decoder_in, n_timesteps, mask=None, name=None):
-        temporal_encoding = None
-
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if name is None:
                     name = 'decoder'
 
-                decoder = decoder_in
-
-                # Damp gradients to the encoder for decoder "pretraining", if used
-                def make_decoder_in_rescaled_gradient(decoder):
-                    def decoder_in_rescaled_gradient():
-                        steps = tf.cast(self.n_pretrain_steps, dtype=self.FLOAT_TF)
-                        step = tf.cast(self.step, dtype=self.FLOAT_TF)
-                        scale = 1 - (steps - step) / steps
-                        g = decoder * scale
-                        out = g + tf.stop_gradient(decoder - g)
-
-                        return out
-
-                    return decoder_in_rescaled_gradient
-                decoder = tf.cond(
-                    self.step >= self.n_pretrain_steps,
-                    lambda: decoder,
-                    make_decoder_in_rescaled_gradient(decoder)
+                decoder, temporal_encoding, flatten_batch, final_shape, final_shape_temporal_encoding = preprocess_decoder_inputs(
+                    decoder_in,
+                    n_timesteps,
+                    self.units_decoder,
+                    training=self.training,
+                    decoder_hidden_state_expansion_type=self.decoder_hidden_state_expansion_type,
+                    decoder_temporal_encoding_type=self.decoder_temporal_encoding_type,
+                    decoder_temporal_encoding_as_mask=self.decoder_temporal_encoding_as_mask,
+                    decoder_temporal_encoding_units=self.decoder_temporal_encoding_units,
+                    decoder_temporal_encoding_transform=self.decoder_temporal_encoding_transform,
+                    decoder_inner_activation=self.decoder_inner_activation,
+                    decoder_temporal_encoding_activation=self.decoder_temporal_encoding_activation,
+                    decoder_batch_normalization_decay=self.decoder_batch_normalization_decay,
+                    decoder_conv_kernel_size=self.decoder_conv_kernel_size,
+                    frame_dim=self.frame_dim,
+                    step=self.step,
+                    mask=mask,
+                    n_pretrain_steps=self.n_pretrain_steps,
+                    name=name,
+                    session=self.sess,
+                    float_type=self.FLOAT_TF
                 )
 
-                # If more than 1 batch dim, flatten out batch dims
-                if len(decoder.shape) > 3:
-                    flatten_batch = True
-                    cur_shape = tf.shape(decoder)
-                    batch_leading_dims = cur_shape[:-2]
-                    final_shape = tf.concat([batch_leading_dims, [n_timesteps, self.frame_dim]], axis=0)
-                    flattened_batch_shape = tf.concat(
-                        [[tf.reduce_prod(batch_leading_dims)], tf.shape(decoder)[-2:]],
-                        axis=0
-                    )
-                    if self.decoder_temporal_encoding_type:
-                        if self.decoder_temporal_encoding_as_mask:
-                            units = decoder.shape[-1]
-                        else:
-                            units = self.decoder_temporal_encoding_units
-                        final_shape_temporal_encoding = tf.concat([batch_leading_dims, [n_timesteps, units]], axis=0)
-                    decoder = tf.reshape(decoder, flattened_batch_shape)
-                else:
-                    flatten_batch = False
-
-                # Expand out encoder hidden state into time series, either through tiling or reshaped dense transformation
-                if self.decoder_hidden_state_expansion_type.lower() == 'tile':
-                    tile_dims = [1] * (len(decoder.shape) + 1)
-                    tile_dims[-2] = n_timesteps
-
-                    decoder = tf.tile(
-                        decoder[..., None, :],
-                        tile_dims
-                    )
-                elif self.decoder_hidden_state_expansion_type.lower() == 'dense':
-                    decoder = DenseLayer(
-                        training=self.training,
-                        units=n_timesteps * self.units_decoder[0],
-                        activation=self.decoder_inner_activation,
-                        batch_normalization_decay=self.decoder_batch_normalization_decay,
-                        session=self.sess
-                    )(decoder)
-
-                    decoder_shape = tf.concat([tf.shape(decoder)[:-1], [n_timesteps, self.units_decoder[0]]], axis=0)
-                    decoder = tf.reshape(decoder, decoder_shape)
-                else:
-                    raise ValueError('Unrecognized decoder hidden state expansion type "%s".' % self.decoder_hidden_state_expansion_type)
-
-                # Mask time series if needed
-                if mask is not None:
-                    decoder *= mask[..., None]
-
-                # Create a representation of time to supply to decoder
-                if self.decoder_temporal_encoding_type:
-                    if self.decoder_temporal_encoding_transform or not self.decoder_temporal_encoding_as_mask:
-                        temporal_encoding_units = self.decoder_temporal_encoding_units
+                for i in range(self.n_layers_decoder - 1):
+                    units_cur = self.units_decoder[i]
+                    if i == 0:
+                        units_prev = decoder.shape[-1]
                     else:
-                        temporal_encoding_units = decoder.shape[-1]
-
-                    # Create a trainable matrix of weights by timestep
-                    if self.decoder_temporal_encoding_type.lower() == 'weights':
-                        temporal_encoding = tf.get_variable(
-                            'decoder_time_encoding_src_%s' %name,
-                            shape=[1, n_timesteps, temporal_encoding_units],
-                            initializer=tf.initializers.random_normal,
-                        )
-                        temporal_encoding = tf.tile(temporal_encoding, [tf.shape(decoder_in)[0], 1, 1])
-
-                    # Create a set of periodic functions with trainable phase and frequency
-                    elif self.decoder_temporal_encoding_type.lower() == 'periodic':
-                        time = tf.range(1., n_timesteps + 1., dtype=self.FLOAT_TF)[None, ..., None]
-                        frequency_logits = tf.linspace(
-                            -2.,
-                            2.,
-                            temporal_encoding_units
-                        )
-                        # frequency_logits = tf.get_variable(
-                        #     'frequency_logits_%s' % name,
-                        #     initializer=frequency_logits
-                        # )
-                        # phase = tf.get_variable(
-                        #     'phase_%s' % name,
-                        #     initializer=tf.initializers.random_normal,
-                        #     shape=[temporal_encoding_units]
-                        # )[None, None, ...]
-                        # gain = tf.get_variable(
-                        #     'gain_%s' % name,
-                        #     initializer=tf.glorot_uniform_initializer(),
-                        #     shape=[temporal_encoding_units]
-                        # )[None, None, ...]
-                        frequency = tf.exp(frequency_logits)[None, None, ...]
-                        # temporal_encoding = tf.sin(time * frequency + phase) * gain
-                        temporal_encoding = tf.sin(time * frequency)
-
+                        units_prev = self.units_decoder[i - 1]
+                    if units_cur != units_prev:
+                        project_inputs = True
                     else:
-                        raise ValueError('Unrecognized decoder temporal encoding type "%s".' % self.decoder_temporal_encoding_type)
+                        project_inputs = False
 
-                    # Transform the temporal encoding
-                    if self.decoder_temporal_encoding_transform:
-                        if self.decoder_temporal_encoding_as_mask:
-                            units = decoder.shape[-1]
-                        else:
-                            units = self.decoder_temporal_encoding_units
+                    if self.decoder_dropout:
+                        decoder = get_dropout(
+                            self.decoder_dropout,
+                            training=self.training,
+                            session=self.sess
+                        )(decoder)
 
-                        # RNN transform
-                        if self.decoder_temporal_encoding_transform.lower() == 'rnn':
-                            temporal_encoding = RNNLayer(
+                    if i > 0 and self.decoder_resnet_n_layers_inner:
+                        if self.decoder_type.lower() == 'rnn':
+                            decoder = RNNResidualLayer(
                                 training=self.training,
-                                units=units,
-                                activation=tf.tanh,
-                                recurrent_activation=tf.sigmoid,
+                                units=units_cur,
+                                layers_inner=self.decoder_resnet_n_layers_inner,
+                                activation=self.decoder_inner_activation,
+                                activation_inner=self.decoder_inner_activation,
+                                recurrent_activation=self.decoder_recurrent_activation,
                                 return_sequences=True,
-                                name=name + '_temporal_encoding_transform',
+                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                project_inputs=project_inputs,
+                                name=name + '_l%d' % i,
                                 session=self.sess
-                            )(temporal_encoding)
-
-                        # CNN transform (1D)
-                        elif self.decoder_temporal_encoding_transform.lower() == 'cnn':
-                            temporal_encoding = Conv1DLayer(
+                            )(decoder, mask=mask)
+                        elif self.decoder_type.lower() == 'cnn':
+                            decoder = Conv1DResidualLayer(
                                 self.decoder_conv_kernel_size,
                                 training=self.training,
-                                n_filters=units,
+                                n_filters=units_cur,
+                                padding='same',
+                                layers_inner=self.decoder_resnet_n_layers_inner,
+                                activation=self.decoder_inner_activation,
+                                activation_inner=self.decoder_inner_activation,
+                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                project_inputs=project_inputs,
+                                session=self.sess,
+                                name=name + '_l%d' % i
+                            )(decoder)
+                        elif self.decoder_type.lower() == 'dense':
+                            in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(
+                                decoder,
+                                n_timesteps,
+                                self.units_decoder[i],
+                                expand_sequence=False
+                            )
+                            decoder = tf.reshape(decoder, in_shape_flattened)
+
+                            decoder = DenseResidualLayer(
+                                training=self.training,
+                                units=n_timesteps * units_cur,
+                                layers_inner=self.decoder_resnet_n_layers_inner,
+                                activation=self.decoder_inner_activation,
+                                activation_inner=self.decoder_inner_activation,
+                                project_inputs=project_inputs,
+                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                session=self.sess,
+                                name=name + '_l%d' % i
+                            )(decoder)
+
+                            decoder = tf.reshape(decoder, out_shape_unflattened)
+
+                    else:
+                        if self.decoder_type.lower() == 'rnn':
+                            decoder = RNNLayer(
+                                training=self.training,
+                                units=units_cur,
+                                activation=self.decoder_inner_activation,
+                                recurrent_activation=self.decoder_recurrent_activation,
+                                return_sequences=True,
+                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                name=name + '_l%d' % i,
+                                session=self.sess
+                            )(decoder, mask=mask)
+                        elif self.decoder_type.lower() == 'cnn':
+                            decoder = Conv1DLayer(
+                                self.decoder_conv_kernel_size,
+                                training=self.training,
+                                n_filters=units_cur,
                                 padding='same',
                                 activation=self.decoder_inner_activation,
                                 batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                session=self.sess
-                            )(temporal_encoding)
+                                session=self.sess,
+                                name=name + '_l%d' % i
+                            )(decoder)
+                        elif self.decoder_type.lower() == 'dense':
+                            in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(
+                                decoder,
+                                n_timesteps,
+                                self.units_decoder[i],
+                                expand_sequence=False
+                            )
+                            decoder = tf.reshape(decoder, in_shape_flattened)
 
-                        # Dense transform
-                        elif self.decoder_temporal_encoding_transform.lower() == 'dense':
-                            temporal_encoding = DenseLayer(
+                            decoder = DenseLayer(
                                 training=self.training,
-                                units=units,
+                                units=n_timesteps * units_cur,
                                 activation=self.decoder_inner_activation,
                                 batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                session=self.sess
-                            )(temporal_encoding)
+                                session=self.sess,
+                                name=name + '_l%d' % i
+                            )(decoder)
 
-                        else:
-                            raise ValueError('Unrecognized decoder temporal encoding transform "%s".' % self.decoder_temporal_encoding_transform)
+                            decoder = tf.reshape(decoder, out_shape_unflattened)
 
-                    # Apply activation function
-                    if self.decoder_temporal_encoding_activation:
-                        activation = get_activation(
-                            self.decoder_temporal_encoding_activation,
-                            session=self.sess,
-                            training=self.training
-                        )
-                        temporal_encoding = activation(temporal_encoding)
-
-                    # Apply temporal encoding, either as mask or as extra features
-                    if self.decoder_temporal_encoding_as_mask:
-                        temporal_encoding = tf.sigmoid(temporal_encoding)
-                        decoder = decoder * temporal_encoding
-                    else:
-                        temporal_encoding = tf.tile(temporal_encoding, [tf.shape(decoder)[0], 1, 1])
-                        decoder = tf.concat([decoder, temporal_encoding], axis=-1)
+                    self._regularize_correspondences(self.n_layers_encoder - i - 2, decoder)
 
                 if self.decoder_dropout:
                     decoder = get_dropout(
@@ -1118,168 +1120,55 @@ class AcousticEncoderDecoder(object):
                     )(decoder)
 
                 if self.decoder_type.lower() == 'rnn':
-
-                    # for i in range(self.n_layers_decoder - 1):
-                    #     decoder = RNNLayer(
-                    #         training=self.training,
-                    #         units=self.units_decoder[i],
-                    #         activation=self.decoder_inner_activation,
-                    #         recurrent_activation=self.decoder_recurrent_activation,
-                    #         return_sequences=True,
-                    #         name=name + '_l%d' % i,
-                    #         session=self.sess
-                    #     )(decoder, mask=mask)
-                    #
-                    # decoder = RNNLayer(
-                    #     training=self.training,
-                    #     units=self.frame_dim,
-                    #     activation=self.decoder_activation,
-                    #     recurrent_activation=self.decoder_recurrent_activation,
-                    #     return_sequences=True,
-                    #     name=name + '_final',
-                    #     session=self.sess
-                    # )(decoder, mask=mask)
-
-                    decoder = MultiRNNLayer(
-                        units=self.units_decoder + [self.frame_dim],
-                        layers=self.n_layers_decoder,
+                    decoder = RNNLayer(
                         training=self.training,
-                        activation=self.decoder_inner_activation,
-                        inner_activation=self.decoder_inner_activation,
+                        units=self.frame_dim,
+                        # activation=self.decoder_inner_activation,
+                        activation=self.decoder_activation,
                         recurrent_activation=self.decoder_recurrent_activation,
-                        refeed_outputs=True,
-                        name=name,
+                        return_sequences=True,
+                        batch_normalization_decay=self.decoder_batch_normalization_decay,
+                        name=name + '_final',
                         session=self.sess
                     )(decoder, mask=mask)
 
-                    decoder = DenseLayer(
-                        training=self.training,
-                        units=self.frame_dim,
-                        activation=self.decoder_activation,
-                        batch_normalization_decay=None,
-                        session=self.sess
-                    )(decoder)
-
+                    # decoder = DenseLayer(
+                    #     training=self.training,
+                    #     units=self.frame_dim,
+                    #     activation=self.decoder_activation,
+                    #     batch_normalization_decay=None,
+                    #     session=self.sess
+                    # )(decoder)
                 elif self.decoder_type.lower() == 'cnn':
-                    assert n_timesteps is not None, 'n_timesteps must be defined when decoder_type == "cnn"'
-
-                    for i in range(self.n_layers_decoder - 1):
-                        if self.decoder_dropout:
-                            decoder = get_dropout(
-                                self.decoder_dropout,
-                                training=self.training,
-                                session=self.sess
-                            )(decoder)
-
-                        if i > 0 and self.decoder_resnet_n_layers_inner:
-                            decoder = Conv1DResidualLayer(
-                                self.decoder_conv_kernel_size,
-                                training=self.training,
-                                n_filters=self.units_decoder[i],
-                                padding='same',
-                                layers_inner=self.decoder_resnet_n_layers_inner,
-                                activation=self.decoder_inner_activation,
-                                activation_inner=self.decoder_inner_activation,
-                                batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                session=self.sess
-                            )(decoder)
-                        else:
-                            decoder = Conv1DLayer(
-                                self.decoder_conv_kernel_size,
-                                training=self.training,
-                                n_filters=self.units_decoder[i],
-                                padding='same',
-                                activation=self.decoder_inner_activation,
-                                batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                session=self.sess
-                            )(decoder)
-
-                        self._regularize_correspondences(self.n_layers_encoder - i - 2, decoder)
-
-                    if self.decoder_dropout:
-                        decoder = get_dropout(
-                            self.decoder_dropout,
-                            training=self.training,
-                            session=self.sess
-                        )(decoder)
-
                     decoder = Conv1DLayer(
                         self.decoder_conv_kernel_size,
                         training=self.training,
                         n_filters=self.frame_dim,
                         padding='same',
-                        activation=None,
+                        activation=self.decoder_activation,
                         batch_normalization_decay=None,
+                        name=name + '_final',
                         session=self.sess
                     )(decoder)
-
                 elif self.decoder_type.lower() == 'dense':
-                    assert n_timesteps is not None, 'n_timesteps must be defined when decoder_type == "dense"'
-
-                    for i in range(self.n_layers_decoder - 1):
-                        if self.decoder_dropout:
-                            decoder = get_dropout(
-                                self.decoder_dropout,
-                                training=self.training,
-                                session=self.sess
-                            )(decoder)
-
-                        in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(decoder, n_timesteps, self.units_decoder[i], expand_sequence=False)
-                        decoder = tf.reshape(decoder, in_shape_flattened)
-
-
-                        print(i)
-                        print(decoder.shape)
-
-                        if self.decoder_resnet_n_layers_inner:
-                            if i > 0 and self.units_decoder[i] != self.units_decoder[i-1]:
-                                    project_inputs = True
-                            else:
-                                project_inputs = False
-
-                            decoder = DenseResidualLayer(
-                                training=self.training,
-                                units=n_timesteps * self.units_decoder[i],
-                                layers_inner=self.decoder_resnet_n_layers_inner,
-                                activation=self.decoder_inner_activation,
-                                activation_inner=self.decoder_inner_activation,
-                                project_inputs=project_inputs,
-                                batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                session=self.sess
-                            )(decoder)
-                        else:
-                            decoder = DenseLayer(
-                                training=self.training,
-                                units=n_timesteps * self.units_decoder[i],
-                                activation=self.decoder_inner_activation,
-                                batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                session=self.sess
-                            )(decoder)
-
-                        decoder = tf.reshape(decoder, out_shape_unflattened)
-
-                        self._regularize_correspondences(self.n_layers_encoder - i - 2, decoder)
-
-                    in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(decoder, n_timesteps, self.frame_dim, expand_sequence=self.n_layers_decoder==1)
+                    in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(
+                        decoder,
+                        n_timesteps,
+                        self.frame_dim,
+                        expand_sequence=False
+                    )
                     decoder = tf.reshape(decoder, in_shape_flattened)
-
-                    if self.decoder_dropout:
-                        decoder = get_dropout(
-                            self.decoder_dropout,
-                            training=self.training,
-                            session=self.sess
-                        )(decoder)
 
                     decoder = DenseLayer(
                         training=self.training,
                         units=n_timesteps * self.frame_dim,
                         activation=self.decoder_activation,
                         batch_normalization_decay=None,
+                        name=name + '_final',
                         session=self.sess
                     )(decoder)
 
                     decoder = tf.reshape(decoder, out_shape_unflattened)
-
                 else:
                     raise ValueError('Decoder type "%s" is not currently supported' %self.decoder_type)
 
@@ -1437,37 +1326,49 @@ class AcousticEncoderDecoder(object):
     # Private Soft-DTW methods
     ############################################################
 
-    def _pairwise_distances(self, targets, preds, distance_func='l2norm'):
+    def _pairwise_distances(self, targets, preds, distance_func='l2norm', dtw_distance=False, gamma=1):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 targets = tf.expand_dims(targets, axis=-2)
                 preds = tf.expand_dims(preds, axis=-3)
-
-                if distance_func.lower() in ['binary_xent', 'softmax_xent']:
-                    targets_tile_dims = [1] * (len(targets.shape) - 2) + [preds.shape[-2], 1]
-                    targets = tf.tile(targets, targets_tile_dims)
-
-                    preds_tile_dims = [1] * (len(preds.shape) - 3) + [targets.shape[-3], 1, 1]
-                    preds = tf.tile(preds, preds_tile_dims)
-
-                    if distance_func.lower() == 'binary_xent':
-                        xent = tf.nn.sigmoid_cross_entropy_with_logits
-                    else:
-                        xent = tf.nn.softmax_cross_entropy_with_logits_v2
-
-                    D = xent(labels=targets, logits=preds)
-
-                    distances = tf.reduce_sum(
-                        D,
-                        axis=-1
+                if dtw_distance:
+                    distances = self._soft_dtw(
+                        targets[..., None],
+                        preds[..., None],
+                        gamma,
+                        distance_func='l1norm',
+                        dtw_distance=False
                     )
                 else:
-                    offsets = targets - preds
+                    if distance_func.lower() in ['binary_xent', 'softmax_xent']:
+                        targets_tile_dims = [1] * (len(targets.shape) - 2) + [preds.shape[-2], 1]
+                        targets = tf.tile(targets, targets_tile_dims)
 
-                    if distance_func.lower() == 'l1norm':
-                        distances = tf.norm(offsets, ord=1, axis=-1)
-                    elif distance_func.lower() in ['norm', 'l2norm']:
-                        distances = tf.norm(offsets, axis=-1)
+                        preds_tile_dims = [1] * (len(preds.shape) - 3) + [targets.shape[-3], 1, 1]
+                        preds = tf.tile(preds, preds_tile_dims)
+
+                        if distance_func.lower() == 'binary_xent':
+                            xent = tf.nn.sigmoid_cross_entropy_with_logits
+                        else:
+                            xent = tf.nn.softmax_cross_entropy_with_logits_v2
+
+                        D = xent(labels=targets, logits=preds)
+
+                        distances = tf.reduce_sum(
+                            D,
+                            axis=-1
+                        )
+                    elif distance_func.lower() in ['norm', 'l1', 'l2', 'l1norm', 'l2norm']:
+                        offsets = targets - preds
+
+                        if distance_func.lower() in ['l1', 'l1norm']:
+                            ord = 1
+                        elif distance_func.lower() in ['norm', 'l2', 'l2norm']:
+                            ord = 2
+                        else:
+                            raise ValueError('Unrecognized distance_func "%s".' % distance_func)
+
+                        distances = tf.norm(offsets, ord=ord, axis=-1)
                     else:
                         raise ValueError('Unrecognized distance_func "%s".' % distance_func)
 
@@ -1549,7 +1450,7 @@ class AcousticEncoderDecoder(object):
 
                 return out
 
-    def _soft_dtw(self, targets, preds, gamma, weights_targets=None, weights_preds=None, distance_func='norm'):
+    def _soft_dtw(self, targets, preds, gamma, weights_targets=None, weights_preds=None, distance_func='norm', dtw_distance=False):
         # Outer scan over n target timesteps
         # Inner scan over m pred timesteps
 
@@ -1557,7 +1458,7 @@ class AcousticEncoderDecoder(object):
             with self.sess.graph.as_default():
 
                 # Compute distance matrix
-                D = self._pairwise_distances(targets, preds, distance_func=distance_func)
+                D = self._pairwise_distances(targets, preds, distance_func=distance_func, dtw_distance=dtw_distance)
 
                 # Rescale distances by target weights
                 if weights_targets is not None:
@@ -1915,7 +1816,7 @@ class AcousticEncoderDecoder(object):
 
                 if X is None or X_mask is None:
                     sys.stderr.write('Getting input data...\n')
-                    X, X_mask = data.inputs(
+                    X, X_mask, _ = data.inputs(
                         segments=segtype,
                         padding=self.input_padding,
                         normalize=self.normalize_data,
@@ -1963,7 +1864,7 @@ class AcousticEncoderDecoder(object):
                         segment_tables[l][f] = segment_tables[l][f][select_cur]
                         i += n_segments_cur
 
-                    y_cur, _ = data.targets(
+                    y_cur, _, _ = data.targets(
                         segments=segment_tables[l],
                         padding='post',
                         reverse=self.reverse_targets,
@@ -3456,11 +3357,10 @@ class AcousticEncoderDecoder(object):
                         normalize_inputs=self.normalize_data,
                         center_inputs=self.center_data,
                         standardize_inputs=self.standardize_data,
-                        # normalize_targets=False,
-                        # center_targets=False,
                         normalize_targets=self.normalize_data,
                         center_targets=self.center_data,
-                        standardize_targets=True,
+                        standardize_targets=self.standardize_data,
+                        reduction_axis=self.reduction_axis,
                         predict_deltas=self.predict_deltas,
                         target_bwd_resampling=self.resample_targets_bwd,
                         target_fwd_resampling=self.resample_targets_fwd,
@@ -3474,6 +3374,7 @@ class AcousticEncoderDecoder(object):
                         normalize_inputs=self.normalize_data,
                         center_inputs=self.center_data,
                         standardize_targets=self.standardize_data,
+                        reduction_axis=self.reduction_axis,
                         predict_deltas=self.predict_deltas,
                         input_padding=self.input_padding,
                         input_resampling=self.resample_inputs,
@@ -3494,24 +3395,28 @@ class AcousticEncoderDecoder(object):
                         normalize_inputs=self.normalize_data,
                         center_inputs=self.center_data,
                         standardize_inputs=self.standardize_data,
-                        # normalize_targets=False,
-                        # center_targets=False,
                         normalize_targets=self.normalize_data,
                         center_targets=self.center_data,
-                        standardize_targets=True,
+                        standardize_targets=self.standardize_data,
+                        reduction_axis=self.reduction_axis,
                         predict_deltas=self.predict_deltas,
                         target_bwd_resampling=self.resample_targets_bwd,
                         target_fwd_resampling=self.resample_targets_fwd,
                         oracle_boundaries = self.oracle_boundaries
                     )
                 else:
+                    if self.task.lower() == 'classifier':
+                        max_len = self.max_len
+                    else:
+                        max_len = None
                     val_data.cache_utterance_data(
                         'val',
                         segments=self.segtype,
-                        max_len=None,
+                        max_len=max_len,
                         normalize_inputs=self.normalize_data,
                         center_inputs=self.center_data,
                         standardize_inputs=self.standardize_data,
+                        reduction_axis=self.reduction_axis,
                         predict_deltas=self.predict_deltas,
                         input_padding=self.input_padding,
                         input_resampling=self.resample_inputs,
@@ -3520,14 +3425,16 @@ class AcousticEncoderDecoder(object):
                         reverse_targets=self.reverse_targets,
                         oracle_boundaries=self.oracle_boundaries
                     )
-                val_data.cache_files_data(
-                    'val_files',
-                    mask=self.segtype,
-                    normalize_inputs=self.normalize_data,
-                    center_inputs=self.center_data,
-                    standardize_inputs=self.standardize_data,
-                    oracle_boundaries=self.oracle_boundaries
-                )
+                if self.task.lower() == 'segmenter':
+                    val_data.cache_files_data(
+                        'val_files',
+                        mask=self.segtype,
+                        normalize_inputs=self.normalize_data,
+                        center_inputs=self.center_data,
+                        standardize_inputs=self.standardize_data,
+                        reduction_axis=self.reduction_axis,
+                        oracle_boundaries=self.oracle_boundaries
+                    )
 
             n_train = train_data.get_n('train')
 
@@ -3581,7 +3488,7 @@ class AcousticEncoderDecoder(object):
                 else:
                     n_pb = n_minibatch
 
-                if not self.initial_evaluation_complete.eval(session=self.sess):
+                if True and not self.initial_evaluation_complete.eval(session=self.sess):
                     if self.task != 'streaming_autoencoder':
                         self.run_checkpoint(
                             val_data,
@@ -3950,6 +3857,7 @@ class AcousticEncoderDecoder(object):
             ix2label=None,
             training=False,
             segtype=None,
+            invert_spectrograms=True,
             verbose=True
     ):
         seg = 'hmlstm' in self.encoder_type.lower()
@@ -4003,15 +3911,15 @@ class AcousticEncoderDecoder(object):
                 if not self.streaming or self.predict_backward:
                     to_run.append(self.reconstructions)
                     to_run_names.append('reconstructions')
-                    if self.attention_bwd is not None:
-                        to_run.append(self.attention_bwd[0])
-                        to_run_names.append('reconstructions_attention')
+                    # if self.temporal_encoding_bwd is not None:
+                    #     to_run.append(self.temporal_encoding_bwd[0])
+                    #     to_run_names.append('reconstructions_attention')
                 if self.streaming and self.predict_forward:
                     to_run.append(self.extrapolations)
                     to_run_names.append('extrapolations')
-                    if self.attention_fwd is not None:
-                        to_run.append(self.attention_fwd[0])
-                        to_run_names.append('extrapolations_attention')
+                    # if self.temporal_encoding_fwd is not None:
+                    #     to_run.append(self.temporal_encoding_fwd[0])
+                    #     to_run_names.append('extrapolations_attention')
 
                 if seg:
                     if self.boundary_prob_smoothing:
@@ -4087,7 +3995,7 @@ class AcousticEncoderDecoder(object):
 
                 if not self.streaming or self.predict_backward:
                     reconstructions = out['reconstructions']
-                    if self.attention_bwd is not None:
+                    if 'reconstructions_attention' in out:
                         reconstructions_attention = out['reconstructions_attention']
                     else:
                         reconstructions_attention = None
@@ -4097,7 +4005,7 @@ class AcousticEncoderDecoder(object):
 
                 if self.streaming and self.predict_forward:
                     extrapolations = out['extrapolations']
-                    if self.attention_fwd is not None:
+                    if 'extrapolations_attention' in out:
                         extrapolations_attention = out['extrapolations_attention']
                     else:
                         extrapolations_attention = None
@@ -4138,7 +4046,7 @@ class AcousticEncoderDecoder(object):
                     hop_length = 1.
 
                 plot_acoustic_features(
-                    X_plot,
+                    X_plot[..., :data.n_coef],
                     targets_bwd=y_bwd_plot,
                     preds_bwd=reconstructions,
                     preds_bwd_attn=reconstructions_attention,
@@ -4155,6 +4063,73 @@ class AcousticEncoderDecoder(object):
                     label_map=self.label_map,
                     dir=self.outdir
                 )
+
+                if invert_spectrograms and self.spectrogram_inverter is not None:
+                    fps = [1000 / data.offset] * 5
+                    if self.resample_inputs is not None and self.max_len is not None:
+                        fps[0] = fps[0] * self.resample_inputs / self.max_len
+                    if self.resample_targets_bwd:
+                        fps[1] = fps[1] * self.resample_targets_bwd / self.window_len_bwd
+                        fps[2] = fps[2] * self.resample_targets_bwd / self.window_len_bwd
+                    if self.resample_targets_fwd:
+                        fps[3] = fps[3] * self.resample_targets_fwd / self.window_len_fwd
+                        fps[4] = fps[4] * self.resample_targets_fwd / self.window_len_fwd
+
+                    if self.normalize_data:
+                        rescale = batch['ranges']
+                        X_plot *= rescale
+                        if not self.predict_deltas:
+                            rescale = rescale[..., :self.n_coef]
+                        if y_bwd_plot is not None:
+                            y_bwd_plot *= rescale
+                        if reconstructions is not None:
+                            reconstructions *= rescale
+                        if y_fwd_plot is not None:
+                            y_fwd_plot *= rescale
+                        if extrapolations is not None:
+                            extrapolations *= rescale
+
+                    elif self.standardize_data:
+                        rescale = batch['sds']
+                        X_plot *= rescale
+                        if not self.predict_deltas:
+                            rescale = rescale[..., :self.n_coef]
+                        if y_bwd_plot is not None:
+                            y_bwd_plot *= rescale
+                        if reconstructions is not None:
+                            reconstructions *= rescale
+                        if y_fwd_plot is not None:
+                            y_fwd_plot *= rescale
+                        if extrapolations is not None:
+                            extrapolations *= rescale
+                        
+                    if self.center_data or self.standardize_data:
+                        shift = batch['means']
+                        X_plot += shift
+                        if not self.predict_deltas:
+                            shift = shift[..., :self.n_coef]
+                        if y_bwd_plot is not None:
+                            y_bwd_plot += shift
+                        if reconstructions is not None:
+                            reconstructions += shift
+                        if y_fwd_plot is not None:
+                            y_fwd_plot += shift
+                        if extrapolations is not None:
+                            extrapolations += shift
+                        
+                    self.spectrogram_inverter(
+                        input=X_plot[..., :data.n_coef],
+                        targets_bwd=y_bwd_plot,
+                        preds_bwd=reconstructions,
+                        targets_fwd=y_fwd_plot,
+                        preds_fwd=extrapolations,
+                        fps=fps,
+                        sr=sr,
+                        offset=data.offset,
+                        reverse_reconstructions=self.streaming or self.reverse_targets,
+                        dir=self.outdir,
+                    )
+
 
     def plot_label_histogram(self, labels_pred, dir=None):
         if dir is None:
@@ -4453,6 +4428,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                         layer_normalization=self.encoder_layer_normalization,
                         refeed_boundary=False,
                         power=self.encoder_boundary_power,
+                        use_timing_unit=self.encoder_use_timing_unit,
                         boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                         boundary_slope_annealing_max=self.boundary_slope_annealing_max,
                         state_slope_annealing_rate=self.state_slope_annealing_rate,
@@ -4571,6 +4547,8 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                 lm_targets = self.inputs[:,1:]
                             else:
                                 lm_targets = self.encoder_hidden_states[l-1][:,1:]
+                            if self.encoder_use_timing_unit and l > 0:
+                                lm_targets = lm_targets[:,:,:-1]
 
                             if l == 0 and self.data_type.lower() == 'text' and not self.embed_inputs:
                                 lm_losses = tf.nn.softmax_cross_entropy_with_logits_v2(
@@ -4592,7 +4570,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                             lm_losses *= mask
                             lm_losses = tf.reduce_sum(lm_losses) / (tf.reduce_sum(mask) * tf.cast(tf.shape(lm_targets)[-1], dtype=self.FLOAT_TF) + self.epsilon)
                             self.encoder_lm_losses.append(lm_losses)
-                            loss += lm_losses * self.lm_loss_scale
+                            loss += lm_losses * self.lm_loss_scale if l == 0 else 0
 
                 if len(self.regularizer_losses) > 0:
                     self.regularizer_loss_total = tf.add_n(self.regularizer_losses)

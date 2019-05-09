@@ -32,7 +32,7 @@ if __name__ == '__main__':
     t0 = time.time()
 
     if p['data_type'].lower() == 'acoustic':
-        data_name = 'data_f%s_d%s.obj' %(p['n_coef'], p['order'])
+        data_name = 'data_%s_f%s_d%s.obj' %(p['filter_type'], p['n_coef'], p['order'])
     else:
         data_name = 'data.obj'
 
@@ -45,6 +45,7 @@ if __name__ == '__main__':
         train_data = Dataset(
             p.train_data_dir,
             datatype=p['data_type'].lower(),
+            filter_type=p['filter_type'].lower(),
             n_coef=p['n_coef'],
             order=p['order'],
         )
@@ -114,6 +115,7 @@ if __name__ == '__main__':
             val_data = Dataset(
                 p.val_data_dir,
                 datatype=p['data_type'].lower(),
+                filter_type=p['filter_type'].lower(),
                 n_coef=p['n_coef'],
                 order=p['order'],
             )

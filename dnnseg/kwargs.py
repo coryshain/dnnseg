@@ -194,6 +194,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Type of data to process (one of [``'acoustic'``, ``'text'``]."
     ),
     Kwarg(
+        'filter_type',
+        'mfcc',
+        str,
+        "Spectral filter to use (one of [``'mfcc'``, ``'cochleagram'``]. Ignored unless **data_type** is ``acoustic``."
+    ),
+    Kwarg(
         'segtype',
         'vad',
         str,
@@ -228,6 +234,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Convert data into standard units (mean=0, variance=1). Mutually exclusive with **center_data** and **normalize_data**."
+    ),
+    Kwarg(
+        'reduction_axis',
+        'time',
+        str,
+        "Reduction axis to use for any centering, normalization, or standardization. One of ``['time', 'freq', 'both']``."
     ),
     Kwarg(
         'pad_seqs',
@@ -483,7 +495,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'encoder_activation',
-        'tanh',
+        None,
         [str, None],
         "Name of activation to use at the output of the encoder",
     ),
@@ -528,6 +540,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['conv_kernel_size']
     ),
     Kwarg(
+        'hmlstm_kernel_depth',
+        2,
+        int,
+        "Depth of deep kernel in HM-LSTM transition model."
+    ),
+    Kwarg(
         'decoder_concatenate_hidden_states',
         False,
         bool,
@@ -552,10 +570,22 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Power to raise boundary probabilities to for information flow in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM."
     ),
     Kwarg(
+        'encoder_use_timing_unit',
+        False,
+        bool,
+        "Whether to supply a timing unit (non-linear activation increase between segmentations) to the encoder layers. Ignored if encoder is not an HM-LSTM."
+    ),
+    Kwarg(
         'encoder_boundary_discretizer',
         None,
         [str, None],
         "Discretization function to apply to encoder boundary activations, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
+    ),
+    Kwarg(
+        'encoder_boundary_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into logits of boundary probabilities during training."
     ),
     Kwarg(
         'boundary_slope_annealing_rate',
@@ -569,6 +599,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [str, None],
         "Discretization function to apply to encoder hidden states, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
+    ),
+    Kwarg(
+        'encoder_state_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the pre-gated encoder outputs."
     ),
     Kwarg(
         'state_slope_annealing_rate',

@@ -6,7 +6,6 @@ import numpy as np
 import scipy.signal
 import pandas as pd
 from scipy.interpolate import Rbf
-from .audio import wav_to_mfcc
 
 
 def binary_to_integer_np(b, int_type='int32'):
@@ -179,12 +178,10 @@ def extract_states_at_timestamps(
         steps_per_second=100.,
         activation='tanh',
         discretize=True,
-        as_categories=False,
-        as_onehot=True
+        as_categories=True
 ):
     assert activation in ['sigmoid', 'softmax', 'tanh', 'linear', None]
     assert not (activation in ['linear', None] and discretize), "States with linear activation can't be discretized."
-    assert not as_categories and as_onehot, 'Labels cannot be both categorical (integer) and one-hot.'
 
     ix = np.minimum(np.floor(timestamps * steps_per_second), len(states) - 1).astype('int')
     out = states[ix]
@@ -195,9 +192,9 @@ def extract_states_at_timestamps(
                 out = (out + 1) / 2
             out = np.rint(out).astype('int')
 
-            if as_categories:
+            if as_categories and out.shape[-1] <= 16:
                 out = binary_to_integer_np(out)
-            elif as_onehot:
+            else:
                 out = binary_to_string_np(out)
 
         elif activation == 'softmax':
@@ -218,7 +215,6 @@ def extract_states_at_timestamps_batch(
         activation='tanh',
         discretize=True,
         as_categories=True,
-        as_onehot=True,
         mask=None,
         padding=None
 ):
@@ -241,8 +237,7 @@ def extract_states_at_timestamps_batch(
             steps_per_second=steps_per_second,
             activation=activation,
             discretize=discretize,
-            as_categories=as_categories,
-            as_onehot=as_onehot
+            as_categories=as_categories
         )
 
         out.append(out_cur)
@@ -824,6 +819,7 @@ class Dataset(object):
 
         self.data = {}
         self.cache = {}
+        self.normalization_cache = {}
 
         data_kwargs = {}
         if self.datatype == 'acoustic':
@@ -833,15 +829,24 @@ class Dataset(object):
                 'sr': 16000,
                 'offset': 10,
                 'window_len': 25,
+                'filter_type': 'mfcc',
                 'n_coef': 13,
                 'order': 2
             }
-            for x in ['sr', 'offset', 'window_len', 'n_coef', 'order']:
+            for x in ['sr', 'offset', 'window_len', 'filter_type', 'n_coef', 'order']:
                 if x in kwargs:
                     data_kwargs[x] = kwargs[x]
                     setattr(self, x, kwargs[x])
                 else:
                     setattr(self, x, defaults[x])
+            if self.filter_type.lower() == 'mfcc':
+                from .mfcc import wav_to_mfcc as featurizer
+            elif self.filter_type.lower() == 'cochleagram':
+                sys.stderr.write('IGNORE ANY IMMEDIATELY FOLLOWING ERRORS. These are spuriously thrown by the pycochleagram module.\n')
+                from .cochleagram import wav_to_cochleagram as featurizer
+            else:
+                raise ValueError('Unrecognized filter type "%s".' % self.filter_type)
+            data_kwargs['featurizer'] = featurizer
         else:
             suffix = '.txt'
             datafile = TextDatafile
@@ -934,7 +939,8 @@ class Dataset(object):
             pad_right=None,
             normalize=False,
             center=False,
-            standardize=False
+            standardize=False,
+            reduction_axis='time'
     ):
         assert not (standardize and (normalize or center)), 'standardize is mutually exclusive with normalize and center.'
 
@@ -953,10 +959,14 @@ class Dataset(object):
             else:
                 features_cur = features[f]
             if mask:
-                feats, _ = self.data[f].segment_and_stack(
+                feats, _, _ = self.data[f].segment_and_stack(
                     segments=mask,
                     features=features_cur,
                     boundaries_as_features=boundaries_as_features,
+                    normalize=normalize,
+                    center=center,
+                    standardize=standardize,
+                    reduction_axis=reduction_axis,
                     padding=None
                 )
 
@@ -975,18 +985,6 @@ class Dataset(object):
             else:
                 feats = self.data[f].data()[None, ...]
                 boundaries_file = np.zeros(feats.shape[:-1])
-
-            if normalize:
-                maximum = feats.max()
-                minimum = feats.min()
-                diff = maximum - minimum
-                feats = (feats - minimum) / diff
-            if center:
-                feats = feats - feats.mean()
-            if standardize:
-                sd = feats.std()
-                mu = feats.mean()
-                feats = (feats - mu) / sd
 
             if pad_left or pad_right:
                 pad_width = []
@@ -1029,22 +1027,28 @@ class Dataset(object):
             reverse=False,
             normalize=False,
             standardize=False,
+            reduction_axis='time',
             center=False,
             with_deltas=True,
             resample=None
     ):
         feats = []
         mask = []
+        file_ix = []
         pad_seqs = padding not in ['None', None]
 
-        for f in self.fileIDs:
+        for i, f in enumerate(self.fileIDs):
             if isinstance(segments, dict):
                 segments_cur = segments[f]
             else:
                 segments_cur = segments
+            if features is not None:
+                features_cur = features[f]
+            else:
+                features_cur = None
             if len(segments_cur) > 0:
-                new_feats, new_mask = self.data[f].segment_and_stack(
-                    features=features[f],
+                new_feats, new_mask, new_file_ix = self.data[f].segment_and_stack(
+                    features=features_cur,
                     boundaries_as_features=boundaries_as_features,
                     segments=segments_cur,
                     max_len=max_len,
@@ -1052,10 +1056,16 @@ class Dataset(object):
                     reverse=reverse,
                     normalize=normalize,
                     standardize=standardize,
+                    reduction_axis=reduction_axis,
                     center=center,
                     with_deltas=with_deltas,
                     resample=resample,
                 )
+
+                new_file_ix += i
+
+                file_ix.append(new_file_ix)
+
                 if pad_seqs:
                     feats.append(new_feats)
                     mask.append(new_mask)
@@ -1076,7 +1086,9 @@ class Dataset(object):
             feats = np.concatenate(feats, axis=0)
             mask = np.concatenate(mask, axis=0)
 
-        return feats, mask
+        file_ix = np.concatenate(file_ix, axis=0)
+
+        return feats, mask, file_ix
 
     def cache_utterance_data(
             self,
@@ -1089,6 +1101,7 @@ class Dataset(object):
             normalize_targets=False,
             center_targets=False,
             standardize_targets=False,
+            reduction_axis='time',
             input_padding='pre',
             input_resampling=None,
             target_padding='post',
@@ -1097,16 +1110,17 @@ class Dataset(object):
             predict_deltas=False,
             oracle_boundaries=None
     ):
-        X, X_mask = self.inputs(
+        X, X_mask, file_ix = self.inputs(
             segments=segments,
             padding=input_padding,
             max_len=max_len,
             normalize=normalize_inputs,
             center=center_inputs,
             standardize=standardize_inputs,
+            reduction_axis=reduction_axis,
             resample=input_resampling
         )
-        y, y_mask = self.targets(
+        y, y_mask, _ = self.targets(
             segments=segments,
             padding=target_padding,
             max_len=max_len,
@@ -1114,6 +1128,7 @@ class Dataset(object):
             normalize=normalize_targets,
             center=center_targets,
             standardize=standardize_targets,
+            reduction_axis=reduction_axis,
             with_deltas=predict_deltas,
             resample=target_resampling
         )
@@ -1130,6 +1145,17 @@ class Dataset(object):
         else:
             oracle_boundaries = None
 
+        means = []
+        ranges = []
+        sds = []
+        for i, ix in enumerate(file_ix):
+            means.append(self.data[self.fileIDs[ix]].mean(reduction_axis))
+            ranges.append(self.data[self.fileIDs[ix]].range(reduction_axis))
+            sds.append(self.data[self.fileIDs[ix]].sd(reduction_axis))
+        means = np.stack(means, axis=0)
+        ranges = np.ranges(sds, axis=0)
+        sds = np.stack(sds, axis=0)
+        
         cache_dict = {
             'type': 'utterance',
             'n': len(y),
@@ -1137,6 +1163,10 @@ class Dataset(object):
             'X_mask': X_mask,
             'y': y,
             'y_mask': y_mask,
+            'file_ix': file_ix,
+            'means': means,
+            'ranges': ranges,
+            'sds': sds,
             'speaker': speaker,
             'oracle_boundaries': oracle_boundaries
         }
@@ -1155,6 +1185,7 @@ class Dataset(object):
             normalize_targets=False,
             center_targets=False,
             standardize_targets=False,
+            reduction_axis='time',
             target_bwd_resampling=None,
             target_fwd_resampling = None,
             predict_deltas=False,
@@ -1170,7 +1201,8 @@ class Dataset(object):
             pad_right=right_pad,
             normalize=normalize_inputs,
             center=center_inputs,
-            standardize=standardize_inputs
+            standardize=standardize_inputs,
+            reduction_axis=reduction_axis
         )
         feats_inputs = []
         boundaries = []
@@ -1184,7 +1216,7 @@ class Dataset(object):
         feats_inputs = pad_sequence(feats_inputs, padding='post')
         boundaries = pad_sequence(boundaries, padding='post')
 
-        if (normalize_inputs == normalize_targets) and (center_inputs == center_targets):
+        if (normalize_inputs == normalize_targets) and (center_inputs == center_targets) and (standardize_inputs == standardize_targets):
             feats_targets = feats_inputs
         else:
             feats_tmp, _, _ = self.features(
@@ -1193,6 +1225,7 @@ class Dataset(object):
                 pad_right=right_pad,
                 normalize=normalize_targets,
                 standardize=standardize_targets,
+                reduction_axis=reduction_axis,
                 center=center_targets
             )
             feats_targets = []
@@ -1204,16 +1237,30 @@ class Dataset(object):
             feats_targets = pad_sequence(feats_targets, padding='post')
 
         file_ix = []
+        means = []
+        ranges = []
+        sds = []
         time_ix = []
+
+        n_feats = feats_targets.shape[-1]
 
         for i, l in enumerate(file_lengths):
             file_ix_cur = np.ones(l, dtype='int') * i
+            means_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].mean(reduction_axis)[None, ...]
+            ranges_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].range(reduction_axis)[None, ...]
+            sds_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].sd(reduction_axis)[None, ...]
             time_ix_cur = np.arange(left_pad, left_pad + l)
 
             file_ix.append(file_ix_cur)
+            means.append(means_cur)
+            ranges.append(ranges_cur)
+            sds.append(sds_cur)
             time_ix.append(time_ix_cur)
 
         file_ix = np.concatenate(file_ix, axis=0)
+        means = np.concatenate(means, axis=0)
+        ranges = np.concatenate(ranges, axis=0)
+        sds = np.concatenate(sds, axis=0)
         time_ix = np.concatenate(time_ix, axis=0)
 
         speaker = []
@@ -1253,6 +1300,9 @@ class Dataset(object):
             'feats_targets': feats_targets,
             'boundaries': boundaries,
             'file_ix': file_ix,
+            'means': means,
+            'ranges': ranges,
+            'sds': sds,
             'time_ix': time_ix,
             'speaker': speaker,
             'oracle_boundaries': oracle_boundaries,
@@ -1273,6 +1323,7 @@ class Dataset(object):
             normalize_inputs=False,
             center_inputs=False,
             standardize_inputs=False,
+            reduction_axis='time',
             oracle_boundaries=None
     ):
         feats, boundaries, _ = self.features(
@@ -1280,14 +1331,23 @@ class Dataset(object):
             normalize=normalize_inputs,
             center=center_inputs,
             standardize=standardize_inputs,
+            reduction_axis=reduction_axis
         )
 
         file_lengths = [len(x[0]) for x in feats]
         n = len(file_lengths)
 
         speaker = []
-        for f in self.fileIDs:
+        file_ix = []
+        means = []
+        ranges = []
+        sds = []
+        for i, f in enumerate(self.fileIDs):
             speaker.append(self.data[f].speaker)
+            file_ix.append(i)
+            means.append(self.data[f].mean(reduction_axis))
+            ranges.append(self.data[f].range(reduction_axis))
+            sds.append(self.data[f].sd(reduction_axis))
         speaker = np.array(speaker)
 
         if oracle_boundaries:
@@ -1299,7 +1359,7 @@ class Dataset(object):
             if mask:
                 oracle_boundaries_tmp = []
                 for i, f in enumerate(self.fileIDs):
-                    oracle_boundaries_cur, _ = self.data[f].segment_and_stack(
+                    oracle_boundaries_cur, _, _ = self.data[f].segment_and_stack(
                         segments=mask,
                         features=oracle_boundaries[i],
                         boundaries_as_features=True,
@@ -1322,6 +1382,10 @@ class Dataset(object):
             'feats': feats,
             'oracle_boundaries': oracle_boundaries,
             'fixed_boundaries': boundaries,
+            'file_ix': file_ix,
+            'means': means,
+            'ranges': ranges,
+            'sds': sds,
             'speaker': speaker
         }
 
@@ -1372,6 +1436,10 @@ class Dataset(object):
         X_mask = self.cache[name]['X_mask']
         y = self.cache[name]['y']
         y_mask = self.cache[name]['y_mask']
+        file_ix = self.cache[name]['file_ix']
+        means = self.cache[name]['means']
+        ranges = self.cache[name]['ranges']
+        sds = self.cache[name]['sds']
         speaker = self.cache[name]['speaker']
         oracle_boundaries = self.cache[name]['oracle_boundaries']
 
@@ -1383,6 +1451,10 @@ class Dataset(object):
                 'X_mask': X_mask[indices],
                 'y': y[indices],
                 'y_mask': y_mask[indices],
+                'file_ix': file_ix[indices],
+                'means': means[indices],
+                'ranges': ranges[indices],
+                'sds': sds[indices],
                 'speaker': speaker[indices],
                 'oracle_boundaries': None if oracle_boundaries is None else oracle_boundaries[indices],
                 'indices': indices
@@ -1403,6 +1475,9 @@ class Dataset(object):
         feats_targets = self.cache[name]['feats_targets']
         fixed_boundaries = self.cache[name]['boundaries']
         file_ix = self.cache[name]['file_ix']
+        means = self.cache[name]['means']
+        ranges = self.cache[name]['ranges']
+        sds = self.cache[name]['sds']
         time_ix = self.cache[name]['time_ix']
         speaker = self.cache[name]['speaker']
         oracle_boundaries = self.cache[name]['oracle_boundaries']
@@ -1424,6 +1499,9 @@ class Dataset(object):
 
             file_ix_cur = file_ix[indices]
             time_ix_cur = time_ix[indices]
+            means_cur = means[indices]
+            ranges_cur = ranges[indices]
+            sds_cur = sds[indices]
 
             history_ix, bwd_context_ix, fwd_context_ix = self.get_streaming_indices(
                 time_ix_cur,
@@ -1470,6 +1548,10 @@ class Dataset(object):
                 'y_bwd_mask': y_bwd_mask_cur,
                 'y_fwd': y_fwd_cur,
                 'y_fwd_mask': y_fwd_mask_cur,
+                'file_ix': file_ix_cur,
+                'means': means_cur,
+                'ranges': ranges_cur,
+                'sds': sds_cur,
                 'speaker': speaker[file_ix_cur]
             }
 
@@ -1485,6 +1567,10 @@ class Dataset(object):
         n = self.cache[name]['n']
         feats = self.cache[name]['feats']
         fixed_boundaries = self.cache[name]['fixed_boundaries']
+        file_ix = self.cache[name]['file_ix']
+        means = self.cache[name]['means']
+        ranges = self.cache[name]['ranges']
+        sds = self.cache[name]['sds']
         speaker = self.cache[name]['speaker']
         oracle_boundaries = self.cache[name]['oracle_boundaries']
 
@@ -1505,6 +1591,10 @@ class Dataset(object):
                 'X': feats[index],
                 'oracle_boundaries': oracle_boundaries_cur,
                 'fixed_boundaries': fixed_boundaries[index],
+                'file_ix': file_ix[index],
+                'means': means[index],
+                'ranges': ranges[index],
+                'sds': sds[index],
                 'speaker': speaker[index:index+1],
             }
 
@@ -1541,6 +1631,7 @@ class Dataset(object):
             normalize=False,
             center=False,
             standardize=False,
+            reduction_axis='time',
             resample=None
     ):
         return self.segment_and_stack(
@@ -1551,7 +1642,8 @@ class Dataset(object):
             normalize=normalize,
             center=center,
             standardize=standardize,
-            resample = resample
+            reduction_axis=reduction_axis,
+            resample=resample
         )
 
     def targets(
@@ -1563,6 +1655,7 @@ class Dataset(object):
             normalize=False,
             center=False,
             standardize=False,
+            reduction_axis='time',
             with_deltas=False,
             resample=None
     ):
@@ -1574,6 +1667,7 @@ class Dataset(object):
             normalize=normalize,
             center=center,
             standardize=standardize,
+            reduction_axis=reduction_axis,
             with_deltas=with_deltas,
             resample=resample
         )
@@ -1602,7 +1696,7 @@ class Dataset(object):
                 out.append(feats_cur)
                 mask.append(np.ones((len(feats_cur),)))
         else:
-            out, mask = self.segment_and_stack(
+            out, mask, _ = self.segment_and_stack(
                 features=features,
                 boundaries_as_features=True,
                 segments=outer_segments,
@@ -2037,6 +2131,45 @@ class Datafile(object):
     def data(self):
         raise NotImplementedError
 
+    def mean(self, reduction_axis, mask=None):
+        data = self.data()
+        if mask is not None:
+            data = data[mask]
+        if reduction_axis.lower() == 'time':
+            return data.mean(axis=0, keepdims=True)
+        if reduction_axis.lower() == 'freq':
+            raise ValueError('Reduction along frequency dimension is not currently supported')
+            return data.mean(axis=1, keepdims=True)
+        if reduction_axis.lower() == 'both':
+            return data.mean(axis=(0, 1), keepdims=True)
+        return data.mean(axis=reduction_axis, keepdims=True)
+
+    def range(self, reduction_axis, mask=None):
+        data = self.data()
+        if mask is not None:
+            data = data[mask]
+        if reduction_axis.lower() == 'time':
+            return data.max(axis=0, keepdims=True) - self.data().min(axis=0, keepdims=True)
+        if reduction_axis.lower() == 'freq':
+            raise ValueError('Reduction along frequency dimension is not currently supported')
+            return data.max(axis=1, keepdims=True) - self.data().min(axis=1, keepdims=True)
+        if reduction_axis.lower() == 'both':
+            return data.max(axis=(0, 1), keepdims=True) - self.data().min(axis=(0,1), keepdims=True)
+        return data.max(axis=reduction_axis, keepdims=True) - self.data().min(axis=reduction_axis, keepdims=True)
+
+    def sd(self, reduction_axis, mask=None):
+        data = self.data()
+        if mask is not None:
+            data = data[mask]
+        if reduction_axis.lower() == 'time':
+            return data.std(axis=0, keepdims=True)
+        if reduction_axis.lower() == 'freq':
+            raise ValueError('Reduction along frequency dimension is not currently supported')
+            return data.std(axis=1, keepdims=True)
+        if reduction_axis.lower() == 'both':
+            return data.std(axis=(0, 1), keepdims=True)
+        return data.std(axis=reduction_axis, keepdims=True)
+
     def segments(self, segment_type='vad'):
         if isinstance(segment_type, str):
             if segment_type == 'vad':
@@ -2086,6 +2219,7 @@ class Datafile(object):
             normalize=False,
             center=False,
             standardize=False,
+            reduction_axis='time',
             with_deltas=True,
             resample=None
     ):
@@ -2094,18 +2228,12 @@ class Datafile(object):
         if features is None:
             feats = self.data()
 
+            if center or standardize:
+                feats -= self.mean(reduction_axis)
             if normalize:
-                maximum = feats.max()
-                minimum = feats.min()
-                diff = maximum - minimum
-                feats = (feats - minimum) / diff
-            if center:
-                feats = feats - feats.mean()
-            if standardize:
-                sd = feats.std()
-                mu = feats.mean()
-                feats = (feats - mu) / sd
-
+                feats /= self.range(reduction_axis)
+            elif standardize:
+                feats /= self.sd(reduction_axis)
         else:
             feats = features
 
@@ -2166,7 +2294,9 @@ class Datafile(object):
             feats = feats_split
             mask = mask_split
 
-        return feats, mask
+        file_ix = np.zeros((len(feats),), dtype='int')
+
+        return feats, mask, file_ix
 
     def generate_random_segmentation(self, mean_frames_per_segment, parent_segment_type='vad'):
         if parent_segment_type == 'vad':
@@ -2260,8 +2390,7 @@ class Datafile(object):
                         steps_per_second=seconds_per_step,
                         activation=state_activation,
                         discretize=discretize,
-                        as_categories=False,
-                        as_onehot=True,
+                        as_categories=True,
                         mask=mask,
                         padding=padding
                     )
@@ -2400,17 +2529,20 @@ class AcousticDatafile(Datafile):
     def __init__(
             self,
             path,
-            sr = 16000,
-            offset = 10,
-            window_len = 25,
-            n_coef = 13,
-            order = 2,
+            sr=16000,
+            offset=10,
+            window_len=25,
+            n_coef=13,
+            order=2,
+            filter_type='mfcc',
             clip_timesteps=None,
+            featurizer=None
     ):
         super(AcousticDatafile, self).__init__(path, clip_timesteps=clip_timesteps)
 
         assert path.lower().endswith('.wav'), 'Input file "%s" was not .wav.' %path
         assert sr % 1000 == 0, 'Must use a sampling rate that is a multiple of 1000'
+        assert featurizer is not None, 'Featurizer must be provided. Currently supports either ``wav_to_mfcc`` from the ``mfcc`` module or ``wav_to_cochleagram`` from the ``cochleagram`` module.'
 
         self.sr = sr
         self.offset = offset
@@ -2419,14 +2551,24 @@ class AcousticDatafile(Datafile):
         self.order = order
         self.speaker = None
 
-        data_src, duration = wav_to_mfcc(
-            path,
-            sr=sr,
-            offset=offset,
-            window_len=window_len,
-            n_coef=n_coef,
-            order=order
-        )
+        if filter_type.lower() == 'mfcc':
+            data_src, duration = featurizer(
+                path,
+                sr=sr,
+                offset=offset,
+                window_len=window_len,
+                n_coef=n_coef,
+                order=order
+            )
+        else:
+            data_src, duration = featurizer(
+                path,
+                sr=sr,
+                offset=offset,
+                sample_factor=1,
+                n_coef=n_coef,
+                order=order
+            )
         data_src = np.transpose(data_src, [1, 0])
 
         if self.clip_timesteps is not None:
@@ -2514,7 +2656,7 @@ class AcousticDatafile(Datafile):
         self.seconds_per_step = float(self.offset) / 1000.
 
     def data(self):
-        return self.data_src
+        return self.data_src.copy()
 
     def dump_segmentations_to_textgrid(self, outdir=None, suffix='', segments=None):
         if outdir is None:
@@ -2720,11 +2862,11 @@ class TextDatafile(Datafile):
     def segmentations_to_string(self, segments, parent_segments=None):
         segment_ends = self.one_hot_boundaries(segments=segments)
         if parent_segments is not None:
-            utts, _ = self.segment_and_stack(
+            utts, _, _ = self.segment_and_stack(
                 segments=parent_segments,
                 padding=None,
             )
-            bounds, _ = self.segment_and_stack(
+            bounds, _, _ = self.segment_and_stack(
                 features=segment_ends,
                 boundaries_as_features=True,
                 segments=parent_segments,

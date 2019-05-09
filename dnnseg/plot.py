@@ -7,7 +7,6 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import ticker, pyplot as plt
 import seaborn as sns
-from scipy.cluster import hierarchy
 from .data import extract_segment_timestamps
 
 
@@ -401,7 +400,7 @@ def plot_acoustic_features(
             fig.suptitle(title, fontsize=20, weight='bold')
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         try:
-            fig.savefig(dir + '/' + prefix + 'featureplot_%d'%i + suffix)
+            fig.savefig(dir + '/' + prefix + '%d_featureplot' % i + suffix)
         except Exception:
             sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
 

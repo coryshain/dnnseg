@@ -1,3 +1,5 @@
+import sys
+import os
 import pickle
 
 def f_measure(tp, fp, fn, beta=1):
@@ -35,3 +37,15 @@ def pretty_print_seconds(s):
     m = s % 3600 // 60
     s = s % 3600 % 60
     return '%02d:%02d:%02d' % (h, m, s)
+
+
+# Thanks to SO user gbtimmon (https://stackoverflow.com/users/1158990/gbtimmon) for this wrapper to prevent modules from printing
+def suppress_output(func):
+    def wrapper(*args, **kwargs):
+        with open(os.devnull,"w") as devNull:
+            original = sys.stdout
+            sys.stdout = devNull
+            out = func(*args, **kwargs)
+            sys.stdout = original
+            return out
+    return wrapper

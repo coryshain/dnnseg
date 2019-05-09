@@ -230,7 +230,7 @@ def replace_gradient(fw_op, bw_op, session=None):
             return new_op
 
 
-def initialize_embeddings(categories, dim, default=0., session=None):
+def initialize_embeddings(categories, dim, default=0., name=None, session=None):
     session = get_session(session)
     with session.as_default():
         with session.graph.as_default():
@@ -240,7 +240,7 @@ def initialize_embeddings(categories, dim, default=0., session=None):
                 tf.constant(categories),
                 num_oov_buckets=1
             )
-            embedding_matrix = tf.Variable(tf.fill([n_categories+1, dim], default))
+            embedding_matrix = tf.Variable(tf.fill([n_categories+1, dim], default), name=name)
 
             return index_table, embedding_matrix
 
@@ -501,6 +501,8 @@ class HMLSTMCell(LayerRNNCell):
             num_units,
             num_layers,
             training=False,
+            kernel_depth=2,
+            resnet_n_layers=2,
             one_hot_inputs=False,
             forget_bias=1.0,
             oracle_boundary=False,
@@ -508,6 +510,7 @@ class HMLSTMCell(LayerRNNCell):
             inner_activation='tanh',
             recurrent_activation='sigmoid',
             boundary_activation='sigmoid',
+            boundary_noise_sd=None,
             boundary_discretizer=None,
             bottomup_initializer='glorot_uniform_initializer',
             recurrent_initializer='orthogonal_initializer',
@@ -530,14 +533,17 @@ class HMLSTMCell(LayerRNNCell):
             layer_normalization=False,
             refeed_boundary=False,
             power=None,
+            use_timing_unit=False,
             boundary_slope_annealing_rate=None,
             state_slope_annealing_rate=None,
             slope_annealing_max=None,
             state_discretizer=None,
+            state_noise_sd=None,
             sample_at_train=True,
             sample_at_eval=False,
             global_step=None,
             implementation=1,
+            batch_normalization_decay=None,
             reuse=None,
             name=None,
             dtype=None,
@@ -546,6 +552,8 @@ class HMLSTMCell(LayerRNNCell):
     ):
         self._session = get_session(session)
         self._device = device
+
+        assert not temporal_dropout_plug_lm, 'temporal_dropout_plug_lm is currently broken, do not use.'
 
         with self._session.as_default():
             with self._session.graph.as_default():
@@ -563,6 +571,9 @@ class HMLSTMCell(LayerRNNCell):
                     self._num_layers = num_layers
 
                     self._training = training
+
+                    self._kernel_depth = kernel_depth
+                    self._resnet_n_layers = resnet_n_layers
 
                     self._lm = return_lm_predictions or temporal_dropout_plug_lm
                     self._return_lm_predictions = return_lm_predictions
@@ -589,6 +600,7 @@ class HMLSTMCell(LayerRNNCell):
                         )
                     else:
                         self._boundary_discretizer = None
+                    self.boundary_noise_sd = boundary_noise_sd
 
                     self._bottomup_initializer = get_initializer(bottomup_initializer, session=self._session)
                     self._recurrent_initializer = get_initializer(recurrent_initializer, session=self._session)
@@ -633,6 +645,7 @@ class HMLSTMCell(LayerRNNCell):
                     self._layer_normalization = layer_normalization
                     self._refeed_boundary = refeed_boundary
                     self._power = power
+                    self._use_timing_unit = use_timing_unit
                     self._boundary_slope_annealing_rate = boundary_slope_annealing_rate
                     self._state_slope_annealing_rate = state_slope_annealing_rate
                     self._slope_annealing_max = slope_annealing_max
@@ -647,10 +660,13 @@ class HMLSTMCell(LayerRNNCell):
                         )
                     else:
                         self._state_discretizer = None
+                    self.state_noise_sd = state_noise_sd
                     self._sample_at_train = sample_at_train
                     self._sample_at_eval = sample_at_eval
                     self.global_step = global_step
                     self._implementation = implementation
+
+                    self._batch_normalization_decay = batch_normalization_decay
 
                     self._epsilon = 1e-8
 
@@ -668,10 +684,12 @@ class HMLSTMCell(LayerRNNCell):
     def state_size(self):
         out = []
         for l in range(self._num_layers):
+            timing = int(self._use_timing_unit and l < self._num_layers - 1)
+
             units_cur = self._num_units[l]
 
             if l < self._num_layers - 1:
-                size = (units_cur, units_cur, 1)
+                size = (units_cur, units_cur + timing, 1)
             else:
                 size = (units_cur, units_cur)
 
@@ -685,6 +703,8 @@ class HMLSTMCell(LayerRNNCell):
     def output_size(self):
         out = []
         for l in range(self._num_layers):
+            timing = int(self._use_timing_unit and l < self._num_layers - 1)
+
             if l == 0:
                 units_below = self._input_dims
             else:
@@ -693,9 +713,9 @@ class HMLSTMCell(LayerRNNCell):
 
             if l < self._num_layers - 1:
                 if self._return_lm_predictions:
-                    size = (units_cur, 1, 1, units_below)
+                    size = (units_cur + timing, 1, 1, units_below)
                 else:
-                    size = (units_cur, 1, 1)
+                    size = (units_cur + timing, 1, 1)
             else:
                 if self._return_lm_predictions:
                     size = (units_cur, units_below)
@@ -742,6 +762,7 @@ class HMLSTMCell(LayerRNNCell):
                     self._kernel_topdown = []
                     self._bias_boundary = []
                     if self._lm:
+                        self._kernel_lm_bottomup = []
                         self._kernel_lm_recurrent = []
                         self._kernel_lm_topdown = []
                         self._bias_lm = []
@@ -760,10 +781,10 @@ class HMLSTMCell(LayerRNNCell):
                         if l == 0:
                             bottom_up_dim = inputs_shape[1].value - n_boundary_dims
                         else:
-                            bottom_up_dim = self._num_units[l - 1]
+                            bottom_up_dim = self._num_units[l - 1] + self._use_timing_unit
                         bottom_up_dim += self._refeed_boundary and (self._implementation == 1)
 
-                        recurrent_dim = self._num_units[l]
+                        recurrent_dim = self._num_units[l] + (self._use_timing_unit and l < self._num_layers - 1)
 
                         if self._implementation == 1:
                             if l < self._num_layers - 1:
@@ -773,75 +794,351 @@ class HMLSTMCell(LayerRNNCell):
                         else:
                             output_dim = 4 * self._num_units[l]
 
-                        kernel_bottomup = self.add_variable(
-                            'kernel_bottomup_%d' % l,
-                            shape=[bottom_up_dim, output_dim],
-                            initializer=self._bottomup_initializer
-                        )
-                        if self._weight_normalization:
-                            kernel_bottomup_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_bottomup_g_%d' % l)
-                            kernel_bottomup_b = tf.Variable(tf.zeros([1, output_dim]), name='kernel_bottomup_b_%d' % l)
-                            kernel_bottomup = tf.nn.l2_normalize(kernel_bottomup, axis=-1) * kernel_bottomup_g + kernel_bottomup_b
-                        self._regularize(kernel_bottomup, self._bottomup_regularizer)
+                        kernel_bottomup_lambdas = []
+                        for d in range(self._kernel_depth):
+                            if d < self._kernel_depth - 1:
+                                kernel_bottomup_layer = DenseResidualLayer(
+                                    training=self._training,
+                                    units=bottom_up_dim,
+                                    use_bias=True,
+                                    kernel_initializer=self._bottomup_initializer,
+                                    bias_initializer=self._bias_initializer,
+                                    kernel_regularizer=self._bottomup_regularizer,
+                                    bias_regularizer=self._bias_regularizer,
+                                    layers_inner=self._resnet_n_layers,
+                                    activation_inner=self._inner_activation,
+                                    activation=self._inner_activation,
+                                    # activation=None,
+                                    batch_normalization_decay=self._batch_normalization_decay,
+                                    project_inputs=False,
+                                    normalize_weights=self._weight_normalization,
+                                    reuse=tf.AUTO_REUSE,
+                                    session=self._session,
+                                    name='kernel_bottomup_l%d_d%d' % (l, d)
+                                )
+                            else:
+                                kernel_bottomup_layer = DenseLayer(
+                                    training=self._training,
+                                    units=output_dim,
+                                    use_bias=False,
+                                    kernel_initializer=self._bottomup_initializer,
+                                    bias_initializer=self._bias_initializer,
+                                    kernel_regularizer=self._bottomup_regularizer,
+                                    bias_regularizer=self._bias_regularizer,
+                                    activation=None,
+                                    batch_normalization_decay=self._batch_normalization_decay,
+                                    normalize_weights=self._weight_normalization,
+                                    session=self._session,
+                                    reuse=tf.AUTO_REUSE,
+                                    name='kernel_bottomup_l%d_d%d' % (l, d)
+                                )
+                            kernel_bottomup_lambdas.append(make_lambda(kernel_bottomup_layer, session=self._session))
+
+                        kernel_bottomup = compose_lambdas(kernel_bottomup_lambdas)
+
+                        # kernel_bottomup = self.add_variable(
+                        #     'kernel_bottomup_%d' % l,
+                        #     shape=[bottom_up_dim, output_dim],
+                        #     initializer=self._bottomup_initializer
+                        # )
+                        # if self._weight_normalization:
+                        #     kernel_bottomup_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_bottomup_g_%d' % l)
+                        #     kernel_bottomup_b = tf.Variable(tf.zeros([1, output_dim]), name='kernel_bottomup_b_%d' % l)
+                        #     kernel_bottomup = tf.nn.l2_normalize(kernel_bottomup, axis=-1) * kernel_bottomup_g + kernel_bottomup_b
+                        # self._regularize(kernel_bottomup, self._bottomup_regularizer)
+
                         self._kernel_bottomup.append(kernel_bottomup)
 
-                        kernel_recurrent = self.add_variable(
-                            'kernel_recurrent_%d' % l,
-                            shape=[recurrent_dim, output_dim],
-                            initializer=self._recurrent_initializer
-                        )
-                        if self._weight_normalization:
-                            kernel_recurrent_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_recurrent_g_%d' % l)
-                            kernel_recurrent_b = tf.Variable(tf.zeros([1, output_dim]), name='kernel_recurrent_b_%d' % l)
-                            kernel_recurrent = tf.nn.l2_normalize(kernel_recurrent, axis=-1) * kernel_recurrent_g + kernel_recurrent_b
-                        self._regularize(kernel_recurrent, self._recurrent_regularizer)
+                        kernel_recurrent_lambdas = []
+                        for d in range(self._kernel_depth):
+                            if d < self._kernel_depth - 1:
+                                kernel_recurrent_layer = DenseResidualLayer(
+                                    training=self._training,
+                                    units=recurrent_dim,
+                                    use_bias=True,
+                                    kernel_initializer=self._recurrent_initializer,
+                                    bias_initializer=self._bias_initializer,
+                                    kernel_regularizer=self._recurrent_regularizer,
+                                    bias_regularizer=self._bias_regularizer,
+                                    layers_inner=self._resnet_n_layers,
+                                    activation_inner=self._inner_activation,
+                                    activation=self._inner_activation,
+                                    # activation=None,
+                                    batch_normalization_decay=self._batch_normalization_decay,
+                                    project_inputs=False,
+                                    normalize_weights=self._weight_normalization,
+                                    reuse=tf.AUTO_REUSE,
+                                    session=self._session,
+                                    name='kernel_recurrent_l%d_d%d' % (l, d)
+                                )
+                            else:
+                                kernel_recurrent_layer = DenseLayer(
+                                    training=self._training,
+                                    units=output_dim,
+                                    use_bias=False,
+                                    kernel_initializer=self._recurrent_initializer,
+                                    bias_initializer=self._bias_initializer,
+                                    kernel_regularizer=self._recurrent_regularizer,
+                                    bias_regularizer=self._bias_regularizer,
+                                    activation=None,
+                                    batch_normalization_decay=self._batch_normalization_decay,
+                                    normalize_weights=self._weight_normalization,
+                                    session=self._session,
+                                    reuse=tf.AUTO_REUSE,
+                                    name='kernel_recurrent_l%d_d%d' % (l, d)
+                                )
+                            kernel_recurrent_lambdas.append(make_lambda(kernel_recurrent_layer, session=self._session))
+
+                        kernel_recurrent = compose_lambdas(kernel_recurrent_lambdas)
+
+                        # kernel_recurrent = self.add_variable(
+                        #     'kernel_recurrent_%d' % l,
+                        #     shape=[recurrent_dim, output_dim],
+                        #     initializer=self._recurrent_initializer
+                        # )
+                        # if self._weight_normalization:
+                        #     kernel_recurrent_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_recurrent_g_%d' % l)
+                        #     kernel_recurrent_b = tf.Variable(tf.zeros([1, output_dim]), name='kernel_recurrent_b_%d' % l)
+                        #     kernel_recurrent = tf.nn.l2_normalize(kernel_recurrent, axis=-1) * kernel_recurrent_g + kernel_recurrent_b
+                        # self._regularize(kernel_recurrent, self._recurrent_regularizer)
+
                         self._kernel_recurrent.append(kernel_recurrent)
 
                         if l < self._num_layers - 1:
-                            top_down_dim = self._num_units[l + 1]
-                            kernel_topdown = self.add_variable(
-                                'kernel_topdown_%d' % l,
-                                shape=[top_down_dim, output_dim],
-                                initializer=self._topdown_initializer
-                            )
-                            if self._weight_normalization:
-                                kernel_topdown_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_topdown_g_%d' % l)
-                                kernel_topdown_b = tf.Variable(tf.zeros([1, output_dim]), name='kernel_topdown_b_%s' % l)
-                                kernel_topdown = tf.nn.l2_normalize(kernel_topdown, axis=-1) * kernel_topdown_g + kernel_topdown_b
-                            self._regularize(kernel_topdown, self._topdown_regularizer)
+                            top_down_dim = self._num_units[l + 1] + (self._use_timing_unit and l < self._num_layers - 2)
+
+                            kernel_topdown_lambdas = []
+                            for d in range(self._kernel_depth):
+                                if d < self._kernel_depth - 1:
+                                    kernel_topdown_layer = DenseResidualLayer(
+                                        training=self._training,
+                                        units=top_down_dim,
+                                        use_bias=True,
+                                        kernel_initializer=self._topdown_initializer,
+                                        bias_initializer=self._bias_initializer,
+                                        kernel_regularizer=self._topdown_regularizer,
+                                        bias_regularizer=self._bias_regularizer,
+                                        layers_inner=self._resnet_n_layers,
+                                        activation_inner=self._inner_activation,
+                                        activation=self._inner_activation,
+                                        # activation=None,
+                                        batch_normalization_decay=self._batch_normalization_decay,
+                                        project_inputs=False,
+                                        normalize_weights=self._weight_normalization,
+                                        reuse=tf.AUTO_REUSE,
+                                        session=self._session,
+                                        name='kernel_topdown_l%d_d%d' % (l, d)
+                                    )
+                                else:
+                                    kernel_topdown_layer = DenseLayer(
+                                        training=self._training,
+                                        units=output_dim,
+                                        use_bias=False,
+                                        kernel_initializer=self._topdown_initializer,
+                                        bias_initializer=self._bias_initializer,
+                                        kernel_regularizer=self._topdown_regularizer,
+                                        bias_regularizer=self._bias_regularizer,
+                                        activation=None,
+                                        batch_normalization_decay=self._batch_normalization_decay,
+                                        normalize_weights=self._weight_normalization,
+                                        session=self._session,
+                                        reuse=tf.AUTO_REUSE,
+                                        name='kernel_topdown_l%d_d%d' % (l, d)
+                                    )
+                                kernel_topdown_lambdas.append(make_lambda(kernel_topdown_layer, session=self._session))
+
+                            kernel_topdown = compose_lambdas(kernel_topdown_lambdas)
+
+                            # kernel_topdown = self.add_variable(
+                            #     'kernel_topdown_%d' % l,
+                            #     shape=[top_down_dim, output_dim],
+                            #     initializer=self._topdown_initializer
+                            # )
+                            # if self._weight_normalization:
+                            #     kernel_topdown_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_topdown_g_%d' % l)
+                            #     kernel_topdown_b = tf.Variable(tf.zeros([1, output_dim]), name='kernel_topdown_b_%s' % l)
+                            #     kernel_topdown = tf.nn.l2_normalize(kernel_topdown, axis=-1) * kernel_topdown_g + kernel_topdown_b
+                            # self._regularize(kernel_topdown, self._topdown_regularizer)
+
                             self._kernel_topdown.append(kernel_topdown)
 
                         if self._lm:
-                            lm_recurrent_in_dim = bottom_up_dim + 2 * recurrent_dim
-                            kernel_lm_recurrent = self.add_variable(
-                                'kernel_lm_recurrent_%d' % l,
-                                shape=[lm_recurrent_in_dim, bottom_up_dim],
-                                initializer=self._recurrent_initializer
-                            )
-                            if self._weight_normalization:
-                                kernel_lm_recurrent_g = tf.Variable(tf.ones([1, bottom_up_dim]), name='kernel_lm_recurrent_g_%d' % l)
-                                kernel_lm_recurrent_b = tf.Variable(tf.zeros([1, bottom_up_dim]), name='kernel_lm_recurrent_b_%d' % l)
-                                kernel_lm_recurrent = tf.nn.l2_normalize(kernel_lm_recurrent, axis=-1) * kernel_lm_recurrent_g + kernel_lm_recurrent_b
-                            self._regularize(kernel_lm_recurrent, self._recurrent_regularizer)
+                            lm_out_dim = bottom_up_dim
+                            if self._use_timing_unit and l > 0:
+                                lm_out_dim -= 1
+
+                            lm_bottomup_in_dim = bottom_up_dim
+                            kernel_lm_bottomup_lambdas = []
+                            for d in range(self._kernel_depth):
+                                if d < self._kernel_depth - 1:
+                                    kernel_lm_bottomup_layer = DenseResidualLayer(
+                                        training=self._training,
+                                        units=lm_bottomup_in_dim,
+                                        use_bias=True,
+                                        kernel_initializer=self._bottomup_initializer,
+                                        bias_initializer=self._bias_initializer,
+                                        kernel_regularizer=self._bottomup_regularizer,
+                                        bias_regularizer=self._bias_regularizer,
+                                        layers_inner=self._resnet_n_layers,
+                                        activation_inner=self._inner_activation,
+                                        activation=self._inner_activation,
+                                        # activation=None,
+                                        batch_normalization_decay=self._batch_normalization_decay,
+                                        project_inputs=False,
+                                        normalize_weights=self._weight_normalization,
+                                        reuse=tf.AUTO_REUSE,
+                                        session=self._session,
+                                        name='kernel_lm_bottomup_l%d_d%d' % (l, d)
+                                    )
+                                else:
+                                    kernel_lm_bottomup_layer = DenseLayer(
+                                        training=self._training,
+                                        units=lm_out_dim,
+                                        use_bias=False,
+                                        kernel_initializer=self._bottomup_initializer,
+                                        bias_initializer=self._bias_initializer,
+                                        kernel_regularizer=self._bottomup_regularizer,
+                                        bias_regularizer=self._bias_regularizer,
+                                        activation=None,
+                                        batch_normalization_decay=self._batch_normalization_decay,
+                                        normalize_weights=self._weight_normalization,
+                                        session=self._session,
+                                        reuse=tf.AUTO_REUSE,
+                                        name='kernel_lm_bottomup_l%d_d%d' % (l, d)
+                                    )
+                                kernel_lm_bottomup_lambdas.append(make_lambda(kernel_lm_bottomup_layer, session=self._session))
+
+                            kernel_lm_bottomup = compose_lambdas(kernel_lm_bottomup_lambdas)
+
+                            # kernel_lm_bottomup = self.add_variable(
+                            #     'kernel_lm_bottomup_%d' % l,
+                            #     shape=[lm_bottomup_in_dim, lm_out_dim],
+                            #     initializer=self._recurrent_initializer
+                            # )
+                            # if self._weight_normalization:
+                            #     kernel_lm_bottomup_g = tf.Variable(tf.ones([1, lm_out_dim]), name='kernel_lm_bottomup_g_%d' % l)
+                            #     kernel_lm_bottomup_b = tf.Variable(tf.zeros([1, lm_out_dim]), name='kernel_lm_bottomup_b_%d' % l)
+                            #     kernel_lm_bottomup = tf.nn.l2_normalize(kernel_lm_bottomup, axis=-1) * kernel_lm_bottomup_g + kernel_lm_bottomup_b
+                            # self._regularize(kernel_lm_bottomup, self._bottomup_regularizer)
+
+                            self._kernel_lm_bottomup.append(kernel_lm_bottomup)
+
+                            lm_recurrent_in_dim = recurrent_dim
+                            kernel_lm_recurrent_lambdas = []
+                            for d in range(self._kernel_depth):
+                                if d < self._kernel_depth - 1:
+                                    kernel_lm_recurrent_layer = DenseResidualLayer(
+                                        training=self._training,
+                                        units=lm_recurrent_in_dim,
+                                        use_bias=True,
+                                        kernel_initializer=self._recurrent_initializer,
+                                        bias_initializer=self._bias_initializer,
+                                        kernel_regularizer=self._recurrent_regularizer,
+                                        bias_regularizer=self._bias_regularizer,
+                                        layers_inner=self._resnet_n_layers,
+                                        activation_inner=self._inner_activation,
+                                        activation=self._inner_activation,
+                                        # activation=None,
+                                        batch_normalization_decay=self._batch_normalization_decay,
+                                        project_inputs=False,
+                                        normalize_weights=self._weight_normalization,
+                                        reuse=tf.AUTO_REUSE,
+                                        session=self._session,
+                                        name='kernel_lm_recurrent_l%d_d%d' % (l, d)
+                                    )
+                                else:
+                                    kernel_lm_recurrent_layer = DenseLayer(
+                                        training=self._training,
+                                        units=lm_out_dim,
+                                        use_bias=False,
+                                        kernel_initializer=self._recurrent_initializer,
+                                        bias_initializer=self._bias_initializer,
+                                        kernel_regularizer=self._recurrent_regularizer,
+                                        bias_regularizer=self._bias_regularizer,
+                                        activation=None,
+                                        batch_normalization_decay=self._batch_normalization_decay,
+                                        normalize_weights=self._weight_normalization,
+                                        session=self._session,
+                                        reuse=tf.AUTO_REUSE,
+                                        name='kernel_lm_recurrent_l%d_d%d' % (l, d)
+                                    )
+                                kernel_lm_recurrent_lambdas.append(make_lambda(kernel_lm_recurrent_layer, session=self._session))
+
+                            kernel_lm_recurrent = compose_lambdas(kernel_lm_recurrent_lambdas)
+
+                            # kernel_lm_recurrent = self.add_variable(
+                            #     'kernel_lm_recurrent_%d' % l,
+                            #     shape=[lm_recurrent_in_dim, lm_out_dim],
+                            #     initializer=self._recurrent_initializer
+                            # )
+                            # if self._weight_normalization:
+                            #     kernel_lm_recurrent_g = tf.Variable(tf.ones([1, lm_out_dim]), name='kernel_lm_recurrent_g_%d' % l)
+                            #     kernel_lm_recurrent_b = tf.Variable(tf.zeros([1, lm_out_dim]), name='kernel_lm_recurrent_b_%d' % l)
+                            #     kernel_lm_recurrent = tf.nn.l2_normalize(kernel_lm_recurrent, axis=-1) * kernel_lm_recurrent_g + kernel_lm_recurrent_b
+                            # self._regularize(kernel_lm_recurrent, self._recurrent_regularizer)
+
                             self._kernel_lm_recurrent.append(kernel_lm_recurrent)
 
-                            # if l < self._num_layers - 1:
-                            #     lm_topdown_in_dim = top_down_dim
-                            #     kernel_lm_topdown = self.add_variable(
-                            #         'kernel_lm_topdown_%d' % l,
-                            #         shape=[lm_topdown_in_dim, bottom_up_dim],
-                            #         initializer=self._recurrent_initializer
-                            #     )
-                            #     if self._weight_normalization:
-                            #         kernel_lm_topdown_g = tf.Variable(tf.ones([1, bottom_up_dim]), name='kernel_lm_topdown_g_%d' % l)
-                            #         kernel_lm_topdown_b = tf.Variable(tf.zeros([1, bottom_up_dim]), name='kernel_lm_topdown_b_%d' % l)
-                            #         kernel_lm_topdown = tf.nn.l2_normalize(kernel_lm_topdown, axis=-1) * kernel_lm_topdown_g + kernel_lm_topdown_b
-                            #     self._regularize(kernel_lm_topdown, self._topdown_regularizer)
-                            #     self._kernel_lm_topdown.append(kernel_lm_topdown)
+                            if l < self._num_layers - 1:
+                                lm_topdown_in_dim = top_down_dim
+                                kernel_lm_topdown_lambdas = []
+                                for d in range(self._kernel_depth):
+                                    if d < self._kernel_depth - 1:
+                                        kernel_lm_topdown_layer = DenseResidualLayer(
+                                            training=self._training,
+                                            units=lm_topdown_in_dim,
+                                            use_bias=True,
+                                            kernel_initializer=self._topdown_initializer,
+                                            bias_initializer=self._bias_initializer,
+                                            kernel_regularizer=self._topdown_regularizer,
+                                            bias_regularizer=self._bias_regularizer,
+                                            layers_inner=self._resnet_n_layers,
+                                            activation_inner=self._inner_activation,
+                                            activation=self._inner_activation,
+                                            # activation=None,
+                                            batch_normalization_decay=self._batch_normalization_decay,
+                                            project_inputs=False,
+                                            normalize_weights=self._weight_normalization,
+                                            reuse=tf.AUTO_REUSE,
+                                            session=self._session,
+                                            name='kernel_lm_topdown_l%d_d%d' % (l, d)
+                                        )
+                                    else:
+                                        kernel_lm_topdown_layer = DenseLayer(
+                                            training=self._training,
+                                            units=lm_out_dim,
+                                            use_bias=False,
+                                            kernel_initializer=self._topdown_initializer,
+                                            bias_initializer=self._bias_initializer,
+                                            kernel_regularizer=self._topdown_regularizer,
+                                            bias_regularizer=self._bias_regularizer,
+                                            activation=None,
+                                            batch_normalization_decay=self._batch_normalization_decay,
+                                            normalize_weights=self._weight_normalization,
+                                            session=self._session,
+                                            reuse=tf.AUTO_REUSE,
+                                            name='kernel_lm_topdown_l%d_d%d' % (l, d)
+                                        )
+                                    kernel_lm_topdown_lambdas.append(make_lambda(kernel_lm_topdown_layer, session=self._session))
+
+                                kernel_lm_topdown = compose_lambdas(kernel_lm_topdown_lambdas)
+
+                                # kernel_lm_topdown = self.add_variable(
+                                #     'kernel_lm_topdown_%d' % l,
+                                #     shape=[lm_topdown_in_dim, lm_out_dim],
+                                #     initializer=self._recurrent_initializer
+                                # )
+                                # if self._weight_normalization:
+                                #     kernel_lm_topdown_g = tf.Variable(tf.ones([1, lm_out_dim]), name='kernel_lm_topdown_g_%d' % l)
+                                #     kernel_lm_topdown_b = tf.Variable(tf.zeros([1, lm_out_dim]), name='kernel_lm_topdown_b_%d' % l)
+                                #     kernel_lm_topdown = tf.nn.l2_normalize(kernel_lm_topdown, axis=-1) * kernel_lm_topdown_g + kernel_lm_topdown_b
+                                # self._regularize(kernel_lm_topdown, self._topdown_regularizer)
+
+                                self._kernel_lm_topdown.append(kernel_lm_topdown)
 
                             bias_lm = self.add_variable(
                                 'bias_lm_%d' % l,
-                                shape=[1, bottom_up_dim],
+                                shape=[1, lm_out_dim],
                                 initializer=self._bias_initializer
                             )
                             self._regularize(bias_lm, self._bias_regularizer)
@@ -862,16 +1159,59 @@ class HMLSTMCell(LayerRNNCell):
                                 self._bias_boundary.append(bias_boundary)
 
                             if self._implementation == 2:
-                                kernel_boundary = self.add_variable(
-                                    'kernel_boundary_%d' % l,
-                                    shape=[self._num_units[l] + self._refeed_boundary, 1],
-                                    initializer=self._boundary_initializer
-                                )
-                                if self._weight_normalization:
-                                    kernel_boundary_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_boundary_g_%d' % l)
-                                    kernel_boundary_b = tf.Variable(tf.zeros([1, output_dim]), name='kernel_boundary_b_%d' % l)
-                                    kernel_boundary = tf.nn.l2_normalize(kernel_boundary, axis=-1) * kernel_boundary_g + kernel_boundary_b
-                                self._regularize(kernel_boundary, self._boundary_regularizer)
+                                kernel_boundary_lambdas = []
+                                for d in range(self._kernel_depth):
+                                    if d < self._kernel_depth - 1:
+                                        kernel_boundary_layer = DenseResidualLayer(
+                                            training=self._training,
+                                            units=self._num_units[l],
+                                            use_bias=True,
+                                            kernel_initializer=self._boundary_initializer,
+                                            bias_initializer=self._bias_initializer,
+                                            kernel_regularizer=self._boundary_regularizer,
+                                            bias_regularizer=self._bias_regularizer,
+                                            layers_inner=self._resnet_n_layers,
+                                            activation_inner=self._inner_activation,
+                                            activation=self._inner_activation,
+                                            # activation=None,
+                                            batch_normalization_decay=self._batch_normalization_decay,
+                                            project_inputs=False,
+                                            normalize_weights=self._weight_normalization,
+                                            reuse=tf.AUTO_REUSE,
+                                            session=self._session,
+                                            name='kernel_boundary_l%d_d%d' % (l, d)
+                                        )
+                                    else:
+                                        kernel_boundary_layer = DenseLayer(
+                                            training=self._training,
+                                            units=1,
+                                            use_bias=False,
+                                            kernel_initializer=self._boundary_initializer,
+                                            bias_initializer=self._bias_initializer,
+                                            kernel_regularizer=self._boundary_regularizer,
+                                            bias_regularizer=self._bias_regularizer,
+                                            activation=None,
+                                            batch_normalization_decay=self._batch_normalization_decay,
+                                            normalize_weights=self._weight_normalization,
+                                            session=self._session,
+                                            reuse=tf.AUTO_REUSE,
+                                            name='kernel_boundary_l%d_d%d' % (l, d)
+                                        )
+                                    kernel_boundary_lambdas.append(make_lambda(kernel_boundary_layer, session=self._session))
+
+                                kernel_boundary = compose_lambdas(kernel_boundary_lambdas)
+
+                                # kernel_boundary = self.add_variable(
+                                #     'kernel_boundary_%d' % l,
+                                #     shape=[self._num_units[l] + self._refeed_boundary, 1],
+                                #     initializer=self._boundary_initializer
+                                # )
+                                # if self._weight_normalization:
+                                #     kernel_boundary_g = tf.Variable(tf.ones([1, output_dim]), name='kernel_boundary_g_%d' % l)
+                                #     kernel_boundary_b = tf.Variable(tf.zeros([1, output_dim]), name='kernel_boundary_b_%d' % l)
+                                #     kernel_boundary = tf.nn.l2_normalize(kernel_boundary, axis=-1) * kernel_boundary_g + kernel_boundary_b
+                                # self._regularize(kernel_boundary, self._boundary_regularizer)
+
                                 self._kernel_boundary.append(kernel_boundary)
 
                                 bias_boundary = self.add_variable(
@@ -926,6 +1266,8 @@ class HMLSTMCell(LayerRNNCell):
                         power = 1
 
                     for l, layer in enumerate(state):
+                        timing = int(self._use_timing_unit and l < self._num_layers - 1)
+
                         # z_behind: Previous boundary probability at current layer (implicitly 1 if final layer)
                         if l < self._num_layers - 1:
                             z_behind = layer[2]
@@ -978,29 +1320,8 @@ class HMLSTMCell(LayerRNNCell):
                             h_above = None
 
                         # h_below: Bottom-up input
-                        if self._state_discretizer and l > 0:
-                            h_below = 2 * (h_below - 0.5)
-                        if self._lm:
-                            lm_logits = tf.matmul(
-                                tf.concat([
-                                    h_below if z_below is None else h_below * z_below,
-                                    c_behind if z_behind is None else c_behind * (1 - z_behind),
-                                    h_behind if z_behind is None else h_behind * (1 - z_behind)
-                                ], axis=-1),
-                                self._kernel_lm_recurrent[l]
-                            )
-                            if z_behind is not None:
-                                lm_logits *= 1 - z_behind
-                                # lm_logits += tf.matmul(h_above, self._kernel_lm_topdown[l]) * (z_behind ** power)
-
-                            lm_logits += self._bias_lm[l]
-
-                            if self._one_hot_inputs and l == 0:
-                                lm = tf.nn.softmax(lm_logits)
-                            elif self._state_discretizer is None or l == 0:
-                                lm = lm_logits
-                            else:
-                                lm = tf.sigmoid(lm_logits)
+                        # if self._state_discretizer and l > 0:
+                        #     h_below = 2 * (h_below - 0.5)
 
                         if self._implementation == 1 and self._refeed_boundary:
                             h_below = tf.concat([z_behind, h_below], axis=1)
@@ -1010,6 +1331,7 @@ class HMLSTMCell(LayerRNNCell):
                                 data = h_below
                                 noise = tf.random_uniform([tf.shape(h_below)[0]]) > self._temporal_dropout[l]
                                 if self._temporal_dropout_plug_lm:
+                                    raise ValueError('Plug LM is currently bugged. Do not use.')
                                     # if self._one_hot_inputs and l == 0:
                                     #     alt = tf.one_hot(tf.argmax(lm, axis=-1), lm.shape[-1])
                                     # else:
@@ -1032,12 +1354,12 @@ class HMLSTMCell(LayerRNNCell):
                         # h_below = self._temporal_dropout[l](h_below)
                         h_below = self._bottomup_dropout(h_below)
 
-                        s_bottomup = tf.matmul(h_below, self._kernel_bottomup[l])
+                        s_bottomup = self._kernel_bottomup[l](h_below)
                         if l > 0:
                             s_bottomup *= z_below ** power
 
                         # Recurrent features
-                        s_recurrent = tf.matmul(h_behind, self._kernel_recurrent[l])
+                        s_recurrent = self._kernel_recurrent[l](h_behind)
                         if l < self._num_layers - 1:
                             s_recurrent *= (1 - z_behind) ** power
 
@@ -1047,7 +1369,7 @@ class HMLSTMCell(LayerRNNCell):
                         # Top-down features (if non-final layer)
                         if l < self._num_layers - 1:
                             # Compute top-down features
-                            s_topdown = tf.matmul(h_above, self._kernel_topdown[l]) * (z_behind ** power)
+                            s_topdown = self._kernel_topdown[l](h_above) * (z_behind ** power)
                             # Add in top-down features
                             s = s + s_topdown
 
@@ -1102,15 +1424,26 @@ class HMLSTMCell(LayerRNNCell):
                         if l < self._num_layers - 1 and self._state_discretizer is not None:
                             activation = tf.sigmoid
                             # activation = tf.keras.backend.hard_sigmoid
-                        if self._state_slope_annealing_rate and self.global_step is not None:
-                            h = o * activation(c * self.state_slope_coef)
+                        if l < self._num_layers - 1 and self.state_noise_sd:
+                            h_in = tf.cond(self._training, lambda: c + tf.random_normal(shape=tf.shape(c), stddev=self.state_noise_sd), lambda: c)
                         else:
-                            h = o * activation(c)
+                            h_in = c
+                        if self._state_slope_annealing_rate and self.global_step is not None:
+                            h = o * activation(h_in * self.state_slope_coef)
+                        else:
+                            h = o * activation(h_in)
                         if l < self._num_layers - 1 and self._state_discretizer and self.global_step is not None:
                             h = self._state_discretizer(h)
 
                         # Mix gated output with the previous hidden state proportionally to the copy probability
-                        h = copy_prob * h_behind + (1 - copy_prob) * h
+                        if timing:
+                            h_behind_cur = h_behind[:, :-1]
+                        else:
+                            h_behind_cur = h_behind
+                        h = copy_prob * h_behind_cur + (1 - copy_prob) * h
+                        if timing:
+                            timing_unit = (h_behind[:,-1:] + 0.5 * (1 - h_behind[:,-1:])) * (1 - z_behind)
+                            h = tf.concat([h, timing_unit], axis=1)
 
                         # Compute the current boundary probability
                         if l < self._num_layers - 1:
@@ -1126,24 +1459,53 @@ class HMLSTMCell(LayerRNNCell):
                                         z_in = tf.concat([z_behind, z_in], axis=1)
                                     z_in = self._boundary_dropout(z_in)
                                     # In implementation 2, boundary is a function of the hidden state
-                                    z = tf.matmul(z_in, self._kernel_boundary[l])
+                                    z = self._kernel_boundary[l](z_in)
                                     z = z + self._bias_boundary[l]
 
                                 if self._boundary_slope_annealing_rate and self.global_step is not None:
                                     z *= self.boundary_slope_coef
 
-                                z_prob = self._boundary_activation(z)
+                                if self.boundary_noise_sd:
+                                    z = tf.cond(self._training, lambda: z + tf.random_normal(shape=tf.shape(z), stddev=self.boundary_noise_sd), lambda: z)
 
-                                # if l > 0:
-                                #     z_prob = z_prob * z_below
+                                z_prob = self._boundary_activation(z)
+                                if l > 0 and not self._boundary_discretizer:
+                                    z_prob = z_prob * z_below
 
                                 if self._boundary_discretizer:
                                     z = self._boundary_discretizer(z_prob)
                                 else:
                                     z = z_prob
+
+                                if l > 0 and self._boundary_discretizer:
+                                    z = z * z_below
                         else:
                             z_prob = None
                             z = None
+
+                        if self._lm:
+                            lm_logits_bottomup = self._kernel_lm_bottomup[l](tf.stop_gradient(h_below))
+                            if z_below is not None:
+                                lm_logits_bottomup *= z_below
+                            lm_logits_recurrent = self._kernel_lm_recurrent[l](h_behind)
+                            if z is not None:
+                                lm_logits_recurrent *= (1 - z)
+
+                            lm_logits = lm_logits_bottomup + lm_logits_recurrent
+
+                            if l < self._num_layers - 1:
+                                lm_logits_topdown = self._kernel_lm_topdown[l](h_above) * z
+
+                                lm_logits += lm_logits_topdown
+
+                            lm_logits += self._bias_lm[l]
+
+                            if self._one_hot_inputs and l == 0:
+                                lm = tf.nn.softmax(lm_logits)
+                            elif self._state_discretizer is None or l == 0:
+                                lm = lm_logits
+                            else:
+                                lm = tf.sigmoid(lm_logits)
 
                         if l < self._num_layers - 1:
                             if self._return_lm_predictions:
@@ -1178,6 +1540,8 @@ class HMLSTMSegmenter(object):
             num_units,
             num_layers,
             training=False,
+            kernel_depth=2,
+            resnet_n_layers=2,
             one_hot_inputs=False,
             forget_bias=1.0,
             oracle_boundary=False,
@@ -1186,9 +1550,10 @@ class HMLSTMSegmenter(object):
             recurrent_activation='sigmoid',
             boundary_activation='sigmoid',
             boundary_discretizer=None,
-            bottomup_initializer='glorot_normal_initializer',
+            boundary_noise_sd=None,
+            bottomup_initializer='glorot_uniform_initializer',
             recurrent_initializer='orthogonal_initializer',
-            topdown_initializer='glorot_normal_initializer',
+            topdown_initializer='glorot_uniform_initializer',
             boundary_initializer='orthogonal_initializer',
             bias_initializer='zeros_initializer',
             bottomup_regularizer=None,
@@ -1207,10 +1572,12 @@ class HMLSTMSegmenter(object):
             layer_normalization=False,
             refeed_boundary=False,
             power=None,
+            use_timing_unit=False,
             boundary_slope_annealing_rate=None,
             state_slope_annealing_rate=None,
             slope_annealing_max=None,
             state_discretizer=None,
+            state_noise_sd=None,
             sample_at_train=True,
             sample_at_eval=False,
             global_step=None,
@@ -1237,6 +1604,8 @@ class HMLSTMSegmenter(object):
 
                     self.num_layers = num_layers
                     self.training = training
+                    self.kernel_depth = kernel_depth
+                    self.resnet_n_layers = resnet_n_layers
                     self.one_hot_inputs = one_hot_inputs
                     self.forget_bias = forget_bias
                     self.oracle_boundary = oracle_boundary
@@ -1246,6 +1615,7 @@ class HMLSTMSegmenter(object):
                     self.recurrent_activation = recurrent_activation
                     self.boundary_activation = boundary_activation
                     self.boundary_discretizer = boundary_discretizer
+                    self.boundary_noise_sd = boundary_noise_sd
 
                     self.bottomup_initializer = bottomup_initializer
                     self.recurrent_initializer = recurrent_initializer
@@ -1271,10 +1641,12 @@ class HMLSTMSegmenter(object):
                     self.layer_normalization = layer_normalization
                     self.refeed_boundary = refeed_boundary
                     self.power = power
+                    self.use_timing_unit = use_timing_unit
                     self.boundary_slope_annealing_rate = boundary_slope_annealing_rate
                     self.state_slope_annealing_rate = state_slope_annealing_rate
                     self.slope_annealing_max = slope_annealing_max
                     self.state_discretizer = state_discretizer
+                    self.state_noise_sd = state_noise_sd
                     self.sample_at_train = sample_at_train
                     self.sample_at_eval = sample_at_eval
                     self.global_step = global_step
@@ -1303,6 +1675,8 @@ class HMLSTMSegmenter(object):
                         self.num_units,
                         self.num_layers,
                         training=self.training,
+                        kernel_depth=self.kernel_depth,
+                        resnet_n_layers=self.resnet_n_layers,
                         one_hot_inputs=self.one_hot_inputs,
                         forget_bias=self.forget_bias,
                         oracle_boundary=self.oracle_boundary,
@@ -1311,6 +1685,7 @@ class HMLSTMSegmenter(object):
                         recurrent_activation=self.recurrent_activation,
                         boundary_activation=self.boundary_activation,
                         boundary_discretizer=self.boundary_discretizer,
+                        boundary_noise_sd=self.boundary_noise_sd,
                         bottomup_initializer=self.bottomup_initializer,
                         recurrent_initializer=self.recurrent_initializer,
                         topdown_initializer=self.topdown_initializer,
@@ -1331,10 +1706,12 @@ class HMLSTMSegmenter(object):
                         layer_normalization=self.layer_normalization,
                         refeed_boundary=self.refeed_boundary,
                         power=self.power,
+                        use_timing_unit=self.use_timing_unit,
                         boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                         state_slope_annealing_rate=self.state_slope_annealing_rate,
                         slope_annealing_max=self.slope_annealing_max,
                         state_discretizer=self.state_discretizer,
+                        state_noise_sd=self.state_noise_sd,
                         sample_at_train=self.sample_at_train,
                         sample_at_eval=self.sample_at_eval,
                         global_step=self.global_step,
@@ -1703,22 +2080,38 @@ class DenseLayer(object):
             training=True,
             units=None,
             use_bias=True,
+            kernel_initializer='glorot_uniform_initializer',
+            bias_initializer='zeros_initializer',
+            kernel_regularizer=None,
+            bias_regularizer=None,
             activation=None,
             batch_normalization_decay=0.9,
             normalize_weights=False,
-            session=None
+            reuse=None,
+            session=None,
+            name=None
     ):
         self.session = get_session(session)
 
         self.training = training
         self.units = units
         self.use_bias = use_bias
+        self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
+        if bias_initializer is None:
+            bias_initializer = 'zeros_initializer'
+        self.bias_initializer = get_initializer(bias_initializer, session=self.session)
+        self.kernel_regularizer = get_regularizer(kernel_regularizer, session=self.session)
+        self.bias_regularizer = get_regularizer(bias_regularizer, session=self.session)
         self.activation = get_activation(activation, session=self.session, training=self.training)
         self.batch_normalization_decay = batch_normalization_decay
         self.normalize_weights = normalize_weights
+        self.reuse = reuse
+        self.name = name
 
         self.dense_layer = None
         self.projection = None
+
+        self.initializer = get_initializer('glorot_normal_initializer', self.session)
 
         self.built = False
 
@@ -1731,11 +2124,15 @@ class DenseLayer(object):
 
             with self.session.as_default():
                 with self.session.graph.as_default():
-                    self.dense_layer = tf.keras.layers.Dense(
+                    self.dense_layer = tf.layers.Dense(
                         out_dim,
-                        input_shape=[inputs.shape[1]],
                         use_bias=self.use_bias,
-                        kernel_initializer='glorot_normal',
+                        kernel_initializer=self.kernel_initializer,
+                        bias_initializer=self.bias_initializer,
+                        kernel_regularizer=self.kernel_regularizer,
+                        bias_regularizer=self.bias_regularizer,
+                        _reuse=self.reuse,
+                        name=self.name
                     )
 
             self.built = True
@@ -1756,7 +2153,6 @@ class DenseLayer(object):
                     self.dense_layer.kernel = self.v
 
                 if self.batch_normalization_decay:
-                    # H = tf.layers.batch_normalization(H, training=self.training)
                     H = tf.contrib.layers.batch_norm(
                         H,
                         decay=self.batch_normalization_decay,
@@ -1764,7 +2160,9 @@ class DenseLayer(object):
                         scale=True,
                         zero_debias_moving_mean=True,
                         is_training=self.training,
-                        updates_collections=None
+                        updates_collections=None,
+                        reuse=self.reuse,
+                        scope=self.name
                     )
                 if self.activation is not None:
                     H = self.activation(H)
@@ -1779,23 +2177,40 @@ class DenseResidualLayer(object):
             training=True,
             units=None,
             use_bias=True,
+            kernel_initializer='glorot_uniform_initializer',
+            bias_initializer='zeros_initializer',
+            kernel_regularizer=None,
+            bias_regularizer=None,
             layers_inner=3,
             activation_inner=None,
             activation=None,
             batch_normalization_decay=0.9,
             project_inputs=False,
-            session=None
+            normalize_weights=False,
+            reuse=None,
+            session=None,
+            name=None
     ):
         self.session = get_session(session)
 
         self.training = training
         self.units = units
         self.use_bias = use_bias
+
         self.layers_inner = layers_inner
+        self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
+        if bias_initializer is None:
+            bias_initializer = 'zeros_initializer'
+        self.bias_initializer = get_initializer(bias_initializer, session=self.session)
+        self.kernel_regularizer = get_regularizer(kernel_regularizer, session=self.session)
+        self.bias_regularizer = get_regularizer(bias_regularizer, session=self.session)
         self.activation_inner = get_activation(activation_inner, session=self.session, training=self.training)
         self.activation = get_activation(activation, session=self.session, training=self.training)
         self.batch_normalization_decay = batch_normalization_decay
         self.project_inputs = project_inputs
+        self.normalize_weights = normalize_weights
+        self.reuse = reuse
+        self.name = name
 
         self.dense_layers = None
         self.projection = None
@@ -1814,21 +2229,38 @@ class DenseResidualLayer(object):
                     self.dense_layers = []
 
                     for i in range(self.layers_inner):
-                        if i == 0:
-                            in_dim = inputs.shape[1]
+                        if self.name:
+                            name = self.name + '_i%d' % i
                         else:
-                            in_dim = out_dim
-                        l = tf.keras.layers.Dense(
+                            name = None
+
+                        l = tf.layers.Dense(
                             out_dim,
-                            input_shape=[in_dim],
-                            use_bias=self.use_bias
+                            use_bias=self.use_bias,
+                            kernel_initializer=self.kernel_initializer,
+                            bias_initializer=self.bias_initializer,
+                            kernel_regularizer=self.kernel_regularizer,
+                            bias_regularizer=self.bias_regularizer,
+                            _reuse=self.reuse,
+                            name=name
                         )
                         self.dense_layers.append(l)
 
                     if self.project_inputs:
-                        self.projection = tf.keras.layers.Dense(
+                        if self.name:
+                            name = self.name + '_projection'
+                        else:
+                            name = None
+
+                        self.projection = tf.layers.Dense(
                             out_dim,
-                            input_shape=[inputs.shape[1]]
+                            use_bias=self.use_bias,
+                            kernel_initializer=self.kernel_initializer,
+                            bias_initializer=self.bias_initializer,
+                            kernel_regularizer=self.kernel_regularizer,
+                            bias_regularizer=self.bias_regularizer,
+                            _reuse=self.reuse,
+                            name=name
                         )
 
             self.built = True
@@ -1844,7 +2276,10 @@ class DenseResidualLayer(object):
                 for i in range(self.layers_inner - 1):
                     F = self.dense_layers[i](F)
                     if self.batch_normalization_decay:
-                        # F = tf.layers.batch_normalization(F, training=self.training)
+                        if self.name:
+                            name = self.name + '_i%d' % i
+                        else:
+                            name = None
                         F = tf.contrib.layers.batch_norm(
                             F,
                             decay=self.batch_normalization_decay,
@@ -1852,14 +2287,19 @@ class DenseResidualLayer(object):
                             scale=True,
                             zero_debias_moving_mean=True,
                             is_training=self.training,
-                            updates_collections=None
+                            updates_collections=None,
+                            reuse=self.reuse,
+                            scope=name
                         )
                     if self.activation_inner is not None:
                         F = self.activation_inner(F)
 
                 F = self.dense_layers[-1](F)
                 if self.batch_normalization_decay:
-                    # F = tf.layers.batch_normalization(F, training=self.training)
+                    if self.name:
+                        name = self.name + '_i%d' % (self.layers_inner - 1)
+                    else:
+                        name = None
                     F = tf.contrib.layers.batch_norm(
                         F,
                         decay=self.batch_normalization_decay,
@@ -1867,7 +2307,9 @@ class DenseResidualLayer(object):
                         scale=True,
                         zero_debias_moving_mean=True,
                         is_training=self.training,
-                        updates_collections=None
+                        updates_collections=None,
+                        reuse=self.reuse,
+                        scope=name
                     )
 
                 if self.project_inputs:
@@ -1896,7 +2338,9 @@ class Conv1DLayer(object):
             activation=None,
             dropout=None,
             batch_normalization_decay=0.9,
-            session=None
+            reuse=None,
+            session=None,
+            name=None
     ):
         self.session = get_session(session)
         with session.as_default():
@@ -1910,6 +2354,8 @@ class Conv1DLayer(object):
                 self.activation = get_activation(activation, session=self.session, training=self.training)
                 self.dropout = get_dropout(dropout, session=self.session, noise_shape=None, training=self.training)
                 self.batch_normalization_decay = batch_normalization_decay
+                self.reuse = reuse
+                self.name = name
 
                 self.conv_1d_layer = None
 
@@ -1929,7 +2375,8 @@ class Conv1DLayer(object):
                         self.kernel_size,
                         padding=self.padding,
                         strides=self.stride,
-                        use_bias=self.use_bias
+                        use_bias=self.use_bias,
+                        name=self.name
                     )
 
             self.built = True
@@ -1945,7 +2392,6 @@ class Conv1DLayer(object):
                 H = self.conv_1d_layer(H)
 
                 if self.batch_normalization_decay:
-                    # H = tf.layers.batch_normalization(H, training=self.training)
                     H = tf.contrib.layers.batch_norm(
                         H,
                         decay=self.batch_normalization_decay,
@@ -1953,7 +2399,9 @@ class Conv1DLayer(object):
                         scale=True,
                         zero_debias_moving_mean=True,
                         is_training=self.training,
-                        updates_collections=None
+                        updates_collections=None,
+                        reuse=self.reuse,
+                        scope=self.name
                     )
 
                 if self.activation is not None:
@@ -1963,7 +2411,6 @@ class Conv1DLayer(object):
 
 
 class Conv1DResidualLayer(object):
-
     def __init__(
             self,
             kernel_size,
@@ -1979,7 +2426,9 @@ class Conv1DResidualLayer(object):
             project_inputs=False,
             n_timesteps=None,
             n_input_features=None,
-            session=None
+            reuse=None,
+            session=None,
+            name=None
     ):
         self.session = get_session(session)
 
@@ -1996,6 +2445,8 @@ class Conv1DResidualLayer(object):
         self.project_inputs = project_inputs
         self.n_timesteps = n_timesteps
         self.n_input_features = n_input_features
+        self.reuse = reuse
+        self.name = name
 
         self.conv_1d_layers = None
         self.projection = None
@@ -2024,12 +2475,18 @@ class Conv1DResidualLayer(object):
                         else:
                             cur_strides = self.stride
 
+                        if self.name:
+                            name = self.name + '_i%d' % i
+                        else:
+                            name = None
+
                         l = tf.keras.layers.Conv1D(
                             out_dim,
                             self.kernel_size,
                             padding=self.padding,
                             strides=cur_strides,
-                            use_bias=self.use_bias
+                            use_bias=self.use_bias,
+                            name=name
                         )
 
                         if self.padding in ['causal', 'same'] and self.stride == 1:
@@ -2070,7 +2527,10 @@ class Conv1DResidualLayer(object):
                     F = self.conv_1d_layers[i](F)
 
                     if self.batch_normalization_decay:
-                        # F = tf.layers.batch_normalization(F, training=self.training)
+                        if self.name:
+                            name = self.name + '_i%d' % i
+                        else:
+                            name = None
                         F = tf.contrib.layers.batch_norm(
                             F,
                             decay=self.batch_normalization_decay,
@@ -2078,7 +2538,9 @@ class Conv1DResidualLayer(object):
                             scale=True,
                             zero_debias_moving_mean=True,
                             is_training=self.training,
-                            updates_collections=None
+                            updates_collections=None,
+                            reuse=self.reuse,
+                            scope=name
                         )
                     if self.activation_inner is not None:
                         F = self.activation_inner(F)
@@ -2086,7 +2548,10 @@ class Conv1DResidualLayer(object):
                 F = self.conv_1d_layers[-1](F)
 
                 if self.batch_normalization_decay:
-                    # F = tf.layers.batch_normalization(F, training=self.training)
+                    if self.name:
+                        name = self.name + '_i%d' % (self.layers_inner - 1)
+                    else:
+                        name = None
                     F = tf.contrib.layers.batch_norm(
                         F,
                         decay=self.batch_normalization_decay,
@@ -2094,7 +2559,9 @@ class Conv1DResidualLayer(object):
                         scale=True,
                         zero_debias_moving_mean=True,
                         is_training=self.training,
-                        updates_collections=None
+                        updates_collections=None,
+                        reuse=self.reuse,
+                        scope=name
                     )
 
                 if self.project_inputs:
@@ -2132,12 +2599,11 @@ class RNNLayer(object):
 
         self.training = training
         self.units = units
-        self.activation = activation
-        self.recurrent_activation = recurrent_activation
-        self.kernel_initializer = kernel_initializer
-        self.bias_initializer = bias_initializer
+        self.activation = get_activation(activation, session=self.session, training=self.training)
+        self.recurrent_activation = get_activation(recurrent_activation, session=self.session, training=self.training)
+        self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
+        self.bias_initializer = get_initializer(bias_initializer, session=self.session)
         self.refeed_outputs = refeed_outputs
-        assert not (return_sequences and batch_normalization_decay), 'batch_normalization_decay can only be used when return_sequences=False'
         self.return_sequences = return_sequences
         self.batch_normalization_decay = batch_normalization_decay
         self.name = name
@@ -2161,7 +2627,8 @@ class RNNLayer(object):
                         output_dim,
                         return_sequences=self.return_sequences,
                         activation=self.activation,
-                        recurrent_activation=self.recurrent_activation
+                        recurrent_activation=self.recurrent_activation,
+                        name=self.name
                     )
 
             self.built = True
@@ -2184,6 +2651,138 @@ class RNNLayer(object):
                         is_training=self.training,
                         updates_collections=None
                     )
+
+                return H
+
+
+class RNNResidualLayer(object):
+
+    def __init__(
+            self,
+            training=True,
+            units=None,
+            layers_inner=3,
+            activation=None,
+            activation_inner=None,
+            recurrent_activation='sigmoid',
+            kernel_initializer='glorot_uniform_initializer',
+            bias_initializer='zeros_initializer',
+            refeed_outputs=False,
+            return_sequences=True,
+            batch_normalization_decay=None,
+            project_inputs=False,
+            name=None,
+            session=None
+    ):
+        self.session = get_session(session)
+
+        self.training = training
+        self.units = units
+        self.layers_inner = layers_inner
+        self.activation = get_activation(activation, session=self.session, training=self.training)
+        self.activation_inner = get_activation(activation_inner, session=self.session, training=self.training)
+        self.recurrent_activation = get_activation(recurrent_activation, session=self.session, training=self.training)
+        self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
+        self.bias_initializer = get_initializer(bias_initializer, session=self.session)
+        self.refeed_outputs = refeed_outputs
+        self.return_sequences = return_sequences
+        self.batch_normalization_decay = batch_normalization_decay
+        self.project_inputs = project_inputs
+        self.name = name
+
+        self.rnn_layer = None
+
+        self.built = False
+
+    def build(self, inputs):
+        if not self.built:
+            with self.session.as_default():
+                with self.session.graph.as_default():
+                    RNN = tf.keras.layers.LSTM
+
+                    self.rnn_layers = []
+
+                    for i in range(self.layers_inner):
+                        if self.units:
+                            output_dim = self.units
+                        else:
+                            output_dim = inputs.shape[-1]
+
+                        if self.name:
+                            name = self.name + '_i%d' % i
+                        else:
+                            name = None
+
+                        rnn_layer = RNN(
+                            output_dim,
+                            return_sequences=self.return_sequences,
+                            activation=self.activation,
+                            recurrent_activation=self.recurrent_activation,
+                            name=name
+                        )
+
+                        self.rnn_layers.append(rnn_layer)
+
+                    if self.project_inputs:
+                        if self.name:
+                            name = self.name + '_projection'
+                        else:
+                            name = None
+
+                        self.projection = tf.layers.Dense(
+                            output_dim,
+                            name=name
+                        )
+
+                    self.built = True
+
+            self.built = True
+
+    def __call__(self, inputs, mask=None):
+        if not self.built:
+            self.build(inputs)
+
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                F = inputs
+                for i in range(self.layers_inner - 1):
+                    F = self.rnn_layers[i](F, mask=mask)
+
+                    if self.batch_normalization_decay:
+                        F = tf.contrib.layers.batch_norm(
+                            F,
+                            decay=self.batch_normalization_decay,
+                            center=True,
+                            scale=True,
+                            zero_debias_moving_mean=True,
+                            is_training=self.training,
+                            updates_collections=None
+                        )
+                    if self.activation_inner is not None:
+                        F = self.activation_inner(F)
+
+                F = self.rnn_layers[-1](F, mask=mask)
+
+                if self.batch_normalization_decay:
+                    F = tf.contrib.layers.batch_norm(
+                        F,
+                        decay=self.batch_normalization_decay,
+                        center=True,
+                        scale=True,
+                        zero_debias_moving_mean=True,
+                        is_training=self.training,
+                        updates_collections=None
+                    )
+
+                if self.project_inputs:
+                    x = self.projection(inputs)
+                else:
+                    x = inputs
+
+                H = F + x
+
+                if self.activation is not None:
+                    H = self.activation(H)
 
                 return H
 
@@ -2297,16 +2896,26 @@ def rnn_encoder(
         activation='tanh',
         recurrent_activation='sigmoid',
         batch_normalization_decay=None,
-        session=None
+        encoding_batch_normalization_decay=None,
+        session=None,
+        name=None
 ):
     session = get_session(session)
     n_layers = len(units_encoder)
     lambdas = []
     kwargs = {'mask': None}
 
+    if encoding_batch_normalization_decay is None:
+        encoding_batch_normalization_decay = batch_normalization_decay
+
     with session.as_default():
         with session.graph.as_default():
             if pre_cnn:
+                if name:
+                    name_cur = name + '_preCNN'
+                else:
+                    name_cur = name
+
                 cnn_layer = Conv1DLayer(
                     cnn_kernel_size,
                     training=training,
@@ -2314,12 +2923,18 @@ def rnn_encoder(
                     padding='same',
                     activation=tf.nn.elu,
                     batch_normalization_decay=batch_normalization_decay,
-                    session=session
+                    session=session,
+                    name=name_cur
                 )
-                lambdas.append(make_lambda(cnn_layer, session=None))
+                lambdas.append(make_lambda(cnn_layer, session=session))
 
 
             for l in range(n_layers):
+                if name:
+                    name_cur = name + '_l%d' % l
+                else:
+                    name_cur = name
+
                 if l < n_layers - 1:
                     activation = inner_activation
                     batch_normalization_decay_cur = None
@@ -2334,11 +2949,31 @@ def rnn_encoder(
                     recurrent_activation=recurrent_activation,
                     return_sequences=False,
                     batch_normalization_decay=batch_normalization_decay_cur,
-                    name='RNNEncoder%s' % l,
+                    name=name_cur,
                     session=session
                 )
 
-                lambdas.append(make_lambda(rnn_layer, session=None, use_kwargs=True))
+                lambdas.append(make_lambda(rnn_layer, session=session, use_kwargs=True))
+
+            if encoding_batch_normalization_decay:
+                if name:
+                    name_cur = name + '_BN_l%d' % n_layers
+                else:
+                    name_cur = name
+
+                def bn(x):
+                    return tf.contrib.layers.batch_norm(
+                        x,
+                        decay=encoding_batch_normalization_decay,
+                        center=True,
+                        scale=True,
+                        zero_debias_moving_mean=True,
+                        is_training=training,
+                        updates_collections=None,
+                        name=name_cur
+                    )
+
+                lambdas.append(make_lambda(bn, session=session))
 
             out = compose_lambdas(lambdas, **kwargs)
 
@@ -2346,7 +2981,6 @@ def rnn_encoder(
 
 
 def cnn_encoder(
-        n_feats_in,
         kernel_size,
         units_encoder,
         training=True,
@@ -2354,30 +2988,25 @@ def cnn_encoder(
         activation='tanh',
         resnet_n_layers_inner=None,
         batch_normalization_decay=None,
-        session=None
+        encoding_batch_normalization_decay=None,
+        session=None,
+        name=None
 ):
     session = get_session(session)
     n_layers = len(units_encoder)
     lambdas = []
     kwargs = {'mask': None} # The mask param isn't used. It's just included to permit a unified encoder interface.
 
+    if encoding_batch_normalization_decay is None:
+        encoding_batch_normalization_decay = batch_normalization_decay
+
     with session.as_default():
         with session.graph.as_default():
-            cnn_layer = Conv1DLayer(
-                kernel_size,
-                training=training,
-                n_filters=n_feats_in,
-                padding='same',
-                activation=tf.nn.elu,
-                batch_normalization_decay=batch_normalization_decay,
-                session=session
-            )
-
-            def apply_cnn_layer(x, **kwargs):
-                return cnn_layer(x)
-            lambdas.append(apply_cnn_layer)
-
             for i in range(n_layers - 1):
+                if name:
+                    name_cur = name + '_l%d' % i
+                else:
+                    name_cur = name
                 if i > 0 and resnet_n_layers_inner:
                     cnn_layer = Conv1DResidualLayer(
                         kernel_size,
@@ -2388,7 +3017,8 @@ def cnn_encoder(
                         activation=inner_activation,
                         activation_inner=inner_activation,
                         batch_normalization_decay=batch_normalization_decay,
-                        session=session
+                        session=session,
+                        name=name_cur
                     )
                 else:
                     cnn_layer = Conv1DLayer(
@@ -2398,7 +3028,8 @@ def cnn_encoder(
                         padding='causal',
                         activation=inner_activation,
                         batch_normalization_decay=batch_normalization_decay,
-                        session=session
+                        session=session,
+                        name=name_cur
                     )
 
                 def apply_cnn_layer(x, **kwargs):
@@ -2406,16 +3037,21 @@ def cnn_encoder(
                 lambdas.append(apply_cnn_layer)
 
             flattener = tf.layers.Flatten()
-            lambdas.append(make_lambda(flattener, session=None))
+            lambdas.append(make_lambda(flattener, session=session))
 
+            if name:
+                name_cur = name + '_FC'
+            else:
+                name_cur = name
             fully_connected_layer = DenseLayer(
                 training=training,
                 units=units_encoder[-1],
                 activation=activation,
-                batch_normalization_decay=batch_normalization_decay,
-                session=session
+                batch_normalization_decay=encoding_batch_normalization_decay,
+                session=session,
+                name=name_cur
             )
-            lambdas.append(make_lambda(fully_connected_layer, session=None))
+            lambdas.append(make_lambda(fully_connected_layer, session=session))
 
             out = compose_lambdas(lambdas, **kwargs)
 
@@ -2430,19 +3066,29 @@ def dense_encoder(
         activation='tanh',
         resnet_n_layers_inner=None,
         batch_normalization_decay=None,
-        session=None
+        encoding_batch_normalization_decay=None,
+        session=None,
+        name=None
 ):
     session = get_session(session)
     n_layers = len(units_encoder)
     lambdas = []
     kwargs = {'mask': None}  # The mask param isn't used. It's just included to permit a unified encoder interface.
 
+    if encoding_batch_normalization_decay is None:
+        encoding_batch_normalization_decay = batch_normalization_decay
+
     with session.as_default():
         with session.graph.as_default():
             flattener = tf.layers.Flatten()
-            lambdas.append(make_lambda(flattener, session=None))
+            lambdas.append(make_lambda(flattener, session=session))
 
             for i in range(n_layers - 1):
+                if name:
+                    name_cur = name + '_l%d' % i
+                else:
+                    name_cur = name
+
                 if i > 0 and resnet_n_layers_inner:
                     if units_encoder[i] != units_encoder[i - 1]:
                         project_inputs = True
@@ -2457,7 +3103,8 @@ def dense_encoder(
                         activation=inner_activation,
                         project_inputs=project_inputs,
                         batch_normalization_decay=batch_normalization_decay,
-                        session=session
+                        session=session,
+                        name=name_cur
                     )
                 else:
                     dense_layer = DenseLayer(
@@ -2465,131 +3112,259 @@ def dense_encoder(
                         units=n_timesteps * units_encoder[i],
                         activation=inner_activation,
                         batch_normalization_decay=batch_normalization_decay,
-                        session=session
+                        session=session,
+                        name=name_cur
                     )
 
-                lambdas.append(make_lambda(dense_layer, session=None))
+                lambdas.append(make_lambda(dense_layer, session=session))
+
+
+            if name:
+                name_cur = name + '_l%d' % n_layers
+            else:
+                name_cur = name
 
             dense_layer = DenseLayer(
                 training=training,
                 units=units_encoder[-1],
                 activation=activation,
-                batch_normalization_decay=batch_normalization_decay,
-                session=session
+                batch_normalization_decay=encoding_batch_normalization_decay,
+                session=session,
+                name=name_cur
             )
 
-            lambdas.append(make_lambda(dense_layer, session=None))
+            lambdas.append(make_lambda(dense_layer, session=session))
 
             out = compose_lambdas(lambdas, **kwargs)
 
             return out
 
 
-def rnn_decoder(
-        input_shape,
-        units_decoder,
+def preprocess_decoder_inputs(
+        decoder_in,
         n_timesteps,
+        units_decoder,
         training=True,
-        add_timestep_indices=False,
-        inner_activation='tanh',
-        recurrent_activation='tanh',
-        activation='tanh',
-        batch_normalization_decay=None,
-        session=None
+        decoder_hidden_state_expansion_type='tile',
+        decoder_temporal_encoding_type='periodic',
+        decoder_temporal_encoding_as_mask=False,
+        decoder_temporal_encoding_units=32,
+        decoder_temporal_encoding_transform=None,
+        decoder_inner_activation=None,
+        decoder_temporal_encoding_activation=None,
+        decoder_batch_normalization_decay=None,
+        decoder_conv_kernel_size=3,
+        frame_dim=None,
+        step=None,
+        mask=None,
+        n_pretrain_steps=0,
+        name=None,
+        session=None,
+        float_type='float32'
 ):
+    assert step is not None or not n_pretrain_steps, 'step must be provided when n_pretrain_steps is specified.'
+    assert len(decoder_in.shape) <= 3 or frame_dim is not None, 'frame_dim must be provided when the input rank is > 3.'
     session = get_session(session)
-    n_layers = len(units_decoder)
-    lambdas = []
-    kwargs = {'mask': None}
-
     with session.as_default():
         with session.graph.as_default():
-            tile_dims = [1] * (len(input_shape) + 1)
-            tile_dims[-2] = n_timesteps
+            out = decoder_in
 
-            def make_input_layer(tile_dims, n_timesteps, add_timestep_indices):
-                if add_timestep_indices:
-                    def input_layer(x, mask=None):
-                        out = tf.tile(
-                            x[..., None, :],
-                            tile_dims
-                        )
+            if isinstance(float_type, str):
+                FLOAT_TF = getattr(tf, float_type)
+            else:
+                FLOAT_TF = float_type
 
-                        time_ix = tf.range(n_timesteps)
-                        time_ix_tile_dims = [1, 1]
-                        i = -3
-                        while len(time_ix.shape) < len(out.shape):
-                            time_ix = time_ix[None, :]
-                            time_ix_tile_dims.append(tf.shape(out)[i])
-                            i -= 1
-
-                        time_feat = tf.one_hot(time_ix, n_timesteps)
-                        time_feat = tf.tile(
-                            time_feat,
-                            time_ix_tile_dims
-                        )
-
-                        out = tf.concat(
-                            [out, time_feat],
-                            axis=-1
-                        )
-
-                        if mask is not None:
-                            out *= mask
+            # Damp gradients to the encoder for decoder "pretraining", if used
+            if n_pretrain_steps > 0:
+                def make_decoder_in_rescaled_gradient(decoder):
+                    def decoder_in_rescaled_gradient():
+                        steps = tf.cast(n_pretrain_steps, dtype=FLOAT_TF)
+                        step_tf = tf.cast(step, dtype=FLOAT_TF)
+                        scale = 1 - (steps - step_tf) / steps
+                        g = decoder * scale
+                        out = g + tf.stop_gradient(decoder - g)
 
                         return out
 
-                    return input_layer
+                    return decoder_in_rescaled_gradient
+
+                out = tf.cond(
+                    step >= n_pretrain_steps,
+                    lambda: out,
+                    make_decoder_in_rescaled_gradient(out)
+                )
+
+            # If more than 1 batch dim, flatten out batch dims
+            if len(out.shape) > 3:
+                flatten_batch = True
+                cur_shape = tf.shape(out)
+                batch_leading_dims = cur_shape[:-2]
+                final_shape = tf.concat([batch_leading_dims, [n_timesteps, frame_dim]], axis=0)
+                flattened_batch_shape = tf.concat(
+                    [[tf.reduce_prod(batch_leading_dims)], tf.shape(out)[-2:]],
+                    axis=0
+                )
+                if decoder_temporal_encoding_type:
+                    if decoder_temporal_encoding_as_mask:
+                        units = out.shape[-1]
+                    else:
+                        units = decoder_temporal_encoding_units
+                    final_shape_temporal_encoding = tf.concat([batch_leading_dims, [n_timesteps, units]], axis=0)
+                out = tf.reshape(out, flattened_batch_shape)
+            else:
+                final_shape = None
+                final_shape_temporal_encoding = None
+                flatten_batch = False
+
+            # Expand out encoder hidden state into time series, either through tiling or reshaped dense transformation
+            if decoder_hidden_state_expansion_type.lower() == 'tile':
+                tile_dims = [1] * (len(out.shape) + 1)
+                tile_dims[-2] = n_timesteps
+
+                out = tf.tile(
+                    out[..., None, :],
+                    tile_dims
+                )
+            elif decoder_hidden_state_expansion_type.lower() == 'dense':
+                if name:
+                    name_cur = name + '_dense_expansion'
+                else:
+                    name_cur = name
+                out = DenseLayer(
+                    training=training,
+                    units=n_timesteps * units_decoder[0],
+                    activation=decoder_inner_activation,
+                    batch_normalization_decay=decoder_batch_normalization_decay,
+                    session=session,
+                    name=name_cur
+                )(out)
+
+                decoder_shape = tf.concat([tf.shape(out)[:-1], [n_timesteps, units_decoder[0]]], axis=0)
+                out = tf.reshape(out, decoder_shape)
+            else:
+                raise ValueError(
+                    'Unrecognized decoder hidden state expansion type "%s".' % decoder_hidden_state_expansion_type)
+
+            # Mask time series if needed
+            if mask is not None:
+                out *= mask[..., None]
+
+            # Create a representation of time to supply to decoder
+            if decoder_temporal_encoding_type:
+                if decoder_temporal_encoding_transform or not decoder_temporal_encoding_as_mask:
+                    temporal_encoding_units = decoder_temporal_encoding_units
+                else:
+                    temporal_encoding_units = out.shape[-1]
+
+                # Create a trainable matrix of weights by timestep
+                if decoder_temporal_encoding_type.lower() == 'weights':
+                    temporal_encoding = tf.get_variable(
+                        'decoder_time_encoding_src_%s' % name,
+                        shape=[1, n_timesteps, temporal_encoding_units],
+                        initializer=tf.initializers.random_normal,
+                    )
+                    temporal_encoding = tf.tile(temporal_encoding, [tf.shape(decoder_in)[0], 1, 1])
+
+                # Create a set of periodic functions with trainable phase and frequency
+                elif decoder_temporal_encoding_type.lower() == 'periodic':
+                    time = tf.range(1., n_timesteps + 1., dtype=FLOAT_TF)[None, ..., None]
+                    frequency_logits = tf.linspace(
+                        -2.,
+                        2.,
+                        temporal_encoding_units
+                    )
+                    # frequency_logits = tf.get_variable(
+                    #     'frequency_logits_%s' % name,
+                    #     initializer=frequency_logits
+                    # )
+                    # phase = tf.get_variable(
+                    #     'phase_%s' % name,
+                    #     initializer=tf.initializers.random_normal,
+                    #     shape=[temporal_encoding_units]
+                    # )[None, None, ...]
+                    # gain = tf.get_variable(
+                    #     'gain_%s' % name,
+                    #     initializer=tf.glorot_uniform_initializer(),
+                    #     shape=[temporal_encoding_units]
+                    # )[None, None, ...]
+                    frequency = tf.exp(frequency_logits)[None, None, ...]
+                    # temporal_encoding = tf.sin(time * frequency + phase) * gain
+                    temporal_encoding = tf.sin(time * frequency)
 
                 else:
-                    def input_layer(x, mask=None):
-                        out = tf.tile(
-                            x[..., None, :],
-                            tile_dims
-                        )
+                    raise ValueError(
+                        'Unrecognized decoder temporal encoding type "%s".' % self.decoder_temporal_encoding_type)
 
-                        if mask is not None:
-                            out *= mask
+                # Transform the temporal encoding
+                if decoder_temporal_encoding_transform:
+                    if decoder_temporal_encoding_as_mask:
+                        units = out.shape[-1]
+                    else:
+                        units = decoder_temporal_encoding_units
 
-                        return out
+                    if name:
+                        name_cur = name + '_temporal_encoding_transform'
+                    else:
+                        name_cur = name
 
-                    return input_layer
+                    # RNN transform
+                    if decoder_temporal_encoding_transform.lower() == 'rnn':
+                        temporal_encoding = RNNLayer(
+                            training=training,
+                            units=units,
+                            activation=tf.tanh,
+                            recurrent_activation=tf.sigmoid,
+                            return_sequences=True,
+                            name=name_cur,
+                            session=session
+                        )(temporal_encoding)
 
-            tiling_layer = make_input_layer(tile_dims, n_timesteps, add_timestep_indices)
-            lambdas.append(make_lambda(tiling_layer, session=None, use_kwargs=True))
+                    # CNN transform (1D)
+                    elif decoder_temporal_encoding_transform.lower() == 'cnn':
+                        temporal_encoding = Conv1DLayer(
+                            decoder_conv_kernel_size,
+                            training=training,
+                            n_filters=units,
+                            padding='same',
+                            activation=decoder_inner_activation,
+                            batch_normalization_decay=decoder_batch_normalization_decay,
+                            name=name_cur,
+                            session=session
+                        )(temporal_encoding)
 
-            multi_rnn_layer = MultiRNNLayer(
-                units=units_decoder,
-                layers=n_layers,
-                activation=inner_activation,
-                inner_activation=inner_activation,
-                recurrent_activation=recurrent_activation,
-                refeed_outputs=True,
-                return_sequences=True,
-                name='RNNDecoder',
-                session=session
-            )
+                    # Dense transform
+                    elif decoder_temporal_encoding_transform.lower() == 'dense':
+                        temporal_encoding = DenseLayer(
+                            training=training,
+                            units=units,
+                            activation=decoder_inner_activation,
+                            batch_normalization_decay=decoder_batch_normalization_decay,
+                            name=name_cur,
+                            session=session
+                        )(temporal_encoding)
 
-            lambdas.append(make_lambda(multi_rnn_layer, session=None, use_kwargs=True))
+                    else:
+                        raise ValueError(
+                            'Unrecognized decoder temporal encoding transform "%s".' % decoder_temporal_encoding_transform)
 
-            decoder = DenseLayer(
-                training=training,
-                units=units_decoder[-1],
-                activation=activation,
-                batch_normalization_decay=batch_normalization_decay,
-                session=session
-            )
+                # Apply activation function
+                if decoder_temporal_encoding_activation:
+                    activation = get_activation(
+                        decoder_temporal_encoding_activation,
+                        session=session,
+                        training=training
+                    )
+                    temporal_encoding = activation(temporal_encoding)
 
-            def final_decoder_layer(x, mask=None):
-                out = decoder(x)
-                if mask is not None:
-                    out *= mask
-                return out
+                # Apply temporal encoding, either as mask or as extra features
+                if decoder_temporal_encoding_as_mask:
+                    temporal_encoding = tf.sigmoid(temporal_encoding)
+                    out = out * temporal_encoding
+                else:
+                    temporal_encoding = tf.tile(temporal_encoding, [tf.shape(out)[0], 1, 1])
+                    out = tf.concat([out, temporal_encoding], axis=-1)
 
-            lambdas.append(make_lambda(final_decoder_layer, session=None, use_kwargs=True))
+                return out, temporal_encoding, flatten_batch, final_shape, final_shape_temporal_encoding
 
-            out = compose_lambdas(lambdas, **kwargs)
-
-            return out
 
 
