@@ -340,7 +340,7 @@ def plot_label_heatmap(labels, preds, title=None, label_map=None, cmap='Blues', 
 
     plt.close(fig)
 
-def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
+def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cmap='Blues', dir='./', prefix='', suffix='.png', dump_data=True):
     if label_map is not None:
         label_map = dict(zip(label_map.source,label_map.target))
 
@@ -376,6 +376,9 @@ def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cm
         cm.savefig(dir + '/' + prefix + 'binary_unit_heatmap' + suffix)
     except:
         sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
+
+    if dump_data:
+        df.to_csv(dir + '/' + prefix + 'binary_unit_heatmap_data.csv')
 
     plt.close('all')
 

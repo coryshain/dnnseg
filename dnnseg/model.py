@@ -2279,21 +2279,21 @@ class AcousticEncoderDecoder(object):
                     minibatch_size = 1
                     n_minibatch = n_train
 
-                # if self.task == 'streaming_autoencoder':
-                #     eval_dict = {}
-                # else:
-                #     eval_dict = self.run_evaluation(
-                #         cv_data if cv_data is not None else train_data,
-                #         X_cv=X_cv,
-                #         X_mask_cv=X_mask_cv,
-                #         y_cv=y_cv,
-                #         y_mask_cv=y_mask_cv,
-                #         ix2label=ix2label,
-                #         y_means_cv=None if y_means_cv is None else y_means_cv,
-                #         segtype=self.segtype,
-                #         plot=True,
-                #         verbose=verbose
-                #     )
+                if self.task == 'streaming_autoencoder':
+                    eval_dict = {}
+                else:
+                    eval_dict = self.run_evaluation(
+                        cv_data if cv_data is not None else train_data,
+                        X_cv=X_cv,
+                        X_mask_cv=X_mask_cv,
+                        y_cv=y_cv,
+                        y_mask_cv=y_mask_cv,
+                        ix2label=ix2label,
+                        y_means_cv=None if y_means_cv is None else y_means_cv,
+                        segtype=self.segtype,
+                        plot=True,
+                        verbose=verbose
+                    )
 
                 while self.global_step.eval(session=self.sess) < n_iter:
                     if self.task == 'streaming_autoencoder':
