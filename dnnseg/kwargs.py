@@ -162,6 +162,31 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Append a **speaker_emb_dim** dimensional embedding of the speaker ID to each acoustic frame and to the utterance embedding. If ``None`` or ``0``, no speaker embedding used."
     ),
     Kwarg(
+        'revnet_n_layers',
+        None,
+        [int, None],
+        "Number of layers in RevNet projection of spectral features. If ``None``, no RevNet projection."
+    ),
+    Kwarg(
+        'revnet_n_layers_inner',
+        1,
+        int,
+        "Number of internal layers in each block of RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``."
+    ),
+    Kwarg(
+        'revnet_activation',
+        'tanh',
+        str,
+        "Activation function to use in RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``."
+    ),
+    Kwarg(
+        'revnet_batch_normalization_decay',
+        None,
+        [float, None],
+        "Decay rate to use for batch normalization in RevNet projection of spectral features. If ``None``, no batch normalization. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['batch_normalization_decay']
+    ),
+    Kwarg(
         'utt_len_emb_dim',
         None,
         [int, None],
@@ -175,9 +200,9 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'binary_classifier',
-        False,
+        True,
         bool,
-        "Implement the classifier as a binary code in which categories can share bits. If ``False``, implements the classifier using independent categories. Ignored unless **task** is ``classifer``."
+        "Implement the classifier as a binary code in which categories can share bits. If ``False``, implements the classifier using independent categories."
     ),
     Kwarg(
         'emb_dim',
@@ -418,6 +443,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Keep learning rate flat between ``lr_decay_steps`` (ignored if ``lr_decay_family==None``)."
     ),
     Kwarg(
+        'n_samples',
+        1,
+        int,
+        "Number of samples to take per training point. Do not set to > 1 unless model contains stochastic decisions (e.g. Bernoulli-distributed binary stochastic neurons)."
+    ),
+    Kwarg(
         'ema_decay',
         None,
         [float, None],
@@ -540,6 +571,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['conv_kernel_size']
     ),
     Kwarg(
+        'encoder_bptt',
+        True,
+        bool,
+        "Backpropagate error through time in the HM-LSTM encoder. Ignored if **task** is ``classifier``.",
+    ),
+    Kwarg(
         'hmlstm_kernel_depth',
         2,
         int,
@@ -599,6 +636,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [str, None],
         "Discretization function to apply to encoder hidden states, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
+    ),
+    Kwarg(
+        'encoder_discretize_state_at_boundary',
+        False,
+        bool,
+        "Discretize state at boundary only. Otherwise, encoder state is fully discretized. Ignored if **encoder_state_discretizer** is ``None``."
     ),
     Kwarg(
         'encoder_state_noise_sd',
@@ -850,6 +893,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of encoder language modeling objective in the loss function. If ``None`` or 0, no language modeling objective is used."
     ),
     Kwarg(
+        'lm_order_fwd',
+        1,
+        int,
+        "Order of forward language model (number of timesteps to predict)."
+    ),
+    Kwarg(
+        'lm_order_bwd',
+        0,
+        int,
+        "Order of backward language model (number of timesteps to predict)."
+    ),
+    Kwarg(
         'segment_encoding_correspondence_regularizer_scale',
         None,
         [float, None],
@@ -926,8 +981,8 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'boundary_prob_discretization_threshold',
-        0.,
-        float,
+        None,
+        [float, None],
         'Minimum value that boundary probabilities must exceed in order to be eligible candidates for a discrete segmentation boundary. Has no effect unless **segment_at_peaks** is ``True``.'
     ),
     Kwarg(
@@ -961,12 +1016,6 @@ UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS = [
         'KLqp',
         str,
         "Name of Edward inference to use. Currently, only variational inferences supported."
-    ),
-    Kwarg(
-        'n_samples',
-        2,
-        int,
-        "Number of samples to draw during inference."
     ),
     Kwarg(
         'n_iter',

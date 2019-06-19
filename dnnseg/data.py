@@ -20,12 +20,12 @@ def binary_to_integer_np(b, int_type='int32'):
     while len(base2.shape) < len(b.shape):
         base2 = np.expand_dims(base2, 0)
 
-    return (b.astype(np_int_type) * base2).sum(axis=-1)
+    return (b * base2).sum(axis=-1, dtype=np_int_type)
 
 
 def binary_to_string_np(b):
     b_str = np.char.mod('%d', b.astype('int'))
-    string = list(map(''.join, b_str))
+    string = np.array(list(map(''.join, b_str)))
 
     return string
 
@@ -180,30 +180,28 @@ def extract_states_at_timestamps(
         discretize=True,
         as_categories=True
 ):
-    assert activation in ['sigmoid', 'softmax', 'tanh', 'linear', None]
-    assert not (activation in ['linear', None] and discretize), "States with linear activation can't be discretized."
-
     ix = np.minimum(np.floor(timestamps * steps_per_second), len(states) - 1).astype('int')
     out = states[ix]
 
     if discretize:
-        if activation in ['sigmoid', 'tanh']:
-            if activation == 'tanh':
-                out = (out + 1) / 2
-            out = np.rint(out).astype('int')
-
-            if as_categories and out.shape[-1] <= 16:
-                out = binary_to_integer_np(out)
-            else:
-                out = binary_to_string_np(out)
-
-        elif activation == 'softmax':
+        if activation == 'softmax':
             if as_categories:
                 out = np.argmax(out, axis=-1)
             else:
                 one_hot = np.zeros_like(out)
                 one_hot[np.argmax(out, axis=-1)[..., None]] = 1
                 out = one_hot.astype('int')
+        else:
+            if activation == 'sigmoid':
+                threshold = 0.5
+            else:
+                threshold = 0.0
+            out = (out > threshold).astype('int')
+
+            if as_categories and out.shape[-1] <= 16:
+                out = binary_to_integer_np(out)
+            else:
+                out = binary_to_string_np(out)
 
     return out
 
@@ -724,43 +722,78 @@ def score_text_segmentation(true, pred):
     return out
 
 
-def compute_unsupervised_classification_targets(true, pred):
-    true_src = true
-    true = np.array(true[['start','end','label']])
-    pred = np.array(pred[['start','end','label']])
+def compute_unsupervised_classification_targets(true, preds, use_gold_segs=True, method='concatenate'):
+    if use_gold_segs:
+        a = preds
+        b = true
+    else:
+        a = true
+        b = preds
+
+    b_src = b
+    a = np.array(a[['start', 'end', 'label']])
+    b = np.array(b[['start', 'end', 'label']])
 
     i = 0
     j = 0
 
-    true_labels = []
+    aligned_labels = []
     candidates = []
 
-    while i < len(true) and j < len(pred):
+    while j < len(b):
+        s_a, e_a, l_a = a[i]
+        s_b, e_b, l_b = b[j]
 
-        s_t, e_t, l_t = true[i]
-        s_p, e_p, l_p = pred[j]
+        # Handle degeneracy where end precedes start
+        e_a = max(s_a, e_a)
+        e_b = max(s_b, e_b)
 
-        inside_l = s_t >= s_p and s_t < e_p
-        inside_r = e_t > s_p and e_t <= e_p
-        inside = inside_l or inside_r
-
-        if inside:
-            overlap = min(e_t, e_p) - max(s_t, s_p)
-            candidates.append((overlap, l_t))
+        if s_a < e_b and e_a > s_b:
+            overlap = min(e_a, e_b) - max(s_a, s_b)
+            length = e_a - s_a
+            candidates.append((overlap, length, str(l_a)))
+        if (e_a + 1e-8) < e_b: # Add epsilon to prevent spurious shifts due to roundoff errors
             i += 1
         else:
-            assert len(candidates) > 0, 'Position %d has no label candidates and no overlapping true segments' % j
-            winner = max(candidates, key = lambda x: x[0])[1]
-            true_labels.append(winner)
+            assert len(candidates) > 0, 'Position %d has no label candidates' % j
+
+            if method.lower() == 'max':
+                label = max(candidates, key = lambda x: x[0])[2]
+            elif method.lower() == 'concatenate':
+                if len(candidates) > 2:
+                    label = [x[2] for x in candidates if x[0] > (x[1] / 2)]
+                elif len(candidates) == 2:
+                    left_in = candidates[0][0] > (candidates[0][1] / 2)
+                    right_in = candidates[1][0] > (candidates[1][1] / 2)
+                    if left_in and right_in:
+                        label = [x[2] for x in candidates]
+                    elif left_in or candidates[0][0] > candidates[1][0]:
+                        label = [candidates[0][2]]
+                    else: # right_in or candidates[1][0] >= candidates[0][0]
+                        label = [candidates[1][2]]
+                else: # len(candidates) == 1
+                    label = [candidates[0][2]]
+                # if use_gold_segs:
+                #     label_tmp = []
+                #     for x in label:
+                #         if len(label_tmp) == 0 or x != label_tmp[-1]:
+                #             label_tmp.append(x)
+                #     label = label_tmp
+
+                label = ''.join(label)
+            else:
+                raise ValueError('Unrecognized value for argument ``method``: %s' % method)
+
+            aligned_labels.append(label)
             candidates = []
             j += 1
 
-    assert len(candidates) > 0, 'Position %d has no label candidates and no overlapping true segments' % j
-    winner = max(candidates, key=lambda x: x[0])[1]
-    true_labels.append(winner)
-
-    out = true_src.copy()
-    out.label = true_labels
+    out = b_src.copy()
+    if use_gold_segs:
+        out['gold_label'] = out.label
+        out.label = aligned_labels
+    else:
+        out['gold_label'] = aligned_labels
 
     return out
 
@@ -1110,6 +1143,7 @@ class Dataset(object):
             predict_deltas=False,
             oracle_boundaries=None
     ):
+        assert reduction_axis.lower() != 'freq', 'Reduction axis %s not supported for utterance mode.' % reduction_axis
         X, X_mask, file_ix = self.inputs(
             segments=segments,
             padding=input_padding,
@@ -1145,13 +1179,16 @@ class Dataset(object):
         else:
             oracle_boundaries = None
 
+        mins = []
         means = []
         ranges = []
         sds = []
         for i, ix in enumerate(file_ix):
+            mins.append(self.data[self.fileIDs[ix]].min(reduction_axis))
             means.append(self.data[self.fileIDs[ix]].mean(reduction_axis))
             ranges.append(self.data[self.fileIDs[ix]].range(reduction_axis))
             sds.append(self.data[self.fileIDs[ix]].sd(reduction_axis))
+        mins = np.stack(mins, axis=0)
         means = np.stack(means, axis=0)
         ranges = np.ranges(sds, axis=0)
         sds = np.stack(sds, axis=0)
@@ -1164,6 +1201,7 @@ class Dataset(object):
             'y': y,
             'y_mask': y_mask,
             'file_ix': file_ix,
+            'mins': mins,
             'means': means,
             'ranges': ranges,
             'sds': sds,
@@ -1237,31 +1275,80 @@ class Dataset(object):
             feats_targets = pad_sequence(feats_targets, padding='post')
 
         file_ix = []
-        means = []
-        ranges = []
-        sds = []
         time_ix = []
 
         n_feats = feats_targets.shape[-1]
 
         for i, l in enumerate(file_lengths):
             file_ix_cur = np.ones(l, dtype='int') * i
-            means_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].mean(reduction_axis)[None, ...]
-            ranges_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].range(reduction_axis)[None, ...]
-            sds_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].sd(reduction_axis)[None, ...]
             time_ix_cur = np.arange(left_pad, left_pad + l)
 
             file_ix.append(file_ix_cur)
-            means.append(means_cur)
-            ranges.append(ranges_cur)
-            sds.append(sds_cur)
             time_ix.append(time_ix_cur)
 
         file_ix = np.concatenate(file_ix, axis=0)
-        means = np.concatenate(means, axis=0)
-        ranges = np.concatenate(ranges, axis=0)
-        sds = np.concatenate(sds, axis=0)
         time_ix = np.concatenate(time_ix, axis=0)
+
+        if reduction_axis.lower() in ['time', 'both']:
+            mins = []
+            means = []
+            ranges = []
+            sds = []
+            for i, l in enumerate(file_lengths):
+                mins_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].min(reduction_axis)[None, ...]
+                means_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].mean(reduction_axis)[None, ...]
+                ranges_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].range(reduction_axis)[None, ...]
+                sds_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].sd(reduction_axis)[None, ...]
+
+                mins.append(mins_cur)
+                means.append(means_cur)
+                ranges.append(ranges_cur)
+                sds.append(sds_cur)
+
+            mins = np.concatenate(mins, axis=0)
+            means = np.concatenate(means, axis=0)
+            ranges = np.concatenate(ranges, axis=0)
+            sds = np.concatenate(sds, axis=0)
+        elif reduction_axis.lower() == 'freq':
+            mins = {}
+            means = {}
+            ranges = {}
+            sds = {}
+            for f in self.fileIDs:
+                mins[f] = self.data[f].min(reduction_axis)
+                means[f] = self.data[f].mean(reduction_axis)
+                ranges[f] = self.data[f].range(reduction_axis)
+                sds[f] = self.data[f].sd(reduction_axis)
+            mins, _, _ = self.features(
+                features=mins,
+                mask=mask,
+                pad_left=left_pad,
+                pad_right=right_pad
+            )
+            means, _, _ = self.features(
+                features=means,
+                mask=mask,
+                pad_left=left_pad,
+                pad_right=right_pad
+            )
+            ranges, _, _ = self.features(
+                features=ranges,
+                mask=mask,
+                pad_left=left_pad,
+                pad_right=right_pad
+            )
+            sds, _, _ = self.features(
+                features=sds,
+                mask=mask,
+                pad_left=left_pad,
+                pad_right=right_pad
+            )
+            mins = pad_sequence([x[0] for x in mins], padding='post')
+            means = pad_sequence([x[0] for x in means], padding='post')
+            ranges = pad_sequence([x[0] for x in ranges], padding='post', value=1.)
+            sds = pad_sequence([x[0] for x in sds], padding='post', value=1.)
+        else:
+            raise ValueError('Unrecognized reduction axis %s' % reduction_axis)
 
         speaker = []
         for f in self.fileIDs:
@@ -1300,6 +1387,8 @@ class Dataset(object):
             'feats_targets': feats_targets,
             'boundaries': boundaries,
             'file_ix': file_ix,
+            'reduction_axis': reduction_axis,
+            'mins': mins,
             'means': means,
             'ranges': ranges,
             'sds': sds,
@@ -1339,12 +1428,14 @@ class Dataset(object):
 
         speaker = []
         file_ix = []
+        mins = []
         means = []
         ranges = []
         sds = []
         for i, f in enumerate(self.fileIDs):
             speaker.append(self.data[f].speaker)
             file_ix.append(i)
+            mins.append(self.data[f].min(reduction_axis))
             means.append(self.data[f].mean(reduction_axis))
             ranges.append(self.data[f].range(reduction_axis))
             sds.append(self.data[f].sd(reduction_axis))
@@ -1383,6 +1474,7 @@ class Dataset(object):
             'oracle_boundaries': oracle_boundaries,
             'fixed_boundaries': boundaries,
             'file_ix': file_ix,
+            'mins': mins,
             'means': means,
             'ranges': ranges,
             'sds': sds,
@@ -1437,6 +1529,7 @@ class Dataset(object):
         y = self.cache[name]['y']
         y_mask = self.cache[name]['y_mask']
         file_ix = self.cache[name]['file_ix']
+        mins = self.cache[name]['mins']
         means = self.cache[name]['means']
         ranges = self.cache[name]['ranges']
         sds = self.cache[name]['sds']
@@ -1452,6 +1545,7 @@ class Dataset(object):
                 'y': y[indices],
                 'y_mask': y_mask[indices],
                 'file_ix': file_ix[indices],
+                'mins': mins[indices],
                 'means': means[indices],
                 'ranges': ranges[indices],
                 'sds': sds[indices],
@@ -1475,6 +1569,8 @@ class Dataset(object):
         feats_targets = self.cache[name]['feats_targets']
         fixed_boundaries = self.cache[name]['boundaries']
         file_ix = self.cache[name]['file_ix']
+        reduction_axis = self.cache[name]['reduction_axis']
+        mins = self.cache[name]['mins']
         means = self.cache[name]['means']
         ranges = self.cache[name]['ranges']
         sds = self.cache[name]['sds']
@@ -1499,9 +1595,6 @@ class Dataset(object):
 
             file_ix_cur = file_ix[indices]
             time_ix_cur = time_ix[indices]
-            means_cur = means[indices]
-            ranges_cur = ranges[indices]
-            sds_cur = sds[indices]
 
             history_ix, bwd_context_ix, fwd_context_ix = self.get_streaming_indices(
                 time_ix_cur,
@@ -1511,6 +1604,19 @@ class Dataset(object):
             )
 
             X_cur = feats_inputs[file_ix_cur[..., None], history_ix]
+
+            if reduction_axis.lower() in ['time', 'both']:
+                mins_cur = mins[indices]
+                means_cur = means[indices]
+                ranges_cur = ranges[indices]
+                sds_cur = sds[indices]
+            elif reduction_axis.lower() == 'freq':
+                mins_cur = mins[file_ix_cur[..., None], history_ix]
+                means_cur = means[file_ix_cur[..., None], history_ix]
+                ranges_cur = ranges[file_ix_cur[..., None], history_ix]
+                sds_cur = sds[file_ix_cur[..., None], history_ix]
+            else:
+                raise ValueError('Unrecognized reduction axis %s' % reduction_axis)
 
             if self.datatype == 'acoustic':
                 if predict_deltas:
@@ -1549,6 +1655,7 @@ class Dataset(object):
                 'y_fwd': y_fwd_cur,
                 'y_fwd_mask': y_fwd_mask_cur,
                 'file_ix': file_ix_cur,
+                'mins': mins_cur,
                 'means': means_cur,
                 'ranges': ranges_cur,
                 'sds': sds_cur,
@@ -1568,6 +1675,7 @@ class Dataset(object):
         feats = self.cache[name]['feats']
         fixed_boundaries = self.cache[name]['fixed_boundaries']
         file_ix = self.cache[name]['file_ix']
+        mins = self.cache[name]['mins']
         means = self.cache[name]['means']
         ranges = self.cache[name]['ranges']
         sds = self.cache[name]['sds']
@@ -1592,6 +1700,7 @@ class Dataset(object):
                 'oracle_boundaries': oracle_boundaries_cur,
                 'fixed_boundaries': fixed_boundaries[index],
                 'file_ix': file_ix[index],
+                'mins': mins[index],
                 'means': means[index],
                 'ranges': ranges[index],
                 'sds': sds[index],
@@ -1710,7 +1819,7 @@ class Dataset(object):
     def segments(self, segment_type='vad'):
         return pd.concat([self.data[f].segments(segment_type=segment_type) for f in self.fileIDs], axis=0)
 
-    def align_gold_labels_to_segments(self, true, pred):
+    def align_gold_labels_to_segments(self, true, pred, use_gold_segs=True, method='concatenate'):
         out = []
 
         for f in self.fileIDs:
@@ -1725,7 +1834,7 @@ class Dataset(object):
             else:
                 pred_cur = pred[f]
 
-            out.append(self.data[f].align_gold_labels_to_segments(true_cur, pred_cur))
+            out.append(self.data[f].align_gold_labels_to_segments(true_cur, pred_cur, use_gold_segs=use_gold_segs, method=method))
 
         return pd.concat(out, axis=0)
 
@@ -2131,6 +2240,18 @@ class Datafile(object):
     def data(self):
         raise NotImplementedError
 
+    def min(self, reduction_axis, mask=None):
+        data = self.data()
+        if mask is not None:
+            data = data[mask]
+        if reduction_axis.lower() == 'time':
+            return data.min(axis=0, keepdims=True)
+        if reduction_axis.lower() == 'freq':
+            return data.min(axis=1, keepdims=True)
+        if reduction_axis.lower() == 'both':
+            return data.min(axis=(0, 1), keepdims=True)
+        return data.min(axis=reduction_axis, keepdims=True)
+
     def mean(self, reduction_axis, mask=None):
         data = self.data()
         if mask is not None:
@@ -2138,7 +2259,6 @@ class Datafile(object):
         if reduction_axis.lower() == 'time':
             return data.mean(axis=0, keepdims=True)
         if reduction_axis.lower() == 'freq':
-            raise ValueError('Reduction along frequency dimension is not currently supported')
             return data.mean(axis=1, keepdims=True)
         if reduction_axis.lower() == 'both':
             return data.mean(axis=(0, 1), keepdims=True)
@@ -2149,13 +2269,12 @@ class Datafile(object):
         if mask is not None:
             data = data[mask]
         if reduction_axis.lower() == 'time':
-            return data.max(axis=0, keepdims=True) - self.data().min(axis=0, keepdims=True)
+            return data.max(axis=0, keepdims=True) - data.min(axis=0, keepdims=True)
         if reduction_axis.lower() == 'freq':
-            raise ValueError('Reduction along frequency dimension is not currently supported')
-            return data.max(axis=1, keepdims=True) - self.data().min(axis=1, keepdims=True)
+            return data.max(axis=1, keepdims=True) - data.min(axis=1, keepdims=True)
         if reduction_axis.lower() == 'both':
-            return data.max(axis=(0, 1), keepdims=True) - self.data().min(axis=(0,1), keepdims=True)
-        return data.max(axis=reduction_axis, keepdims=True) - self.data().min(axis=reduction_axis, keepdims=True)
+            return data.max(axis=(0, 1), keepdims=True) - data.min(axis=(0,1), keepdims=True)
+        return data.max(axis=reduction_axis, keepdims=True) - data.min(axis=reduction_axis, keepdims=True)
 
     def sd(self, reduction_axis, mask=None):
         data = self.data()
@@ -2164,7 +2283,6 @@ class Datafile(object):
         if reduction_axis.lower() == 'time':
             return data.std(axis=0, keepdims=True)
         if reduction_axis.lower() == 'freq':
-            raise ValueError('Reduction along frequency dimension is not currently supported')
             return data.std(axis=1, keepdims=True)
         if reduction_axis.lower() == 'both':
             return data.std(axis=(0, 1), keepdims=True)
@@ -2183,13 +2301,13 @@ class Datafile(object):
             raise ValueError('Unrecognized segment type name "%s".' % segment_type)
         return segment_type
 
-    def align_gold_labels_to_segments(self, true, pred):
+    def align_gold_labels_to_segments(self, true, pred, use_gold_segs=True, method='concatenate'):
         if isinstance(true, str):
             true = self.segments(segment_type=true)
         if isinstance(pred, str):
-            pred = self.segments(sgement_type=pred)
+            pred = self.segments(segment_type=pred)
 
-        aligned = compute_unsupervised_classification_targets(true, pred)
+        aligned = compute_unsupervised_classification_targets(true, pred, use_gold_segs=use_gold_segs, method=method)
 
         return aligned
 
@@ -2231,6 +2349,7 @@ class Datafile(object):
             if center or standardize:
                 feats -= self.mean(reduction_axis)
             if normalize:
+                feats -= self.min(reduction_axis)
                 feats /= self.range(reduction_axis)
             elif standardize:
                 feats /= self.sd(reduction_axis)
@@ -2351,6 +2470,8 @@ class Datafile(object):
         if seconds_per_step is None:
             seconds_per_step = self.seconds_per_step
 
+        pred_labels = set()
+
         if parent_segment_type == 'vad':
             parent_segs = self.vad_segments
         elif parent_segment_type == 'wrd':
@@ -2402,10 +2523,13 @@ class Datafile(object):
                     ends_cur = segs[1:]
                     if snap_ends:
                         ends_cur[-1] = parent_ends[j]
+                    select = ends_cur > starts_cur
+                    starts_cur = starts_cur[select]
+                    ends_cur = ends_cur[select]
                     starts.append(starts_cur)
                     ends.append(ends_cur)
                     if states is not None:
-                        labels.append(states_extracted[j])
+                        labels.append(states_extracted[j][select])
 
                 starts = np.concatenate(starts, axis=0)
                 ends = np.concatenate(ends, axis=0)
@@ -2429,9 +2553,19 @@ class Datafile(object):
 
                 df = pd.DataFrame(df)
 
+                pred_labels = pred_labels.union(set(df.label.unique()))
+
                 out.append(df)
         else:
-            df = pd.DataFrame(columns=['start', 'end', 'label'])
+            out = pd.DataFrame(columns=['start', 'end', 'label'])
+
+        pred_labels = sorted(list(pred_labels))
+        relabel = {}
+        for i, x in enumerate(pred_labels):
+            relabel[x] = i
+
+        for df in out:
+            df.label = df.label.map(relabel)
 
         return out
 

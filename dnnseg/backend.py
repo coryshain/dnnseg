@@ -24,6 +24,82 @@ def get_session(session):
     return sess
 
 
+def padded_boolean_mask(X, mask, session=None):
+    '''
+    Apply boolean mask along time dimension, with padding to keep output dimension constant.
+
+    :param X: 3-D tensor, shape = [B, T, K] (batch, time, feature). Input tensor to mask.
+    :param mask: 2-D tensor, shape = [B, T] (batch, time). Mask tensor
+    :param session: session. If ``None``, uses default in current namespace.
+    :return: 3-D tensor, same shape as X. Masked timesteps in each batch entry are removed so that unmasked timesteps are adjacent, with trailing zeros to keep dimensionality unchanged.
+    '''
+
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            ix = tf.cast(tf.cumsum(mask, axis=-1) - 1, dtype=tf.int32)
+            loc = tf.cast(tf.where(mask), dtype=tf.int32)
+            gather_ix = loc
+            gathered_X = tf.gather_nd(X, gather_ix)
+            gathered_mask = tf.gather_nd(mask, gather_ix)
+
+            gathered_ix = tf.gather_nd(ix, loc)
+            scatter_ix = tf.stack([loc[:, 0], gathered_ix], axis=1)
+            scattered_X = tf.scatter_nd(scatter_ix, gathered_X, tf.shape(X))
+            scattered_mask = tf.scatter_nd(scatter_ix, gathered_mask, tf.shape(mask))
+
+            return scattered_X, scattered_mask
+
+
+def mask_and_lag(X, mask, n_forward=0, n_backward=0, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            X_src = tf.boolean_mask(X, mask)
+            pad_base = [(0,0) for _ in range(len(X_src.shape)-2)]
+
+            time_ix = tf.range(tf.shape(X)[-2])
+            tile_ix = [1]
+            for i in range(len(mask.shape) - len(time_ix.shape) - 1, -1, -1):
+                tile_ix.insert(0, tf.shape(mask)[i])
+                time_ix = time_ix[None,...]
+            time_ix = tf.tile(time_ix, tile_ix)
+
+            n_mask = tf.cast(tf.reduce_sum(mask, axis=-1, keepdims=True), dtype=tf.int32)
+            time_mask = time_ix < n_mask
+
+            _X_bwd = []
+            _X_fwd = []
+            _X_mask_bwd = []
+            _X_mask_fwd = []
+
+            for i in range(n_backward, 0, -1):
+                _pad_left = tf.minimum(i, tf.shape(X_src)[-2])
+                _X_cur = tf.pad(X_src[...,:-i,:], pad_base + [(_pad_left,0), (0,0)])
+                _X_bwd.append(_X_cur)
+
+                _X_mask_cur = tf.cast(time_ix >= i, dtype=mask.dtype)
+                _X_mask_cur = tf.boolean_mask(_X_mask_cur, time_mask)
+                _X_mask_bwd.append(_X_mask_cur)
+
+            for i in range(1,n_forward+1):
+                _pad_right = tf.minimum(i, tf.shape(X_src)[-2])
+                _X_cur = tf.pad(X_src[...,i:,:], pad_base + [(0,_pad_right), (0,0)])
+                _X_fwd.append(_X_cur)
+
+                _X_mask_cur = tf.cast(time_ix < (n_mask - i), dtype=mask.dtype)
+                _X_mask_cur = tf.boolean_mask(_X_mask_cur, time_mask)
+                _X_mask_fwd.append(_X_mask_cur)
+
+            if n_backward:
+                _X_bwd = tf.stack(_X_bwd, axis=-2)
+                _X_mask_bwd = tf.stack(_X_mask_bwd, axis=-1)
+            if n_forward:
+                _X_fwd = tf.stack(_X_fwd, axis=-2)
+                _X_mask_fwd = tf.stack(_X_mask_fwd, axis=-1)
+
+            return _X_bwd, _X_mask_bwd, _X_fwd, _X_mask_fwd
+
 # Debugged reduce_logsumexp to allow -inf
 # Stolen from meijun on Github <https://github.com/tensorflow/tensorflow/issues/11692>
 def tf_reduce_logsumexp(input_tensor,
@@ -506,15 +582,16 @@ class HMLSTMCell(LayerRNNCell):
             one_hot_inputs=False,
             forget_bias=1.0,
             oracle_boundary=False,
+            infer_boundary=True,
             activation=None,
             inner_activation='tanh',
             recurrent_activation='sigmoid',
             boundary_activation='sigmoid',
             boundary_noise_sd=None,
             boundary_discretizer=None,
-            bottomup_initializer='glorot_uniform_initializer',
+            bottomup_initializer='glorot_normal_initializer',
             recurrent_initializer='orthogonal_initializer',
-            topdown_initializer='glorot_uniform_initializer',
+            topdown_initializer='glorot_normal_initializer',
             boundary_initializer='orthogonal_initializer',
             bias_initializer='zeros_initializer',
             bottomup_regularizer=None,
@@ -525,6 +602,8 @@ class HMLSTMCell(LayerRNNCell):
             temporal_dropout=None,
             temporal_dropout_plug_lm=False,
             return_lm_predictions=False,
+            lm_order_bwd=0,
+            lm_order_fwd=1,
             bottomup_dropout=None,
             recurrent_dropout=None,
             topdown_dropout=None,
@@ -538,12 +617,14 @@ class HMLSTMCell(LayerRNNCell):
             state_slope_annealing_rate=None,
             slope_annealing_max=None,
             state_discretizer=None,
+            discretize_state_at_boundary=False,
             state_noise_sd=None,
             sample_at_train=True,
             sample_at_eval=False,
             global_step=None,
             implementation=1,
             batch_normalization_decay=None,
+            bptt=True,
             reuse=None,
             name=None,
             dtype=None,
@@ -553,7 +634,7 @@ class HMLSTMCell(LayerRNNCell):
         self._session = get_session(session)
         self._device = device
 
-        assert not temporal_dropout_plug_lm, 'temporal_dropout_plug_lm is currently broken, do not use.'
+        # assert not temporal_dropout_plug_lm, 'temporal_dropout_plug_lm is currently broken, do not use.'
 
         with self._session.as_default():
             with self._session.graph.as_default():
@@ -576,6 +657,8 @@ class HMLSTMCell(LayerRNNCell):
                     self._resnet_n_layers = resnet_n_layers
 
                     self._lm = return_lm_predictions or temporal_dropout_plug_lm
+                    self._lm_order_bwd = lm_order_bwd
+                    self._lm_order_fwd = lm_order_fwd
                     self._return_lm_predictions = return_lm_predictions
                     self._temporal_dropout_plug_lm = temporal_dropout_plug_lm
                     self._one_hot_inputs = one_hot_inputs
@@ -583,6 +666,7 @@ class HMLSTMCell(LayerRNNCell):
                     self._forget_bias = forget_bias
 
                     self._oracle_boundary = oracle_boundary
+                    self._infer_boundary = infer_boundary
 
                     self._activation = get_activation(activation, session=self._session, training=self._training)
                     self._inner_activation = get_activation(inner_activation, session=self._session, training=self._training)
@@ -660,6 +744,7 @@ class HMLSTMCell(LayerRNNCell):
                         )
                     else:
                         self._state_discretizer = None
+                    self._discretize_state_at_boundary = discretize_state_at_boundary
                     self.state_noise_sd = state_noise_sd
                     self._sample_at_train = sample_at_train
                     self._sample_at_eval = sample_at_eval
@@ -667,6 +752,8 @@ class HMLSTMCell(LayerRNNCell):
                     self._implementation = implementation
 
                     self._batch_normalization_decay = batch_normalization_decay
+
+                    self._bptt = bptt
 
                     self._epsilon = 1e-8
 
@@ -686,16 +773,25 @@ class HMLSTMCell(LayerRNNCell):
         for l in range(self._num_layers):
             timing = int(self._use_timing_unit and l < self._num_layers - 1)
 
+            if l == 0:
+                units_below = self._input_dims
+            else:
+                units_below = self._num_units[l-1]
+            units_below *= (self._lm_order_bwd + self._lm_order_fwd)
             units_cur = self._num_units[l]
 
             if l < self._num_layers - 1:
-                size = (units_cur, units_cur + timing, 1)
+                if self._return_lm_predictions:
+                    size = [units_cur, units_cur + timing, 1, units_below]
+                else:
+                    size = [units_cur, units_cur + timing, 1]
             else:
-                size = (units_cur, units_cur)
+                if self._return_lm_predictions:
+                    size = [units_cur, units_cur, units_below]
+                else:
+                    size = [units_cur, units_cur]
 
             out.append(size)
-
-        out = tuple(out)
 
         return out
 
@@ -709,22 +805,21 @@ class HMLSTMCell(LayerRNNCell):
                 units_below = self._input_dims
             else:
                 units_below = self._num_units[l-1]
+            units_below *= (self._lm_order_bwd + self._lm_order_fwd)
             units_cur = self._num_units[l]
 
             if l < self._num_layers - 1:
                 if self._return_lm_predictions:
-                    size = (units_cur + timing, 1, 1, units_below)
+                    size = [units_cur, units_cur + timing, 1, 1, units_below]
                 else:
-                    size = (units_cur + timing, 1, 1)
+                    size = [units_cur, units_cur + timing, 1, 1]
             else:
                 if self._return_lm_predictions:
-                    size = (units_cur, units_below)
+                    size = [units_cur, units_cur, units_below]
                 else:
-                    size = (units_cur,)
+                    size = [units_cur, units_cur]
 
             out.append(size)
-
-        out = tuple(out)
 
         return out
 
@@ -756,6 +851,8 @@ class HMLSTMCell(LayerRNNCell):
                                          % inputs_shape)
 
                     self._input_dims = inputs_shape[1].value
+                    if self._oracle_boundary:
+                        self._input_dims -= self._num_layers - 1
 
                     self._kernel_bottomup = []
                     self._kernel_recurrent = []
@@ -764,7 +861,7 @@ class HMLSTMCell(LayerRNNCell):
                     if self._lm:
                         self._kernel_lm_bottomup = []
                         self._kernel_lm_recurrent = []
-                        self._kernel_lm_topdown = []
+                        # self._kernel_lm_topdown = []
                         self._bias_lm = []
 
                     self._bias = []
@@ -808,7 +905,6 @@ class HMLSTMCell(LayerRNNCell):
                                     layers_inner=self._resnet_n_layers,
                                     activation_inner=self._inner_activation,
                                     activation=self._inner_activation,
-                                    # activation=None,
                                     batch_normalization_decay=self._batch_normalization_decay,
                                     project_inputs=False,
                                     normalize_weights=self._weight_normalization,
@@ -863,7 +959,6 @@ class HMLSTMCell(LayerRNNCell):
                                     layers_inner=self._resnet_n_layers,
                                     activation_inner=self._inner_activation,
                                     activation=self._inner_activation,
-                                    # activation=None,
                                     batch_normalization_decay=self._batch_normalization_decay,
                                     project_inputs=False,
                                     normalize_weights=self._weight_normalization,
@@ -921,7 +1016,6 @@ class HMLSTMCell(LayerRNNCell):
                                         layers_inner=self._resnet_n_layers,
                                         activation_inner=self._inner_activation,
                                         activation=self._inner_activation,
-                                        # activation=None,
                                         batch_normalization_decay=self._batch_normalization_decay,
                                         project_inputs=False,
                                         normalize_weights=self._weight_normalization,
@@ -963,17 +1057,17 @@ class HMLSTMCell(LayerRNNCell):
                             self._kernel_topdown.append(kernel_topdown)
 
                         if self._lm:
-                            lm_out_dim = bottom_up_dim
-                            if self._use_timing_unit and l > 0:
-                                lm_out_dim -= 1
+                            _kernel_depth = 1
 
-                            lm_bottomup_in_dim = bottom_up_dim
+                            lm_out_dim = (bottom_up_dim - (self._use_timing_unit and l > 0)) * (self._lm_order_bwd + self._lm_order_fwd)
+
+                            lm_bottomup_in_dim = recurrent_dim # intentional
                             kernel_lm_bottomup_lambdas = []
-                            for d in range(self._kernel_depth):
-                                if d < self._kernel_depth - 1:
+                            for d in range(_kernel_depth):
+                                if d < _kernel_depth - 1:
                                     kernel_lm_bottomup_layer = DenseResidualLayer(
                                         training=self._training,
-                                        units=lm_bottomup_in_dim,
+                                        units=recurrent_dim + bottom_up_dim,
                                         use_bias=True,
                                         kernel_initializer=self._bottomup_initializer,
                                         bias_initializer=self._bias_initializer,
@@ -982,7 +1076,6 @@ class HMLSTMCell(LayerRNNCell):
                                         layers_inner=self._resnet_n_layers,
                                         activation_inner=self._inner_activation,
                                         activation=self._inner_activation,
-                                        # activation=None,
                                         batch_normalization_decay=self._batch_normalization_decay,
                                         project_inputs=False,
                                         normalize_weights=self._weight_normalization,
@@ -1023,10 +1116,10 @@ class HMLSTMCell(LayerRNNCell):
 
                             self._kernel_lm_bottomup.append(kernel_lm_bottomup)
 
-                            lm_recurrent_in_dim = recurrent_dim
+                            lm_recurrent_in_dim = bottom_up_dim # intentional
                             kernel_lm_recurrent_lambdas = []
-                            for d in range(self._kernel_depth):
-                                if d < self._kernel_depth - 1:
+                            for d in range(_kernel_depth):
+                                if d < _kernel_depth - 1:
                                     kernel_lm_recurrent_layer = DenseResidualLayer(
                                         training=self._training,
                                         units=lm_recurrent_in_dim,
@@ -1038,7 +1131,6 @@ class HMLSTMCell(LayerRNNCell):
                                         layers_inner=self._resnet_n_layers,
                                         activation_inner=self._inner_activation,
                                         activation=self._inner_activation,
-                                        # activation=None,
                                         batch_normalization_decay=self._batch_normalization_decay,
                                         project_inputs=False,
                                         normalize_weights=self._weight_normalization,
@@ -1079,62 +1171,66 @@ class HMLSTMCell(LayerRNNCell):
 
                             self._kernel_lm_recurrent.append(kernel_lm_recurrent)
 
-                            if l < self._num_layers - 1:
-                                lm_topdown_in_dim = top_down_dim
-                                kernel_lm_topdown_lambdas = []
-                                for d in range(self._kernel_depth):
-                                    if d < self._kernel_depth - 1:
-                                        kernel_lm_topdown_layer = DenseResidualLayer(
-                                            training=self._training,
-                                            units=lm_topdown_in_dim,
-                                            use_bias=True,
-                                            kernel_initializer=self._topdown_initializer,
-                                            bias_initializer=self._bias_initializer,
-                                            kernel_regularizer=self._topdown_regularizer,
-                                            bias_regularizer=self._bias_regularizer,
-                                            layers_inner=self._resnet_n_layers,
-                                            activation_inner=self._inner_activation,
-                                            activation=self._inner_activation,
-                                            # activation=None,
-                                            batch_normalization_decay=self._batch_normalization_decay,
-                                            project_inputs=False,
-                                            normalize_weights=self._weight_normalization,
-                                            reuse=tf.AUTO_REUSE,
-                                            session=self._session,
-                                            name='kernel_lm_topdown_l%d_d%d' % (l, d)
-                                        )
-                                    else:
-                                        kernel_lm_topdown_layer = DenseLayer(
-                                            training=self._training,
-                                            units=lm_out_dim,
-                                            use_bias=False,
-                                            kernel_initializer=self._topdown_initializer,
-                                            bias_initializer=self._bias_initializer,
-                                            kernel_regularizer=self._topdown_regularizer,
-                                            bias_regularizer=self._bias_regularizer,
-                                            activation=None,
-                                            batch_normalization_decay=self._batch_normalization_decay,
-                                            normalize_weights=self._weight_normalization,
-                                            session=self._session,
-                                            reuse=tf.AUTO_REUSE,
-                                            name='kernel_lm_topdown_l%d_d%d' % (l, d)
-                                        )
-                                    kernel_lm_topdown_lambdas.append(make_lambda(kernel_lm_topdown_layer, session=self._session))
-
-                                kernel_lm_topdown = compose_lambdas(kernel_lm_topdown_lambdas)
-
-                                # kernel_lm_topdown = self.add_variable(
-                                #     'kernel_lm_topdown_%d' % l,
-                                #     shape=[lm_topdown_in_dim, lm_out_dim],
-                                #     initializer=self._recurrent_initializer
-                                # )
-                                # if self._weight_normalization:
-                                #     kernel_lm_topdown_g = tf.Variable(tf.ones([1, lm_out_dim]), name='kernel_lm_topdown_g_%d' % l)
-                                #     kernel_lm_topdown_b = tf.Variable(tf.zeros([1, lm_out_dim]), name='kernel_lm_topdown_b_%d' % l)
-                                #     kernel_lm_topdown = tf.nn.l2_normalize(kernel_lm_topdown, axis=-1) * kernel_lm_topdown_g + kernel_lm_topdown_b
-                                # self._regularize(kernel_lm_topdown, self._topdown_regularizer)
-
-                                self._kernel_lm_topdown.append(kernel_lm_topdown)
+                            #
+                            # if l < self._num_layers - 1:
+                            #     # lm_topdown_in_dim = self._num_units[l] * (self._lm_order_fwd) + recurrent_dim
+                            #     timing_unit = self._use_timing_unit & l < self._num_layers - 2
+                            #     lm_topdown_in_dim = self._num_units[l+1] * 2 + timing_unit
+                            #     kernel_lm_topdown_lambdas = []
+                            #     for d in range(self._kernel_depth):
+                            #         if d < self._kernel_depth - 1:
+                            #             kernel_lm_topdown_layer = DenseResidualLayer(
+                            #                 training=self._training,
+                            #                 units=lm_topdown_in_dim,
+                            #                 use_bias=True,
+                            #                 kernel_initializer=self._topdown_initializer,
+                            #                 bias_initializer=self._bias_initializer,
+                            #                 kernel_regularizer=self._topdown_regularizer,
+                            #                 bias_regularizer=self._bias_regularizer,
+                            #                 layers_inner=self._resnet_n_layers,
+                            #                 # activation_inner='elu',
+                            #                 activation_inner=self._inner_activation,
+                            #                 # activation=self._inner_activation,
+                            #                 activation=None,
+                            #                 batch_normalization_decay=self._batch_normalization_decay,
+                            #                 project_inputs=False,
+                            #                 normalize_weights=self._weight_normalization,
+                            #                 reuse=tf.AUTO_REUSE,
+                            #                 session=self._session,
+                            #                 name='kernel_lm_topdown_l%d_d%d' % (l, d)
+                            #             )
+                            #         else:
+                            #             kernel_lm_topdown_layer = DenseLayer(
+                            #                 training=self._training,
+                            #                 units=lm_out_dim,
+                            #                 use_bias=False,
+                            #                 kernel_initializer=self._topdown_initializer,
+                            #                 bias_initializer=self._bias_initializer,
+                            #                 kernel_regularizer=self._topdown_regularizer,
+                            #                 bias_regularizer=self._bias_regularizer,
+                            #                 activation=None,
+                            #                 batch_normalization_decay=self._batch_normalization_decay,
+                            #                 normalize_weights=self._weight_normalization,
+                            #                 session=self._session,
+                            #                 reuse=tf.AUTO_REUSE,
+                            #                 name='kernel_lm_topdown_l%d_d%d' % (l, d)
+                            #             )
+                            #         kernel_lm_topdown_lambdas.append(make_lambda(kernel_lm_topdown_layer, session=self._session))
+                            #
+                            #     kernel_lm_topdown = compose_lambdas(kernel_lm_topdown_lambdas)
+                            #
+                            #     # kernel_lm_topdown = self.add_variable(
+                            #     #     'kernel_lm_topdown_%d' % l,
+                            #     #     shape=[lm_topdown_in_dim, lm_out_dim],
+                            #     #     initializer=self._recurrent_initializer
+                            #     # )
+                            #     # if self._weight_normalization:
+                            #     #     kernel_lm_topdown_g = tf.Variable(tf.ones([1, lm_out_dim]), name='kernel_lm_topdown_g_%d' % l)
+                            #     #     kernel_lm_topdown_b = tf.Variable(tf.zeros([1, lm_out_dim]), name='kernel_lm_topdown_b_%d' % l)
+                            #     #     kernel_lm_topdown = tf.nn.l2_normalize(kernel_lm_topdown, axis=-1) * kernel_lm_topdown_g + kernel_lm_topdown_b
+                            #     # self._regularize(kernel_lm_topdown, self._topdown_regularizer)
+                            #
+                            #     self._kernel_lm_topdown.append(kernel_lm_topdown)
 
                             bias_lm = self.add_variable(
                                 'bias_lm_%d' % l,
@@ -1164,7 +1260,7 @@ class HMLSTMCell(LayerRNNCell):
                                     if d < self._kernel_depth - 1:
                                         kernel_boundary_layer = DenseResidualLayer(
                                             training=self._training,
-                                            units=self._num_units[l],
+                                            units=self._num_units[l] + self._use_timing_unit,
                                             use_bias=True,
                                             kernel_initializer=self._boundary_initializer,
                                             bias_initializer=self._bias_initializer,
@@ -1173,7 +1269,6 @@ class HMLSTMCell(LayerRNNCell):
                                             layers_inner=self._resnet_n_layers,
                                             activation_inner=self._inner_activation,
                                             activation=self._inner_activation,
-                                            # activation=None,
                                             batch_normalization_decay=self._batch_normalization_decay,
                                             project_inputs=False,
                                             normalize_weights=self._weight_normalization,
@@ -1266,11 +1361,19 @@ class HMLSTMCell(LayerRNNCell):
                         power = 1
 
                     for l, layer in enumerate(state):
+                        if not self._bptt:
+                            h_below = tf.stop_gradient(h_below)
+                            # if z_below is not None:
+                            #     print('Stopping gradient z_below')
+                            #     z_below = tf.stop_gradient(z_below)
+
                         timing = int(self._use_timing_unit and l < self._num_layers - 1)
 
                         # z_behind: Previous boundary probability at current layer (implicitly 1 if final layer)
                         if l < self._num_layers - 1:
                             z_behind = layer[2]
+                            # print('Stopping gradient z_behind')
+                            # z_behind = tf.stop_gradient(z_behind)
                         else:
                             z_behind = None
 
@@ -1307,51 +1410,54 @@ class HMLSTMCell(LayerRNNCell):
 
                         # c_behind: Previous cell state at current layer
                         c_behind = layer[0]
+                        if not self._bptt:
+                            c_behind = tf.stop_gradient(c_behind)
 
                         # h_behind: Previous hidden state at current layer
                         h_behind = layer[1]
+                        if not self._bptt:
+                            h_behind = tf.stop_gradient(h_behind)
                         h_behind = self._recurrent_dropout(h_behind)
 
                         # h_above: Hidden state of layer above at previous timestep (implicitly 0 if final layer)
                         if l < self._num_layers - 1:
                             h_above = state[l + 1][1]
+                            if not self._bptt:
+                                h_above = tf.stop_gradient(h_above)
                             h_above = self._topdown_dropout(h_above)
                         else:
                             h_above = None
-
-                        # h_below: Bottom-up input
-                        # if self._state_discretizer and l > 0:
-                        #     h_below = 2 * (h_below - 0.5)
 
                         if self._implementation == 1 and self._refeed_boundary:
                             h_below = tf.concat([z_behind, h_below], axis=1)
                         if self._temporal_dropout[l]:
                             def train_func():
-                                # data = (h_below + lm) / 2.
                                 data = h_below
                                 noise = tf.random_uniform([tf.shape(h_below)[0]]) > self._temporal_dropout[l]
-                                if self._temporal_dropout_plug_lm:
-                                    raise ValueError('Plug LM is currently bugged. Do not use.')
-                                    # if self._one_hot_inputs and l == 0:
-                                    #     alt = tf.one_hot(tf.argmax(lm, axis=-1), lm.shape[-1])
-                                    # else:
-                                    #     alt = lm
-                                    alt = lm
-                                else:
-                                    alt = tf.zeros_like(h_below)
+                                alt = tf.zeros_like(h_below)
                                 out = tf.where(noise, data, alt)
                                 return out
 
                             def eval_func():
-                                # return (h_below + lm) / 2.
                                 return h_below
 
                             h_below = tf.cond(self._training, train_func, eval_func)
+
+                            if self._temporal_dropout_plug_lm:
+                                pred_prev = state[l][-1]
+                                if self._one_hot_inputs and l == 0:
+                                    pred_prev = tf.nn.softmax(pred_prev)
+                                elif self._state_discretizer and l > 0:
+                                    pred_prev = self._state_discretizer(tf.sigmoid(pred_prev))
+                                h_below += pred_prev
+
                         elif self._lm:
                             pass
                             # h_below = (h_below + lm) / 2.
 
                         # h_below = self._temporal_dropout[l](h_below)
+                        if l > 0 and self._state_discretizer and self._discretize_state_at_boundary and self.global_step is not None:
+                            h_below = self._state_discretizer(h_below)
                         h_below = self._bottomup_dropout(h_below)
 
                         s_bottomup = self._kernel_bottomup[l](h_below)
@@ -1360,8 +1466,8 @@ class HMLSTMCell(LayerRNNCell):
 
                         # Recurrent features
                         s_recurrent = self._kernel_recurrent[l](h_behind)
-                        if l < self._num_layers - 1:
-                            s_recurrent *= (1 - z_behind) ** power
+                        # if l < self._num_layers - 1:
+                        #     s_recurrent *= (1 - z_behind) ** power
 
                         # Sum bottom-up and recurrent features
                         s = s_bottomup + s_recurrent
@@ -1375,12 +1481,12 @@ class HMLSTMCell(LayerRNNCell):
 
                         if self._implementation == 1:
                             # In implementation 1, boundary has its own slice of the hidden state preactivations
-                            z = s[:, units * 4:]
+                            z_logit = s[:, units * 4:]
                             s = s[:, :units * 4]
 
                         if not self._layer_normalization:
                             if self._implementation == 1:
-                                z += self._bias[l][:, units * 4:]
+                                z_logit += self._bias[l][:, units * 4:]
                             s = s + self._bias[l][:, :units * 4]
 
                         # Forget gate
@@ -1421,18 +1527,22 @@ class HMLSTMCell(LayerRNNCell):
                         c = update_prob * c_update + copy_prob * c_copy + flush_prob * c_flush
 
                         # Compute the gated output
-                        if l < self._num_layers - 1 and self._state_discretizer is not None:
+                        # if l < self._num_layers - 1 and self._state_discretizer is not None:
+                        if self._state_discretizer is not None:
                             activation = tf.sigmoid
                             # activation = tf.keras.backend.hard_sigmoid
                         if l < self._num_layers - 1 and self.state_noise_sd:
-                            h_in = tf.cond(self._training, lambda: c + tf.random_normal(shape=tf.shape(c), stddev=self.state_noise_sd), lambda: c)
+                            # h_in = tf.cond(self._training, lambda: c + tf.random_normal(shape=tf.shape(c), stddev=self.state_noise_sd), lambda: c)
+                            h_in = c + tf.random_normal(shape=tf.shape(c), stddev=self.state_noise_sd)
                         else:
                             h_in = c
                         if self._state_slope_annealing_rate and self.global_step is not None:
                             h = o * activation(h_in * self.state_slope_coef)
                         else:
                             h = o * activation(h_in)
-                        if l < self._num_layers - 1 and self._state_discretizer and self.global_step is not None:
+
+                        if l < self._num_layers - 1 and self._state_discretizer and not self._discretize_state_at_boundary and self.global_step is not None:
+                        # if self._state_discretizer and not self._discretize_state_at_boundary and self.global_step is not None:
                             h = self._state_discretizer(h)
 
                         # Mix gated output with the previous hidden state proportionally to the copy probability
@@ -1445,13 +1555,27 @@ class HMLSTMCell(LayerRNNCell):
                             timing_unit = (h_behind[:,-1:] + 0.5 * (1 - h_behind[:,-1:])) * (1 - z_behind)
                             h = tf.concat([h, timing_unit], axis=1)
 
+                        if self._lm:
+                            pred_prev = state[l][-1]
+                            if self._one_hot_inputs and l == 0:
+                                pred_prev = tf.nn.softmax(pred_prev)
+                            elif self._state_discretizer and l > 0:
+                                pred_prev = self._state_discretizer(tf.sigmoid(h))
+
+                            # pred_new = self._kernel_lm_recurrent[l](pred_prev) + self._kernel_lm_bottomup[l](h)
+                            pred_new = self._kernel_lm_bottomup[l](tf.concat([pred_prev, h], axis=-1))
+
+                            if l > 0 and not ((self._one_hot_inputs and l == 0) or (self._state_discretizer and l > 0)):
+                                pred_new = self._inner_activation(pred_new)
+
                         # Compute the current boundary probability
                         if l < self._num_layers - 1:
                             if self._oracle_boundary:
-                                inputs_last_dim = inputs.shape[-1]
-                                z_prob = inputs[:, inputs_last_dim + l - 1:inputs_last_dim + l]
+                                inputs_last_dim = inputs.shape[-1] - self._num_layers + 1
+                                z_prob = inputs[:, inputs_last_dim + l:inputs_last_dim + l+1]
                                 z = z_prob
-                            else:
+                            if self._infer_boundary:
+                                z_prob_oracle = z_prob
                                 if self._implementation == 2:
                                     # In implementation 2, boundary is computed by linear transform of h
                                     z_in = h
@@ -1459,18 +1583,22 @@ class HMLSTMCell(LayerRNNCell):
                                         z_in = tf.concat([z_behind, z_in], axis=1)
                                     z_in = self._boundary_dropout(z_in)
                                     # In implementation 2, boundary is a function of the hidden state
-                                    z = self._kernel_boundary[l](z_in)
-                                    z = z + self._bias_boundary[l]
+                                    z_logit = self._kernel_boundary[l](z_in)
+                                    z_logit += self._bias_boundary[l]
 
                                 if self._boundary_slope_annealing_rate and self.global_step is not None:
-                                    z *= self.boundary_slope_coef
+                                    z_logit *= self.boundary_slope_coef
 
                                 if self.boundary_noise_sd:
-                                    z = tf.cond(self._training, lambda: z + tf.random_normal(shape=tf.shape(z), stddev=self.boundary_noise_sd), lambda: z)
+                                    z_logit = tf.cond(self._training, lambda: z_logit + tf.random_normal(shape=tf.shape(z_logit), stddev=self.boundary_noise_sd), lambda: z_logit)
 
-                                z_prob = self._boundary_activation(z)
+                                z_prob = self._boundary_activation(z_logit)
+
+                                if self._oracle_boundary:
+                                    z_prob = tf.maximum(z_prob, z_prob_oracle)
+
                                 if l > 0 and not self._boundary_discretizer:
-                                    z_prob = z_prob * z_below
+                                    z_prob *= z_below
 
                                 if self._boundary_discretizer:
                                     z = self._boundary_discretizer(z_prob)
@@ -1483,42 +1611,20 @@ class HMLSTMCell(LayerRNNCell):
                             z_prob = None
                             z = None
 
-                        if self._lm:
-                            lm_logits_bottomup = self._kernel_lm_bottomup[l](tf.stop_gradient(h_below))
-                            if z_below is not None:
-                                lm_logits_bottomup *= z_below
-                            lm_logits_recurrent = self._kernel_lm_recurrent[l](h_behind)
-                            if z is not None:
-                                lm_logits_recurrent *= (1 - z)
-
-                            lm_logits = lm_logits_bottomup + lm_logits_recurrent
-
-                            if l < self._num_layers - 1:
-                                lm_logits_topdown = self._kernel_lm_topdown[l](h_above) * z
-
-                                lm_logits += lm_logits_topdown
-
-                            lm_logits += self._bias_lm[l]
-
-                            if self._one_hot_inputs and l == 0:
-                                lm = tf.nn.softmax(lm_logits)
-                            elif self._state_discretizer is None or l == 0:
-                                lm = lm_logits
-                            else:
-                                lm = tf.sigmoid(lm_logits)
-
                         if l < self._num_layers - 1:
-                            if self._return_lm_predictions:
-                                output_l = (h, z_prob, z, lm_logits)
+                            if self._lm:
+                                output_l = [c, h, z_prob, z, pred_new]
+                                new_state_l = [c, h, z, pred_new]
                             else:
-                                output_l = (h, z_prob, z)
-                            new_state_l = (c, h, z)
+                                output_l = [c, h, z_prob, z]
+                                new_state_l = [c, h, z]
                         else:
-                            if self._return_lm_predictions:
-                                output_l = (h, lm_logits)
+                            if self._lm:
+                                output_l = [c, h, pred_new]
+                                new_state_l = [c, h, pred_new]
                             else:
-                                output_l = (h,)
-                            new_state_l = (c, h,)
+                                output_l = [c, h]
+                                new_state_l = [c, h]
 
                         # Append layer to output and state
                         new_output.append(output_l)
@@ -1527,9 +1633,59 @@ class HMLSTMCell(LayerRNNCell):
                         h_below = h
                         z_below = z
 
-                    # Create output and state tuples
-                    new_output = tuple(new_output)
-                    new_state = tuple(new_state)
+                    # if self._lm:
+                    #     for l in range(self._num_layers - 1, -1, -1):
+                    #         c = new_state[l][0]
+                    #         h = new_state[l][1]
+                    #         # if l == 0:
+                    #         #     if self._oracle_boundary:
+                    #         #         h_below = inputs[:, :-(self._num_layers - 1)]
+                    #         #     else:
+                    #         #         h_below = inputs
+                    #         # else:
+                    #         #     h_below = new_state[l-1][1]
+                    #         if l < self._num_layers - 1:
+                    #             z = new_state[l][2]
+                    #
+                    #             # lb = self._lm_order_bwd * self._num_units[l]
+                    #             # ub = (self._lm_order_bwd+1) * self._num_units[l]
+                    #             # h_pred = new_output[l+1][3][:, lb:ub]
+                    #             # if self._state_discretizer is None:
+                    #             #     h_pred = self._inner_activation(h_pred)
+                    #             # else:
+                    #             #     h_pred = tf.sigmoid(h_pred)
+                    #             #     if not self._discretize_state_at_boundary and self.global_step is not None:
+                    #             #         h_pred = self._state_discretizer(h_pred)
+                    #
+                    #         else:
+                    #             z = None
+                    #
+                    #         if l > 0:
+                    #             z_below = new_state[l-1][2]
+                    #         else:
+                    #             z_below = 1.
+                    #
+                    #         lm_preds_recurrent = self._kernel_lm_recurrent[l](tf.concat([c,h], axis=-1))
+                    #         if z is not None:
+                    #             lm_preds_recurrent *= (1 - z)
+                    #
+                    #         lm_preds = lm_preds_recurrent
+                    #
+                    #         if l < self._num_layers - 1:
+                    #             c_above = new_state[l+1][0]
+                    #             h_above = new_state[l+1][1]
+                    #             # start = self._lm_order_bwd * self._num_units[l]
+                    #             # h_pred = new_state[l+1][-1][...,start:]
+                    #             lm_preds_topdown = self._kernel_lm_topdown[l](tf.concat([c_above, h_above], axis=-1)) * z
+                    #             lm_preds += lm_preds_topdown
+                    #
+                    #         lm_preds += self._bias_lm[l]
+                    #
+                    #         preds_prev = state[l][-1]
+                    #         lm_preds = preds_prev * (1 - z_below) + lm_preds * z_below
+                    #
+                    #         new_output[l].append(lm_preds)
+                    #         new_state[l].append(lm_preds)
 
                     return new_output, new_state
 
@@ -1545,15 +1701,16 @@ class HMLSTMSegmenter(object):
             one_hot_inputs=False,
             forget_bias=1.0,
             oracle_boundary=False,
+            infer_boundary=True,
             activation=None,
             inner_activation='tanh',
             recurrent_activation='sigmoid',
             boundary_activation='sigmoid',
             boundary_discretizer=None,
             boundary_noise_sd=None,
-            bottomup_initializer='glorot_uniform_initializer',
+            bottomup_initializer='glorot_normal_initializer',
             recurrent_initializer='orthogonal_initializer',
-            topdown_initializer='glorot_uniform_initializer',
+            topdown_initializer='glorot_normal_initializer',
             boundary_initializer='orthogonal_initializer',
             bias_initializer='zeros_initializer',
             bottomup_regularizer=None,
@@ -1565,6 +1722,8 @@ class HMLSTMSegmenter(object):
             temporal_dropout=None,
             temporal_dropout_plug_lm=False,
             return_lm_predictions=False,
+            lm_order_bwd=0,
+            lm_order_fwd=1,
             recurrent_dropout=None,
             topdown_dropout=None,
             boundary_dropout=None,
@@ -1577,11 +1736,13 @@ class HMLSTMSegmenter(object):
             state_slope_annealing_rate=None,
             slope_annealing_max=None,
             state_discretizer=None,
+            discretize_state_at_boundary=None,
             state_noise_sd=None,
             sample_at_train=True,
             sample_at_eval=False,
             global_step=None,
             implementation=1,
+            bptt=True,
             reuse=None,
             name=None,
             dtype=None,
@@ -1599,8 +1760,7 @@ class HMLSTMSegmenter(object):
                     else:
                         self.num_units = num_units
 
-                    assert len(
-                        self.num_units) == num_layers, 'num_units must either be an integer or a list of integers of length num_layers'
+                    assert len(self.num_units) == num_layers, 'num_units must either be an integer or a list of integers of length num_layers'
 
                     self.num_layers = num_layers
                     self.training = training
@@ -1609,6 +1769,7 @@ class HMLSTMSegmenter(object):
                     self.one_hot_inputs = one_hot_inputs
                     self.forget_bias = forget_bias
                     self.oracle_boundary = oracle_boundary
+                    self.infer_boundary = infer_boundary
 
                     self.activation = activation
                     self.inner_activation = inner_activation
@@ -1625,6 +1786,8 @@ class HMLSTMSegmenter(object):
 
                     self.temporal_dropout = temporal_dropout
                     self.return_lm_predictions = return_lm_predictions
+                    self.lm_order_bwd = lm_order_bwd
+                    self.lm_order_fwd = lm_order_fwd
                     self.temporal_dropout_plug_lm = temporal_dropout_plug_lm
                     self.bottomup_dropout = bottomup_dropout
                     self.recurrent_dropout = recurrent_dropout
@@ -1646,11 +1809,13 @@ class HMLSTMSegmenter(object):
                     self.state_slope_annealing_rate = state_slope_annealing_rate
                     self.slope_annealing_max = slope_annealing_max
                     self.state_discretizer = state_discretizer
+                    self.discretize_state_at_boundary = discretize_state_at_boundary
                     self.state_noise_sd = state_noise_sd
                     self.sample_at_train = sample_at_train
                     self.sample_at_eval = sample_at_eval
                     self.global_step = global_step
                     self.implementation = implementation
+                    self.bptt = bptt
 
                     self.reuse = reuse
                     self.name = name
@@ -1680,6 +1845,7 @@ class HMLSTMSegmenter(object):
                         one_hot_inputs=self.one_hot_inputs,
                         forget_bias=self.forget_bias,
                         oracle_boundary=self.oracle_boundary,
+                        infer_boundary=self.infer_boundary,
                         activation=self.activation,
                         inner_activation=self.inner_activation,
                         recurrent_activation=self.recurrent_activation,
@@ -1696,6 +1862,8 @@ class HMLSTMSegmenter(object):
                         boundary_regularizer=self.boundary_regularizer,
                         temporal_dropout=self.temporal_dropout,
                         return_lm_predictions=self.return_lm_predictions,
+                        lm_order_bwd=self.lm_order_bwd,
+                        lm_order_fwd=self.lm_order_fwd,
                         temporal_dropout_plug_lm=self.temporal_dropout_plug_lm,
                         bottomup_dropout=self.bottomup_dropout,
                         recurrent_dropout=self.recurrent_dropout,
@@ -1711,11 +1879,13 @@ class HMLSTMSegmenter(object):
                         state_slope_annealing_rate=self.state_slope_annealing_rate,
                         slope_annealing_max=self.slope_annealing_max,
                         state_discretizer=self.state_discretizer,
+                        discretize_state_at_boundary=self.discretize_state_at_boundary,
                         state_noise_sd=self.state_noise_sd,
                         sample_at_train=self.sample_at_train,
                         sample_at_eval=self.sample_at_eval,
                         global_step=self.global_step,
                         implementation=self.implementation,
+                        bptt=self.bptt,
                         reuse=self.reuse,
                         name=self.name,
                         dtype=self.dtype,
@@ -1728,7 +1898,7 @@ class HMLSTMSegmenter(object):
         self.built = True
 
     def __call__(self, inputs, mask=None, boundaries=None):
-        assert self.oracle_boundary != (boundaries is None), 'A boundaries arg must be provided always and only when oracle_boundary is true'
+        assert not (self.oracle_boundary and boundaries is None), 'A boundaries arg must be provided when oracle_boundary is true'
 
         with self.session.as_default():
             with self.session.graph.as_default():
@@ -1767,6 +1937,14 @@ class HMLSTMOutput(object):
 
         self.num_layers = len(output)
         self.l = [HMLSTMOutputLevel(level, session=self.session) for level in output]
+
+    def cell(self, level=None, mask=None):
+        if level is None:
+            out = tuple([l.cell(mask=mask) for l in self.l])
+        else:
+            out = self.l[level].cell(mask=mask)
+
+        return out
 
     def state(self, level=None, discrete=False, method='round', mask=None):
         if level is None:
@@ -1819,21 +1997,37 @@ class HMLSTMOutputLevel(object):
 
         with self.session.as_default():
             with self.session.graph.as_default():
-                self.h = output[0]
-                if len(output) > 2:
-                    self.z_prob = output[1]
-                    self.z = output[2]
-                    if len(output) > 3:
-                        self.lm_logits_tensor = output[3]
-                    else:
-                        self.lm_logits_tensor = None
-                else:
+                self.c = output[0]
+                self.h = output[1]
+                if len(output) == 2: # Final layer, no LM predictions
                     self.z_prob = None
                     self.z = None
-                    if len(output) > 1:
-                        self.lm_logits_tensor = output[1]
-                    else:
-                        self.lm_logits_tensor = None
+                    self.lm_logits_tensor = None
+                elif len(output) == 3: # Final layer, LM predictions
+                    self.z_prob = None
+                    self.z = None
+                    self.lm_logits_tensor = output[2]
+                elif len(output) == 4: # Non-final layer, no LM predictions
+                    self.z_prob = output[2]
+                    self.z = output[3]
+                    self.lm_logits_tensor = None
+                elif len(output) == 5: # Non-final layer, LM predictions
+                    self.z_prob = output[2]
+                    self.z = output[3]
+                    self.lm_logits_tensor = output[4]
+                else:
+                    raise ValueError('Not a valid HMLSTM output object. Must have between 3 and 5 elements, saw %d.' % len(output))
+
+    def cell(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                out = self.c
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
+
+                return out
 
     def state(self, discrete=False, discretization_method='round', mask=None):
         with self.session.as_default():
@@ -2080,7 +2274,7 @@ class DenseLayer(object):
             training=True,
             units=None,
             use_bias=True,
-            kernel_initializer='glorot_uniform_initializer',
+            kernel_initializer='glorot_normal_initializer',
             bias_initializer='zeros_initializer',
             kernel_regularizer=None,
             bias_regularizer=None,
@@ -2111,7 +2305,7 @@ class DenseLayer(object):
         self.dense_layer = None
         self.projection = None
 
-        self.initializer = get_initializer('glorot_normal_initializer', self.session)
+        self.initializer = get_initializer(kernel_initializer, self.session)
 
         self.built = False
 
@@ -2177,7 +2371,7 @@ class DenseResidualLayer(object):
             training=True,
             units=None,
             use_bias=True,
-            kernel_initializer='glorot_uniform_initializer',
+            kernel_initializer='glorot_normal_initializer',
             bias_initializer='zeros_initializer',
             kernel_regularizer=None,
             bias_regularizer=None,
@@ -2587,7 +2781,7 @@ class RNNLayer(object):
             units=None,
             activation=None,
             recurrent_activation='sigmoid',
-            kernel_initializer='glorot_uniform_initializer',
+            kernel_initializer='glorot_normal_initializer',
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             return_sequences=True,
@@ -2665,7 +2859,7 @@ class RNNResidualLayer(object):
             activation=None,
             activation_inner=None,
             recurrent_activation='sigmoid',
-            kernel_initializer='glorot_uniform_initializer',
+            kernel_initializer='glorot_normal_initializer',
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             return_sequences=True,
@@ -2884,6 +3078,278 @@ class MultiRNNLayer(object):
                     H = H[:,-1]
 
                 return H
+
+
+class RevNetBlock(object):
+    def __init__(
+            self,
+            training=True,
+            layers_inner=1,
+            use_bias=True,
+            kernel_initializer='glorot_normal_initializer',
+            bias_initializer='zeros_initializer',
+            kernel_regularizer=None,
+            bias_regularizer=None,
+            activation=None,
+            batch_normalization_decay=None,
+            reuse=None,
+            session=None,
+            name=None
+    ):
+        self.session = get_session(session)
+
+        self.training = training
+        self.layers_inner = layers_inner
+        self.use_bias = use_bias
+        self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
+        if bias_initializer is None:
+            bias_initializer = 'zeros_initializer'
+        self.bias_initializer = get_initializer(bias_initializer, session=self.session)
+        self.kernel_regularizer = get_regularizer(kernel_regularizer, session=self.session)
+        self.bias_regularizer = get_regularizer(bias_regularizer, session=self.session)
+        self.activation = get_activation(activation, training=self.training, session=self.session)
+        self.batch_normalization_decay = batch_normalization_decay
+        self.reuse = reuse
+        self.name = name
+
+        self.regularizer_losses = []
+        self.W = []
+        if self.use_bias:
+            self.b = []
+        self.F = []
+        self.built = False
+
+    def build(self, inputs, weights=None):
+        if not self.built:
+            with self.session.as_default():
+                with self.session.graph.as_default():
+                    assert int(inputs.shape[-1]) % 2 == 0, 'Final dimension of inputs to RevNetBlock must have even number of units, saw %d.' % int(inputs.shape[-1])
+                    k = int(int(inputs.shape[-1]) / 2)
+                    if weights is None:
+                        p = 1
+                    else:
+                        p = weights.shape[-1]
+
+                    for l in range(self.layers_inner):
+                        if self.name:
+                            name_cur = self.name + '_W_%d' % (l + 1)
+                        else:
+                            name_cur = 'revnet_W_%d' % (l + 1)
+                        W = tf.get_variable(
+                            name_cur,
+                            shape=[p, k, k],
+                            initializer=self.kernel_initializer,
+                        )
+                        self.regularize(W, self.kernel_regularizer)
+                        self.W.append(W)
+                        
+                        if self.use_bias:
+                            if self.name:
+                                name_cur = self.name + '_b_%d' % (l + 1)
+                            else:
+                                name_cur = 'revnet_b_%d' % (l + 1)
+                            b = tf.get_variable(
+                                name_cur,
+                                shape=[p, k],
+                                initializer=self.kernel_initializer,
+                            )
+                            self.regularize(b, self.kernel_regularizer)
+                            self.b.append(b)
+
+                    self.built = True
+
+    def _apply_inner(self, X, l, weights=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                W = self.W[l]
+                if self.use_bias:
+                    b = self.b[l]
+                if weights is None:
+                    out = tf.matmul(X, W[0])
+                    if self.use_bias:
+                        out += b[0]
+                else:
+                    W = tf.tensordot(weights, W, 1)
+                    retile = False
+                    while len(W.shape) <= len(X.shape):
+                        retile = True
+                        W = tf.expand_dims(W, axis=-3)
+                    if retile:
+                        tile_shape = tf.concat([[1], tf.shape(X)[1:-1], [1,1]], axis=0)
+                        W = tf.tile(W, tile_shape)
+                    out = tf.matmul(W, X[..., None])[..., 0]
+                    if self.use_bias:
+                        b = tf.tensordot(weights, b, 1)
+                        while len(b.shape) < len(X.shape):
+                            b = tf.expand_dims(b, axis=-2)
+                        out += b
+
+                if self.batch_normalization_decay:
+                    if self.name:
+                        name_cur = self.name + '_bn_%d' % (l + 1)
+                    else:
+                        name_cur = 'revnet_bn_%d' % (l + 1)
+                    out = tf.contrib.layers.batch_norm(
+                        out,
+                        decay=self.batch_normalization_decay,
+                        center=True,
+                        scale=True,
+                        zero_debias_moving_mean=True,
+                        is_training=self.training,
+                        updates_collections=None,
+                        reuse=self.reuse,
+                        scope=name_cur
+                    )
+                if self.activation is not None:
+                    out = self.activation(out)
+
+                return out
+
+    def forward(self, inputs, weights=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                assert int(inputs.shape[-1]) % 2 == 0, 'Final dimension of inputs to RevNetBlock must have even number of units, saw %d.' % int(inputs.shape[-1])
+
+                if not self.built:
+                    self.build(inputs, weights=weights)
+
+                k = int(int(inputs.shape[-1]) / 2)
+
+                left = inputs[..., :k]
+                right = inputs[..., k:]
+
+                new_right = right
+                for l in range(self.layers_inner):
+                    new_right = self._apply_inner(new_right, l, weights=weights)
+                new_right = left + new_right
+                new_left = right
+                out = tf.concat([new_left, new_right], axis=-1)
+
+                return out
+
+    def backward(self, inputs, weights=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                assert int(inputs.shape[-1]) % 2 == 0, 'Final dimension of inputs to RevNetBlock must have even number of units, saw %d.' % int(inputs.shape[-1])
+
+                if not self.built:
+                    self.build(inputs, weights=weights)
+
+                k = int(int(inputs.shape[-1]) / 2)
+
+                left = inputs[..., :k]
+                right = inputs[..., k:]
+
+                new_left = left
+                for l in range(self.layers_inner):
+                    new_left = self._apply_inner(new_left, l, weights=weights)
+                new_left = right - new_left
+                new_right = left
+                out = tf.concat([new_left, new_right], axis=-1)
+
+                return out
+
+    def regularize(self, var, regularizer):
+        if regularizer is not None:
+            with self.session.as_default():
+                with self.session.graph.as_default():
+                    reg = tf.contrib.layers.apply_regularization(regularizer, [var])
+                    self.regularizer_losses.append(reg)
+
+    def get_regularizer_losses(self):
+        return self.regularizer_losses[:]
+
+
+class RevNet(object):
+    def __init__(
+            self,
+            training=True,
+            layers=1,
+            layers_inner=1,
+            use_bias=True,
+            kernel_initializer='glorot_normal_initializer',
+            bias_initializer='zeros_initializer',
+            kernel_regularizer=None,
+            bias_regularizer=None,
+            activation=None,
+            batch_normalization_decay=None,
+            reuse=None,
+            session=None,
+            name=None
+    ):
+        self.session = get_session(session)
+
+        self.training = training
+        self.layers = layers
+        self.layers_inner = layers_inner
+        self.use_bias = use_bias
+        self.kernel_initializer = kernel_initializer
+        self.bias_initializer = bias_initializer
+        self.kernel_regularizer = kernel_regularizer
+        self.bias_regularizer = bias_regularizer
+        self.activation = activation
+        self.batch_normalization_decay = batch_normalization_decay
+        self.reuse = reuse
+        if name is None:
+            self.name = 'revnet'
+        else:
+            self.name = name
+
+        self.blocks = []
+        for l in range(self.layers):
+            self.blocks.append(
+                RevNetBlock(
+                    training=self.training,
+                    layers_inner=self.layers_inner,
+                    use_bias=self.use_bias,
+                    kernel_initializer=self.kernel_initializer,
+                    bias_initializer=self.bias_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    bias_regularizer=self.bias_regularizer,
+                    activation=self.activation,
+                    batch_normalization_decay=self.batch_normalization_decay,
+                    reuse=self.reuse,
+                    name=self.name + '_%d' % l
+                )
+            )
+        self.built = False
+
+    def build(self, inputs, weights=None):
+        if not self.built:
+            with self.session.as_default():
+                with self.session.graph.as_default():
+                    for l in range(self.layers):
+                        self.blocks[l].build(inputs, weights=weights)
+
+                    self.built = True
+
+    def forward(self, inputs, weights=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                if not self.built:
+                    self.build(inputs, weights=weights)
+                out = inputs
+                for l in range(self.layers):
+                    b = self.blocks[l]
+                    out = b.forward(out, weights=weights)
+                return out
+
+    def backward(self, inputs, weights=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                if not self.built:
+                    self.build(inputs, weights=weights)
+                out = inputs
+                for l in range(self.layers-1, -1, -1):
+                    b = self.blocks[l]
+                    out = b.backward(out, weights=weights)
+                return out
+
+    def get_regularizer_losses(self):
+        out = []
+        for b in self.blocks:
+            out += b.get_regularizer_losses()
+        return out
 
 
 def rnn_encoder(
@@ -3284,7 +3750,7 @@ def preprocess_decoder_inputs(
                     # )[None, None, ...]
                     # gain = tf.get_variable(
                     #     'gain_%s' % name,
-                    #     initializer=tf.glorot_uniform_initializer(),
+                    #     initializer=tf.glorot_normal_initializer(),
                     #     shape=[temporal_encoding_units]
                     # )[None, None, ...]
                     frequency = tf.exp(frequency_logits)[None, None, ...]
@@ -3293,7 +3759,7 @@ def preprocess_decoder_inputs(
 
                 else:
                     raise ValueError(
-                        'Unrecognized decoder temporal encoding type "%s".' % self.decoder_temporal_encoding_type)
+                        'Unrecognized decoder temporal encoding type "%s".' % decoder_temporal_encoding_type)
 
                 # Transform the temporal encoding
                 if decoder_temporal_encoding_transform:
@@ -3363,8 +3829,8 @@ def preprocess_decoder_inputs(
                 else:
                     temporal_encoding = tf.tile(temporal_encoding, [tf.shape(out)[0], 1, 1])
                     out = tf.concat([out, temporal_encoding], axis=-1)
+            else:
+                temporal_encoding = None
+                final_shape_temporal_encoding = None
 
-                return out, temporal_encoding, flatten_batch, final_shape, final_shape_temporal_encoding
-
-
-
+            return out, temporal_encoding, flatten_batch, final_shape, final_shape_temporal_encoding
