@@ -725,6 +725,7 @@ class AcousticEncoderDecoder(object):
                         refeed_boundary=False,
                         power=self.encoder_boundary_power,
                         use_timing_unit=self.encoder_use_timing_unit,
+                        use_bias=True,
                         boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                         state_slope_annealing_rate=self.state_slope_annealing_rate,
                         slope_annealing_max=self.slope_annealing_max,
@@ -4851,8 +4852,8 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                 if l == 0:
                                     lm_targets = self.inputs
                                 else:
-                                    # lm_targets = tf.stop_gradient(self.encoder_hidden_states[l - 1])
-                                    lm_targets = self.encoder_hidden_states[l - 1]
+                                    lm_targets = tf.stop_gradient(self.encoder_hidden_states[l - 1])
+                                    # lm_targets = self.encoder_hidden_states[l - 1]
 
                                 if l == 0:
                                     k = int(self.inputs.shape[-1])
@@ -4883,10 +4884,10 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                     distance_func=self._lm_distance_func(l),
                                     mask=self.X_mask[...,1:],
                                     reduce=True
-                                )
+                                ) * self.lm_loss_scale # * 10**(l)
 
                                 self.encoder_lm_losses.insert(0, lm_losses)
-                                loss += lm_losses * self.lm_loss_scale
+                                loss += lm_losses
 
 
                                 # if l == 0:

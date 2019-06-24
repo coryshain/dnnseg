@@ -613,6 +613,7 @@ class HMLSTMCell(LayerRNNCell):
             refeed_boundary=False,
             power=None,
             use_timing_unit=False,
+            use_bias=True,
             boundary_slope_annealing_rate=None,
             state_slope_annealing_rate=None,
             slope_annealing_max=None,
@@ -730,6 +731,7 @@ class HMLSTMCell(LayerRNNCell):
                     self._refeed_boundary = refeed_boundary
                     self._power = power
                     self._use_timing_unit = use_timing_unit
+                    self._use_bias = use_bias
                     self._boundary_slope_annealing_rate = boundary_slope_annealing_rate
                     self._state_slope_annealing_rate = state_slope_annealing_rate
                     self._slope_annealing_max = slope_annealing_max
@@ -857,14 +859,17 @@ class HMLSTMCell(LayerRNNCell):
                     self._kernel_bottomup = []
                     self._kernel_recurrent = []
                     self._kernel_topdown = []
-                    self._bias_boundary = []
+                    if self._use_bias:
+                        self._bias_boundary = []
                     if self._lm:
                         self._kernel_lm_bottomup = []
                         self._kernel_lm_recurrent = []
                         # self._kernel_lm_topdown = []
-                        self._bias_lm = []
+                        if self._use_bias:
+                            self._bias_lm = []
 
-                    self._bias = []
+                    if self._use_bias:
+                        self._bias = []
 
                     if self._implementation == 2:
                         self._kernel_boundary = []
@@ -897,7 +902,7 @@ class HMLSTMCell(LayerRNNCell):
                                 kernel_bottomup_layer = DenseResidualLayer(
                                     training=self._training,
                                     units=bottom_up_dim,
-                                    use_bias=True,
+                                    use_bias=self._use_bias,
                                     kernel_initializer=self._bottomup_initializer,
                                     bias_initializer=self._bias_initializer,
                                     kernel_regularizer=self._bottomup_regularizer,
@@ -916,7 +921,7 @@ class HMLSTMCell(LayerRNNCell):
                                 kernel_bottomup_layer = DenseLayer(
                                     training=self._training,
                                     units=output_dim,
-                                    use_bias=False,
+                                    use_bias=self._use_bias,
                                     kernel_initializer=self._bottomup_initializer,
                                     bias_initializer=self._bias_initializer,
                                     kernel_regularizer=self._bottomup_regularizer,
@@ -951,7 +956,7 @@ class HMLSTMCell(LayerRNNCell):
                                 kernel_recurrent_layer = DenseResidualLayer(
                                     training=self._training,
                                     units=recurrent_dim,
-                                    use_bias=True,
+                                    use_bias=self._use_bias,
                                     kernel_initializer=self._recurrent_initializer,
                                     bias_initializer=self._bias_initializer,
                                     kernel_regularizer=self._recurrent_regularizer,
@@ -970,7 +975,7 @@ class HMLSTMCell(LayerRNNCell):
                                 kernel_recurrent_layer = DenseLayer(
                                     training=self._training,
                                     units=output_dim,
-                                    use_bias=False,
+                                    use_bias=self._use_bias,
                                     kernel_initializer=self._recurrent_initializer,
                                     bias_initializer=self._bias_initializer,
                                     kernel_regularizer=self._recurrent_regularizer,
@@ -1008,7 +1013,7 @@ class HMLSTMCell(LayerRNNCell):
                                     kernel_topdown_layer = DenseResidualLayer(
                                         training=self._training,
                                         units=top_down_dim,
-                                        use_bias=True,
+                                        use_bias=self._use_bias,
                                         kernel_initializer=self._topdown_initializer,
                                         bias_initializer=self._bias_initializer,
                                         kernel_regularizer=self._topdown_regularizer,
@@ -1027,7 +1032,7 @@ class HMLSTMCell(LayerRNNCell):
                                     kernel_topdown_layer = DenseLayer(
                                         training=self._training,
                                         units=output_dim,
-                                        use_bias=False,
+                                        use_bias=self._use_bias,
                                         kernel_initializer=self._topdown_initializer,
                                         bias_initializer=self._bias_initializer,
                                         kernel_regularizer=self._topdown_regularizer,
@@ -1068,7 +1073,7 @@ class HMLSTMCell(LayerRNNCell):
                                     kernel_lm_bottomup_layer = DenseResidualLayer(
                                         training=self._training,
                                         units=recurrent_dim + bottom_up_dim,
-                                        use_bias=True,
+                                        use_bias=self._use_bias,
                                         kernel_initializer=self._bottomup_initializer,
                                         bias_initializer=self._bias_initializer,
                                         kernel_regularizer=self._bottomup_regularizer,
@@ -1087,7 +1092,7 @@ class HMLSTMCell(LayerRNNCell):
                                     kernel_lm_bottomup_layer = DenseLayer(
                                         training=self._training,
                                         units=lm_out_dim,
-                                        use_bias=False,
+                                        use_bias=self._use_bias,
                                         kernel_initializer=self._bottomup_initializer,
                                         bias_initializer=self._bias_initializer,
                                         kernel_regularizer=self._bottomup_regularizer,
@@ -1123,7 +1128,7 @@ class HMLSTMCell(LayerRNNCell):
                                     kernel_lm_recurrent_layer = DenseResidualLayer(
                                         training=self._training,
                                         units=lm_recurrent_in_dim,
-                                        use_bias=True,
+                                        use_bias=self._use_bias,
                                         kernel_initializer=self._recurrent_initializer,
                                         bias_initializer=self._bias_initializer,
                                         kernel_regularizer=self._recurrent_regularizer,
@@ -1142,7 +1147,7 @@ class HMLSTMCell(LayerRNNCell):
                                     kernel_lm_recurrent_layer = DenseLayer(
                                         training=self._training,
                                         units=lm_out_dim,
-                                        use_bias=False,
+                                        use_bias=self._use_bias,
                                         kernel_initializer=self._recurrent_initializer,
                                         bias_initializer=self._bias_initializer,
                                         kernel_regularizer=self._recurrent_regularizer,
@@ -1232,15 +1237,16 @@ class HMLSTMCell(LayerRNNCell):
                             #
                             #     self._kernel_lm_topdown.append(kernel_lm_topdown)
 
-                            bias_lm = self.add_variable(
-                                'bias_lm_%d' % l,
-                                shape=[1, lm_out_dim],
-                                initializer=self._bias_initializer
-                            )
-                            self._regularize(bias_lm, self._bias_regularizer)
-                            self._bias_lm.append(bias_lm)
+                            if self._use_bias:
+                                bias_lm = self.add_variable(
+                                    'bias_lm_%d' % l,
+                                    shape=[1, lm_out_dim],
+                                    initializer=self._bias_initializer
+                                )
+                                self._regularize(bias_lm, self._bias_regularizer)
+                                self._bias_lm.append(bias_lm)
 
-                        if not self._layer_normalization:
+                        if not self._layer_normalization and self._use_bias:
                             bias = self.add_variable(
                                 'bias_%d' % l,
                                 shape=[1, output_dim],
@@ -1250,7 +1256,7 @@ class HMLSTMCell(LayerRNNCell):
                             self._bias.append(bias)
 
                         if not self._oracle_boundary:
-                            if self._implementation == 1 and not self._layer_normalization:
+                            if self._implementation == 1 and not self._layer_normalization and self._use_bias:
                                 bias_boundary = bias[:, -1:]
                                 self._bias_boundary.append(bias_boundary)
 
@@ -1261,7 +1267,7 @@ class HMLSTMCell(LayerRNNCell):
                                         kernel_boundary_layer = DenseResidualLayer(
                                             training=self._training,
                                             units=self._num_units[l] + self._use_timing_unit,
-                                            use_bias=True,
+                                            use_bias=self._use_bias,
                                             kernel_initializer=self._boundary_initializer,
                                             bias_initializer=self._bias_initializer,
                                             kernel_regularizer=self._boundary_regularizer,
@@ -1280,7 +1286,7 @@ class HMLSTMCell(LayerRNNCell):
                                         kernel_boundary_layer = DenseLayer(
                                             training=self._training,
                                             units=1,
-                                            use_bias=False,
+                                            use_bias=self._use_bias,
                                             kernel_initializer=self._boundary_initializer,
                                             bias_initializer=self._bias_initializer,
                                             kernel_regularizer=self._boundary_regularizer,
@@ -1309,13 +1315,14 @@ class HMLSTMCell(LayerRNNCell):
 
                                 self._kernel_boundary.append(kernel_boundary)
 
-                                bias_boundary = self.add_variable(
-                                    'bias_boundary_%d' % l,
-                                    shape=[1, 1],
-                                    initializer=self._bias_initializer
-                                )
-                                self._regularize(bias_boundary, self._bias_regularizer)
-                                self._bias_boundary.append(bias_boundary)
+                                if self._use_bias:
+                                    bias_boundary = self.add_variable(
+                                        'bias_boundary_%d' % l,
+                                        shape=[1, 1],
+                                        initializer=self._bias_initializer
+                                    )
+                                    self._regularize(bias_boundary, self._bias_regularizer)
+                                    self._bias_boundary.append(bias_boundary)
 
                     if not self._oracle_boundary:
                         if self._boundary_slope_annealing_rate and self.global_step is not None:
@@ -1443,17 +1450,13 @@ class HMLSTMCell(LayerRNNCell):
 
                             h_below = tf.cond(self._training, train_func, eval_func)
 
-                            if self._temporal_dropout_plug_lm:
+                            if self._lm and self._temporal_dropout_plug_lm:
                                 pred_prev = state[l][-1]
                                 if self._one_hot_inputs and l == 0:
                                     pred_prev = tf.nn.softmax(pred_prev)
                                 elif self._state_discretizer and l > 0:
-                                    pred_prev = self._state_discretizer(tf.sigmoid(pred_prev))
+                                    pred_prev = tf.sigmoid(pred_prev)
                                 h_below += pred_prev
-
-                        elif self._lm:
-                            pass
-                            # h_below = (h_below + lm) / 2.
 
                         # h_below = self._temporal_dropout[l](h_below)
                         if l > 0 and self._state_discretizer and self._discretize_state_at_boundary and self.global_step is not None:
@@ -1484,7 +1487,7 @@ class HMLSTMCell(LayerRNNCell):
                             z_logit = s[:, units * 4:]
                             s = s[:, :units * 4]
 
-                        if not self._layer_normalization:
+                        if not self._layer_normalization and self._use_bias:
                             if self._implementation == 1:
                                 z_logit += self._bias[l][:, units * 4:]
                             s = s + self._bias[l][:, :units * 4]
@@ -1541,8 +1544,8 @@ class HMLSTMCell(LayerRNNCell):
                         else:
                             h = o * activation(h_in)
 
-                        if l < self._num_layers - 1 and self._state_discretizer and not self._discretize_state_at_boundary and self.global_step is not None:
-                        # if self._state_discretizer and not self._discretize_state_at_boundary and self.global_step is not None:
+                        # if l < self._num_layers - 1 and self._state_discretizer and not self._discretize_state_at_boundary and self.global_step is not None:
+                        if self._state_discretizer and not self._discretize_state_at_boundary and self.global_step is not None:
                             h = self._state_discretizer(h)
 
                         # Mix gated output with the previous hidden state proportionally to the copy probability
@@ -1560,7 +1563,7 @@ class HMLSTMCell(LayerRNNCell):
                             if self._one_hot_inputs and l == 0:
                                 pred_prev = tf.nn.softmax(pred_prev)
                             elif self._state_discretizer and l > 0:
-                                pred_prev = self._state_discretizer(tf.sigmoid(h))
+                                pred_prev = tf.sigmoid(h)
 
                             # pred_new = self._kernel_lm_recurrent[l](pred_prev) + self._kernel_lm_bottomup[l](h)
                             pred_new = self._kernel_lm_bottomup[l](tf.concat([pred_prev, h], axis=-1))
@@ -1584,7 +1587,8 @@ class HMLSTMCell(LayerRNNCell):
                                     z_in = self._boundary_dropout(z_in)
                                     # In implementation 2, boundary is a function of the hidden state
                                     z_logit = self._kernel_boundary[l](z_in)
-                                    z_logit += self._bias_boundary[l]
+                                    if self._use_bias:
+                                        z_logit += self._bias_boundary[l]
 
                                 if self._boundary_slope_annealing_rate and self.global_step is not None:
                                     z_logit *= self.boundary_slope_coef
@@ -1732,6 +1736,7 @@ class HMLSTMSegmenter(object):
             refeed_boundary=False,
             power=None,
             use_timing_unit=False,
+            use_bias=True,
             boundary_slope_annealing_rate=None,
             state_slope_annealing_rate=None,
             slope_annealing_max=None,
@@ -1805,6 +1810,7 @@ class HMLSTMSegmenter(object):
                     self.refeed_boundary = refeed_boundary
                     self.power = power
                     self.use_timing_unit = use_timing_unit
+                    self.use_bias = use_bias
                     self.boundary_slope_annealing_rate = boundary_slope_annealing_rate
                     self.state_slope_annealing_rate = state_slope_annealing_rate
                     self.slope_annealing_max = slope_annealing_max
@@ -1875,6 +1881,7 @@ class HMLSTMSegmenter(object):
                         refeed_boundary=self.refeed_boundary,
                         power=self.power,
                         use_timing_unit=self.use_timing_unit,
+                        use_bias=self.use_bias,
                         boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                         state_slope_annealing_rate=self.state_slope_annealing_rate,
                         slope_annealing_max=self.slope_annealing_max,
