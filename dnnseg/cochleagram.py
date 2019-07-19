@@ -114,7 +114,7 @@ def invert_cochleagrams(
         cgram_types.append('fwd_target')
         cgram_fps.append(fps[3])
         cgram_lists.append(targets_fwd)
-    if targets_fwd is not None:
+    if preds_fwd is not None:
         cgram_types.append('fwd_pred')
         cgram_fps.append(fps[4])
         cgram_lists.append(preds_fwd)

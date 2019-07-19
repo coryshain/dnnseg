@@ -9,7 +9,6 @@ from matplotlib import ticker, pyplot as plt
 import seaborn as sns
 from .data import extract_segment_timestamps
 
-
 class SmartDict(dict):
     def __missing__(self, key):
         return key
@@ -34,7 +33,7 @@ def plot_acoustic_features(
         cmap='Blues',
         titles=None,
         label_map=None,
-        dir='./',
+        directory='./',
         prefix='',
         suffix='.png'
 ):
@@ -205,7 +204,7 @@ def plot_acoustic_features(
                 index=list(range(1, segmentation_probs_cur.shape[0] + 1))
             )
 
-            ax_seg.pcolormesh(df, cmap='Greys', vmin=0., vmax=1.)
+            pcm = ax_seg.pcolormesh(df, cmap='Greys', vmin=0., vmax=1.)
             ax_seg.xaxis.set_major_formatter(time_tick_formatter)
             ax_seg.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
             ax_seg.set_yticklabels(df.index)
@@ -238,7 +237,9 @@ def plot_acoustic_features(
                 if has_smoothing:
                     ax_seg_smoothed.plot(basis, segmentation_probs_cur[j], color=list(colors[j][:-1]) + [0.5], linestyle=':', label='L%d source' %(j+1))
                     ax_seg_smoothed.plot(basis, segs_smoothed, color=colors[j], label='L%d smoothed' %(j+1))
-                ax_seg_hard.vlines(timestamps, j, j+1, color='k')
+                # _, _, w, _ = ax_seg_hard.get_window_extent().bounds
+                # linewidth = w / len(segs_smoothed)
+                ax_seg_hard.vlines(timestamps, j, j+1, color='k', linewidth=1)
 
             if has_smoothing:
                 ax_seg_smoothed.set_xlim(0., basis[-1])
@@ -400,7 +401,7 @@ def plot_acoustic_features(
             fig.suptitle(title, fontsize=20, weight='bold')
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         try:
-            fig.savefig(dir + '/' + prefix + '%d_featureplot' % i + suffix)
+            fig.savefig(directory + '/' + prefix + '%d_featureplot' % i + suffix)
         except Exception:
             sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
 
@@ -527,5 +528,53 @@ def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cm
 
     plt.close('all')
 
+
+def plot_projections(
+        df,
+        cmap='hls',
+        label_map=None,
+        feature_table=None,
+        feature_names=None,
+        directory='./',
+        prefix='',
+        suffix='.png'
+):
+    df = df.copy()
+
+    df['CV'] = df.label.map(lambda x: 'V' if (not x[0] in ['el', 'en'] and x[0] in ['a', 'e', 'i', 'o', 'u']) else 'C')
+
+    if label_map is not None:
+        df['IPA'] = df.label.map(label_map)
+
+    if feature_table is not None:
+        df = df.merge(feature_table, on=['label'])
+
+    colors = ['CV']
+    if 'IPA' in df.columns:
+        colors.append('IPA')
+    else:
+        colors.append('label')
+
+    if feature_names is not None:
+        for c in feature_names:
+            df[c] = df[c].map({0: '-', 1: '+'})
+        colors += feature_names
+
+    df['t-SNE 1'] = df.tsne0
+    df['t-SNE 2'] = df.tsne1
+
+    for c in colors:
+        df['Segment Type'] = df[c]
+
+        sns.set_style('white')
+
+        with sns.plotting_context(rc={'legend.fontsize': 'small', 'lines.markersize': 2}):
+            g = sns.relplot(x='t-SNE 1', y='t-SNE 2', kind='scatter', hue='Segment Type', data=df.sort_values('Segment Type'), palette=cmap, legend='full')
+        try:
+            g.savefig(directory + '/' + prefix + 'projections_%s' % c + suffix)
+        except Exception:
+            sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
+
+        plt.close('all')
 
 

@@ -2,10 +2,12 @@ import sys
 import os
 import math
 import time
+import re
 import numpy as np
 import scipy.signal
 import pandas as pd
 from scipy.interpolate import Rbf
+from sklearn.manifold import TSNE
 
 
 def binary_to_integer_np(b, int_type='int32'):
@@ -175,12 +177,12 @@ def extract_segment_timestamps_batch(
 def extract_states_at_timestamps(
         timestamps,
         states,
-        steps_per_second=100.,
+        seconds_per_step=0.01,
         activation='tanh',
         discretize=True,
         as_categories=True
 ):
-    ix = np.minimum(np.floor(timestamps * steps_per_second), len(states) - 1).astype('int')
+    ix = np.minimum(np.floor(timestamps / seconds_per_step), len(states) - 1).astype('int')
     out = states[ix]
 
     if discretize:
@@ -192,7 +194,7 @@ def extract_states_at_timestamps(
                 one_hot[np.argmax(out, axis=-1)[..., None]] = 1
                 out = one_hot.astype('int')
         else:
-            if activation == 'sigmoid':
+            if 'sigmoid' in activation:
                 threshold = 0.5
             else:
                 threshold = 0.0
@@ -209,7 +211,7 @@ def extract_states_at_timestamps(
 def extract_states_at_timestamps_batch(
         timestamps,
         states,
-        steps_per_second=100.,
+        seconds_per_step=0.01,
         activation='tanh',
         discretize=True,
         as_categories=True,
@@ -232,7 +234,7 @@ def extract_states_at_timestamps_batch(
         out_cur = extract_states_at_timestamps(
             timestamps[i],
             states_i,
-            steps_per_second=steps_per_second,
+            seconds_per_step=seconds_per_step,
             activation=activation,
             discretize=discretize,
             as_categories=as_categories
@@ -413,8 +415,8 @@ def segment_length_summary(segs, indent=0, steps_per_second=100.):
 
 
 def score_segmentation(true, pred, tol=0.02):
-    true = np.array(true[['start','end']])
-    pred = np.array(pred[['start','end']])
+    _true = np.array(true[['start', 'end']])
+    _pred = np.array(pred[['start', 'end']])
 
     i = 0
     j = 0
@@ -427,15 +429,15 @@ def score_segmentation(true, pred, tol=0.02):
     w_fp = 0
     w_fn = 0
 
-    e_true_prev = true[0, 0]
-    e_pred_prev = pred[0, 0]
+    e_true_prev = _true[0, 0]
+    e_pred_prev = _pred[0, 0]
 
-    while i < len(true) or j < len(pred):
-        if i >= len(true):
+    while i < len(_true) or j < len(_pred):
+        if i >= len(_true):
             # All gold segments have been read.
             # Scan to the end of the predicted segments and tally up precision penalties.
 
-            s_pred, e_pred = pred[j]
+            s_pred, e_pred = _pred[j]
 
             jump_pred = s_pred - e_pred_prev > 1e-5
             if jump_pred:
@@ -447,11 +449,11 @@ def score_segmentation(true, pred, tol=0.02):
 
             e_pred_prev = e_pred
 
-        elif j >= len(pred):
+        elif j >= len(_pred):
             # All predicted segments have been read.
             # Scan to the end of the true segments and tally up recall penalties.
 
-            s_true, e_true = true[i]
+            s_true, e_true = _true[i]
 
             jump_true = s_true - e_true_prev > 1e-5
             if jump_true:
@@ -465,9 +467,8 @@ def score_segmentation(true, pred, tol=0.02):
 
         else:
             # Neither true nor pred have finished
-
-            s_true, e_true = true[i]
-            s_pred, e_pred = pred[j]
+            s_true, e_true = _true[i]
+            s_pred, e_pred = _pred[j]
 
             # If there is a "jump" in the true segs, create a pseudo segment spanning the jump
             jump_true = s_true - e_true_prev > 1e-5
@@ -553,6 +554,109 @@ def score_segmentation(true, pred, tol=0.02):
     }
 
     return out
+
+
+def extract_matching_segments(true, pred, tol=0.02):
+    embedding_columns = [c for c in pred.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
+    embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
+    if len(embedding_columns) < 1:
+        sys.stderr.write('No embeddings in prediction dataframe. Skipping segment extraction...\n')
+        sys.stderr.flush()
+        return pred
+    _true = np.array(true[['start', 'end']])
+    _pred = np.array(pred[['start', 'end']])
+    _embeddings = np.array(pred[embedding_columns])
+
+    i = 0
+    j = 0
+
+    e_true_prev = _true[0, 0]
+    e_pred_prev = _pred[0, 0]
+
+    match_true = np.zeros(len(_true)).astype('bool')
+    embeddings = []
+    pred_starts = []
+    pred_ends = []
+
+    while i < len(_true) and j < len(_pred):
+        # Neither true nor pred have finished
+        s_true, e_true = _true[i]
+        s_pred, e_pred = _pred[j]
+
+        # If there is a "jump" in the true segs, create a pseudo segment spanning the jump
+        jump_true = s_true - e_true_prev > 1e-5
+        if jump_true:
+            e_true = s_true
+            s_true = e_true_prev
+
+        # If there is a "jump" in the predicted segs, create a pseudo segment spanning the jump
+        jump_pred = s_pred - e_pred_prev > 1e-5
+        if jump_pred:
+            e_pred = s_pred
+            s_pred = e_pred_prev
+
+        # Compute whether starts and ends of true and predicted segments align within the tolerance
+        s_hit = False
+        e_hit = False
+
+        s_diff = math.fabs(s_true - s_pred)
+        e_diff = math.fabs(e_true - e_pred)
+
+        if s_diff <= tol:
+            s_hit = True
+        if e_diff <= tol:
+            e_hit = True
+
+        if s_hit:
+            if e_hit and not (jump_true or jump_pred):
+                match_true[i] = True
+                embeddings.append(_embeddings[j])
+                pred_starts.append(s_pred)
+                pred_ends.append(e_pred)
+
+            i += not jump_true
+            j += not jump_pred
+            e_true_prev = e_true
+            e_pred_prev = e_pred
+
+        elif s_true < s_pred:
+            i += not jump_true
+            e_true_prev = e_true
+
+        else:
+            j += not jump_pred
+            e_pred_prev = e_pred
+
+    embeddings = np.stack(embeddings, axis=0)
+
+    out = true[match_true].reset_index(drop=True)
+    for c in range(len(embedding_columns)):
+        out[embedding_columns[c]] = embeddings[:,c]
+    out['predStart'] = pred_starts
+    out['predEnd'] = pred_ends
+
+    return out
+
+
+def project_matching_segments(df, verbose=True):
+    if verbose:
+        sys.stderr.write('Projecting %d segments using t-SNE...\n' % len(df))
+        sys.stderr.flush()
+    embedding_columns = [c for c in df.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
+    embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
+    if len(embedding_columns) < 1:
+        sys.stderr.write('No embeddings in prediction dataframe. Skipping projection...\n')
+        sys.stderr.flush()
+        return df
+
+    X = df[embedding_columns]
+
+    tsne = TSNE(n_components=2).fit_transform(np.array(X))
+
+    df['tsne0'] = tsne[:, 0]
+    df['tsne1'] = tsne[:, 1]
+
+    return df
 
 
 def precision_recall(n_matched, n_true, n_pred):
@@ -970,13 +1074,9 @@ class Dataset(object):
             mask=None,
             pad_left=None,
             pad_right=None,
-            normalize=False,
-            center=False,
-            standardize=False,
+            normalization=None,
             reduction_axis='time'
     ):
-        assert not (standardize and (normalize or center)), 'standardize is mutually exclusive with normalize and center.'
-
         out = []
         boundaries = []
         new_series = []
@@ -996,9 +1096,7 @@ class Dataset(object):
                     segments=mask,
                     features=features_cur,
                     boundaries_as_features=boundaries_as_features,
-                    normalize=normalize,
-                    center=center,
-                    standardize=standardize,
+                    normalization=normalization,
                     reduction_axis=reduction_axis,
                     padding=None
                 )
@@ -1058,10 +1156,8 @@ class Dataset(object):
             max_len=None,
             padding='pre',
             reverse=False,
-            normalize=False,
-            standardize=False,
+            normalization=None,
             reduction_axis='time',
-            center=False,
             with_deltas=True,
             resample=None
     ):
@@ -1087,10 +1183,8 @@ class Dataset(object):
                     max_len=max_len,
                     padding=padding,
                     reverse=reverse,
-                    normalize=normalize,
-                    standardize=standardize,
+                    normalization=normalization,
                     reduction_axis=reduction_axis,
-                    center=center,
                     with_deltas=with_deltas,
                     resample=resample,
                 )
@@ -1128,12 +1222,8 @@ class Dataset(object):
             name,
             segments='vad',
             max_len=None,
-            normalize_inputs=False,
-            center_inputs=False,
-            standardize_inputs=False,
-            normalize_targets=False,
-            center_targets=False,
-            standardize_targets=False,
+            input_normalization=None,
+            target_normalization=None,
             reduction_axis='time',
             input_padding='pre',
             input_resampling=None,
@@ -1148,9 +1238,7 @@ class Dataset(object):
             segments=segments,
             padding=input_padding,
             max_len=max_len,
-            normalize=normalize_inputs,
-            center=center_inputs,
-            standardize=standardize_inputs,
+            normalization=input_normalization,
             reduction_axis=reduction_axis,
             resample=input_resampling
         )
@@ -1159,9 +1247,7 @@ class Dataset(object):
             padding=target_padding,
             max_len=max_len,
             reverse=reverse_targets,
-            normalize=normalize_targets,
-            center=center_targets,
-            standardize=standardize_targets,
+            normalization=target_normalization,
             reduction_axis=reduction_axis,
             with_deltas=predict_deltas,
             resample=target_resampling
@@ -1179,19 +1265,13 @@ class Dataset(object):
         else:
             oracle_boundaries = None
 
-        mins = []
-        means = []
-        ranges = []
-        sds = []
+        shift = []
+        scale = []
         for i, ix in enumerate(file_ix):
-            mins.append(self.data[self.fileIDs[ix]].min(reduction_axis))
-            means.append(self.data[self.fileIDs[ix]].mean(reduction_axis))
-            ranges.append(self.data[self.fileIDs[ix]].range(reduction_axis))
-            sds.append(self.data[self.fileIDs[ix]].sd(reduction_axis))
-        mins = np.stack(mins, axis=0)
-        means = np.stack(means, axis=0)
-        ranges = np.ranges(sds, axis=0)
-        sds = np.stack(sds, axis=0)
+            shift.append(self.data[self.fileIDs[ix]].normalization_shift(target_normalization, reduction_axis))
+            scale.append(self.data[self.fileIDs[ix]].normalization_scale(target_normalization, reduction_axis))
+        shift = np.stack(shift, axis=0)
+        scale = np.stack(scale, axis=0)
         
         cache_dict = {
             'type': 'utterance',
@@ -1201,10 +1281,8 @@ class Dataset(object):
             'y': y,
             'y_mask': y_mask,
             'file_ix': file_ix,
-            'mins': mins,
-            'means': means,
-            'ranges': ranges,
-            'sds': sds,
+            'shift': shift,
+            'scale': scale,
             'speaker': speaker,
             'oracle_boundaries': oracle_boundaries
         }
@@ -1217,12 +1295,8 @@ class Dataset(object):
             window_len_input,
             window_len_bwd,
             window_len_fwd,
-            normalize_inputs=False,
-            center_inputs=False,
-            standardize_inputs=False,
-            normalize_targets=False,
-            center_targets=False,
-            standardize_targets=False,
+            input_normalization=None,
+            target_normalization=None,
             reduction_axis='time',
             target_bwd_resampling=None,
             target_fwd_resampling = None,
@@ -1237,9 +1311,7 @@ class Dataset(object):
             mask=mask,
             pad_left=left_pad,
             pad_right=right_pad,
-            normalize=normalize_inputs,
-            center=center_inputs,
-            standardize=standardize_inputs,
+            normalization=input_normalization,
             reduction_axis=reduction_axis
         )
         feats_inputs = []
@@ -1254,17 +1326,15 @@ class Dataset(object):
         feats_inputs = pad_sequence(feats_inputs, padding='post')
         boundaries = pad_sequence(boundaries, padding='post')
 
-        if (normalize_inputs == normalize_targets) and (center_inputs == center_targets) and (standardize_inputs == standardize_targets):
+        if input_normalization == target_normalization:
             feats_targets = feats_inputs
         else:
             feats_tmp, _, _ = self.features(
                 mask=mask,
                 pad_left=left_pad,
                 pad_right=right_pad,
-                normalize=normalize_targets,
-                standardize=standardize_targets,
+                normalization=target_normalization,
                 reduction_axis=reduction_axis,
-                center=center_targets
             )
             feats_targets = []
             file_lengths = []
@@ -1290,63 +1360,35 @@ class Dataset(object):
         time_ix = np.concatenate(time_ix, axis=0)
 
         if reduction_axis.lower() in ['time', 'both']:
-            mins = []
-            means = []
-            ranges = []
-            sds = []
+            shift = []
+            scale = []
             for i, l in enumerate(file_lengths):
-                mins_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].min(reduction_axis)[None, ...]
-                means_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].mean(reduction_axis)[None, ...]
-                ranges_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].range(reduction_axis)[None, ...]
-                sds_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].sd(reduction_axis)[None, ...]
-
-                mins.append(mins_cur)
-                means.append(means_cur)
-                ranges.append(ranges_cur)
-                sds.append(sds_cur)
-
-            mins = np.concatenate(mins, axis=0)
-            means = np.concatenate(means, axis=0)
-            ranges = np.concatenate(ranges, axis=0)
-            sds = np.concatenate(sds, axis=0)
+                shift_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].normalization_shift(target_normalization, reduction_axis)[None, ...]
+                shift.append(shift_cur)
+                scale_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].normalization_scale(target_normalization, reduction_axis)[None, ...]
+                scale.append(scale_cur)
+            shift = np.concatenate(shift, axis=0)
+            scale = np.concatenate(scale, axis=0)
         elif reduction_axis.lower() == 'freq':
-            mins = {}
-            means = {}
-            ranges = {}
-            sds = {}
+            shift = {}
+            scale = {}
             for f in self.fileIDs:
-                mins[f] = self.data[f].min(reduction_axis)
-                means[f] = self.data[f].mean(reduction_axis)
-                ranges[f] = self.data[f].range(reduction_axis)
-                sds[f] = self.data[f].sd(reduction_axis)
-            mins, _, _ = self.features(
-                features=mins,
+                shift[f] = self.data[f].normalization_shift(target_normalization, reduction_axis)
+                scale[f] = self.data[f].normalization_scale(target_normalization, reduction_axis)
+            shift, _, _ = self.features(
+                features=shift,
                 mask=mask,
                 pad_left=left_pad,
                 pad_right=right_pad
             )
-            means, _, _ = self.features(
-                features=means,
+            scale, _, _ = self.features(
+                features=scale,
                 mask=mask,
                 pad_left=left_pad,
                 pad_right=right_pad
             )
-            ranges, _, _ = self.features(
-                features=ranges,
-                mask=mask,
-                pad_left=left_pad,
-                pad_right=right_pad
-            )
-            sds, _, _ = self.features(
-                features=sds,
-                mask=mask,
-                pad_left=left_pad,
-                pad_right=right_pad
-            )
-            mins = pad_sequence([x[0] for x in mins], padding='post')
-            means = pad_sequence([x[0] for x in means], padding='post')
-            ranges = pad_sequence([x[0] for x in ranges], padding='post', value=1.)
-            sds = pad_sequence([x[0] for x in sds], padding='post', value=1.)
+            shift = pad_sequence([x[0] for x in shift], padding='post')
+            scale = pad_sequence([x[0] for x in scale], padding='post')
         else:
             raise ValueError('Unrecognized reduction axis %s' % reduction_axis)
 
@@ -1388,10 +1430,8 @@ class Dataset(object):
             'boundaries': boundaries,
             'file_ix': file_ix,
             'reduction_axis': reduction_axis,
-            'mins': mins,
-            'means': means,
-            'ranges': ranges,
-            'sds': sds,
+            'shift': shift,
+            'scale': scale,
             'time_ix': time_ix,
             'speaker': speaker,
             'oracle_boundaries': oracle_boundaries,
@@ -1409,17 +1449,13 @@ class Dataset(object):
             self,
             name,
             mask,
-            normalize_inputs=False,
-            center_inputs=False,
-            standardize_inputs=False,
+            normalization=None,
             reduction_axis='time',
             oracle_boundaries=None
     ):
         feats, boundaries, _ = self.features(
             mask=mask,
-            normalize=normalize_inputs,
-            center=center_inputs,
-            standardize=standardize_inputs,
+            normalization=normalization,
             reduction_axis=reduction_axis
         )
 
@@ -1428,17 +1464,13 @@ class Dataset(object):
 
         speaker = []
         file_ix = []
-        mins = []
-        means = []
-        ranges = []
-        sds = []
+        shift = []
+        scale = []
         for i, f in enumerate(self.fileIDs):
             speaker.append(self.data[f].speaker)
             file_ix.append(i)
-            mins.append(self.data[f].min(reduction_axis))
-            means.append(self.data[f].mean(reduction_axis))
-            ranges.append(self.data[f].range(reduction_axis))
-            sds.append(self.data[f].sd(reduction_axis))
+            shift.append(self.data[f].normalization_shift(normalization, reduction_axis))
+            scale.append(self.data[f].normalization_scale(normalization, reduction_axis))
         speaker = np.array(speaker)
 
         if oracle_boundaries:
@@ -1474,10 +1506,8 @@ class Dataset(object):
             'oracle_boundaries': oracle_boundaries,
             'fixed_boundaries': boundaries,
             'file_ix': file_ix,
-            'mins': mins,
-            'means': means,
-            'ranges': ranges,
-            'sds': sds,
+            'shift': shift,
+            'scale': scale,
             'speaker': speaker
         }
 
@@ -1529,10 +1559,8 @@ class Dataset(object):
         y = self.cache[name]['y']
         y_mask = self.cache[name]['y_mask']
         file_ix = self.cache[name]['file_ix']
-        mins = self.cache[name]['mins']
-        means = self.cache[name]['means']
-        ranges = self.cache[name]['ranges']
-        sds = self.cache[name]['sds']
+        shift = self.cache[name]['shift']
+        scale = self.cache[name]['scale']
         speaker = self.cache[name]['speaker']
         oracle_boundaries = self.cache[name]['oracle_boundaries']
 
@@ -1545,10 +1573,8 @@ class Dataset(object):
                 'y': y[indices],
                 'y_mask': y_mask[indices],
                 'file_ix': file_ix[indices],
-                'mins': mins[indices],
-                'means': means[indices],
-                'ranges': ranges[indices],
-                'sds': sds[indices],
+                'shift': shift[indices],
+                'scale': scale[indices],
                 'speaker': speaker[indices],
                 'oracle_boundaries': None if oracle_boundaries is None else oracle_boundaries[indices],
                 'indices': indices
@@ -1570,10 +1596,8 @@ class Dataset(object):
         fixed_boundaries = self.cache[name]['boundaries']
         file_ix = self.cache[name]['file_ix']
         reduction_axis = self.cache[name]['reduction_axis']
-        mins = self.cache[name]['mins']
-        means = self.cache[name]['means']
-        ranges = self.cache[name]['ranges']
-        sds = self.cache[name]['sds']
+        shift = self.cache[name]['shift']
+        scale = self.cache[name]['scale']
         time_ix = self.cache[name]['time_ix']
         speaker = self.cache[name]['speaker']
         oracle_boundaries = self.cache[name]['oracle_boundaries']
@@ -1606,15 +1630,11 @@ class Dataset(object):
             X_cur = feats_inputs[file_ix_cur[..., None], history_ix]
 
             if reduction_axis.lower() in ['time', 'both']:
-                mins_cur = mins[indices]
-                means_cur = means[indices]
-                ranges_cur = ranges[indices]
-                sds_cur = sds[indices]
+                shift_cur = shift[indices]
+                scale_cur = scale[indices]
             elif reduction_axis.lower() == 'freq':
-                mins_cur = mins[file_ix_cur[..., None], history_ix]
-                means_cur = means[file_ix_cur[..., None], history_ix]
-                ranges_cur = ranges[file_ix_cur[..., None], history_ix]
-                sds_cur = sds[file_ix_cur[..., None], history_ix]
+                shift_cur = shift[file_ix_cur[..., None], history_ix]
+                scale_cur = scale[file_ix_cur[..., None], history_ix]
             else:
                 raise ValueError('Unrecognized reduction axis %s' % reduction_axis)
 
@@ -1655,10 +1675,8 @@ class Dataset(object):
                 'y_fwd': y_fwd_cur,
                 'y_fwd_mask': y_fwd_mask_cur,
                 'file_ix': file_ix_cur,
-                'mins': mins_cur,
-                'means': means_cur,
-                'ranges': ranges_cur,
-                'sds': sds_cur,
+                'shift': shift_cur,
+                'scale': scale_cur,
                 'speaker': speaker[file_ix_cur]
             }
 
@@ -1675,10 +1693,8 @@ class Dataset(object):
         feats = self.cache[name]['feats']
         fixed_boundaries = self.cache[name]['fixed_boundaries']
         file_ix = self.cache[name]['file_ix']
-        mins = self.cache[name]['mins']
-        means = self.cache[name]['means']
-        ranges = self.cache[name]['ranges']
-        sds = self.cache[name]['sds']
+        shift = self.cache[name]['shift']
+        scale = self.cache[name]['scale']
         speaker = self.cache[name]['speaker']
         oracle_boundaries = self.cache[name]['oracle_boundaries']
 
@@ -1700,10 +1716,8 @@ class Dataset(object):
                 'oracle_boundaries': oracle_boundaries_cur,
                 'fixed_boundaries': fixed_boundaries[index],
                 'file_ix': file_ix[index],
-                'mins': mins[index],
-                'means': means[index],
-                'ranges': ranges[index],
-                'sds': sds[index],
+                'shift': shift[index],
+                'scale': scale[index],
                 'speaker': speaker[index:index+1],
             }
 
@@ -1737,9 +1751,7 @@ class Dataset(object):
             max_len=None,
             padding='pre',
             reverse=False,
-            normalize=False,
-            center=False,
-            standardize=False,
+            normalization=None,
             reduction_axis='time',
             resample=None
     ):
@@ -1748,9 +1760,7 @@ class Dataset(object):
             max_len=max_len,
             padding=padding,
             reverse=reverse,
-            normalize=normalize,
-            center=center,
-            standardize=standardize,
+            normalization=normalization,
             reduction_axis=reduction_axis,
             resample=resample
         )
@@ -1761,9 +1771,7 @@ class Dataset(object):
             padding='post',
             max_len=None,
             reverse=True,
-            normalize=False,
-            center=False,
-            standardize=False,
+            normalization=None,
             reduction_axis='time',
             with_deltas=False,
             resample=None
@@ -1773,9 +1781,7 @@ class Dataset(object):
             max_len=max_len,
             padding=padding,
             reverse=reverse,
-            normalize=normalize,
-            center=center,
-            standardize=standardize,
+            normalization=normalization,
             reduction_axis=reduction_axis,
             with_deltas=with_deltas,
             resample=resample
@@ -2062,6 +2068,36 @@ class Dataset(object):
 
         return global_score_dict, score_dict
 
+    def extract_matching_segments(self, true, pred, tol=0.02, as_dict=False):
+        seg_dict = {}
+        for f in self.fileIDs:
+            if isinstance(true, str):
+                true_cur = self.data[f].segments(true)
+            else:
+                # ``true`` is a dictionary
+                true_cur = true[f]
+
+            if isinstance(pred, str):
+                pred_cur = self.data[f].segments(pred)
+            else:
+                # ``true`` is a dictionary
+                if f in pred:
+                    pred_cur = pred[f]
+                else:
+                    pred_cur = None
+
+            seg_dict[f] = self.data[f].extract_matching_segments(true_cur, pred_cur, tol=tol)
+
+        if as_dict:
+            out = seg_dict
+        else:
+            out = []
+            for f in self.fileIDs:
+                out.append(seg_dict[f])
+            out = pd.concat(out, axis=0)
+
+        return out
+
     def score_text_segmentation(self, true, pred):
         score_dict = {}
         for f in self.fileIDs:
@@ -2252,6 +2288,18 @@ class Datafile(object):
             return data.min(axis=(0, 1), keepdims=True)
         return data.min(axis=reduction_axis, keepdims=True)
 
+    def sum(self, reduction_axis, mask=None):
+        data = self.data()
+        if mask is not None:
+            data = data[mask]
+        if reduction_axis.lower() == 'time':
+            return data.sum(axis=0, keepdims=True)
+        if reduction_axis.lower() == 'freq':
+            return data.sum(axis=1, keepdims=True)
+        if reduction_axis.lower() == 'both':
+            return data.sum(axis=(0, 1), keepdims=True)
+        return data.sum(axis=reduction_axis, keepdims=True)
+
     def mean(self, reduction_axis, mask=None):
         data = self.data()
         if mask is not None:
@@ -2287,6 +2335,62 @@ class Datafile(object):
         if reduction_axis.lower() == 'both':
             return data.std(axis=(0, 1), keepdims=True)
         return data.std(axis=reduction_axis, keepdims=True)
+
+    def norm(self, reduction_axis, order=None, mask=None):
+        data = self.data()
+        if mask is not None:
+            data = data[mask]
+        if reduction_axis.lower() == 'time':
+            return np.linalg.norm(data, ord=order, axis=0, keepdims=True)
+        if reduction_axis.lower() == 'freq':
+            return np.linalg.norm(data, ord=order, axis=1, keepdims=True)
+        if reduction_axis.lower() == 'both':
+            return np.linalg.norm(data, ord=order, axis=None, keepdims=True)
+        return np.linalg.norm(data, ord=order, axis=reduction_axis, keepdims=True)
+
+    def normalization_shift(self, normalization, reduction_axis, mask=None):
+        if reduction_axis.lower() == 'time':
+            shape = (1, self.data().shape[1])
+        elif reduction_axis.lower() == 'freq':
+            shape = (self.data().shape[0], 1)
+        else:
+            shape = tuple()
+        if not normalization:
+            out = np.zeros(shape)
+        elif normalization.lower() in ['center', 'standardize']:
+            out = self.mean(reduction_axis, mask=mask)
+        elif normalization.lower() == 'range':
+            out = self.min(reduction_axis, mask=mask)
+        else:
+            out = np.zeros(shape)
+
+        return out
+
+    def normalization_scale(self, normalization, reduction_axis, mask=None, epsilon=1e-4, magnitude=1):
+        if reduction_axis.lower() == 'time':
+            shape = (1, self.data().shape[1])
+        elif reduction_axis.lower() == 'freq':
+            shape = (self.data().shape[0], 1)
+        else:
+            shape = tuple()
+        if not normalization or normalization.lower() == 'center':
+            out = np.ones(shape)
+        elif normalization.lower() == 'standardize':
+            out = self.sd(reduction_axis, mask=mask)
+        elif normalization.lower() == 'range':
+            out = self.range(reduction_axis, mask=mask)
+        elif normalization.lower() == 'sum':
+            out = self.sum(reduction_axis, mask=mask)
+        else:
+            try:
+                normalization = int(normalization)
+            except Exception:
+                pass
+            out = self.norm(reduction_axis, order=normalization, mask=mask)
+
+        out = (out + epsilon) / magnitude
+
+        return out
 
     def segments(self, segment_type='vad'):
         if isinstance(segment_type, str):
@@ -2334,27 +2438,20 @@ class Datafile(object):
             max_len=None,
             padding='pre',
             reverse=False,
-            normalize=False,
-            center=False,
-            standardize=False,
+            normalization=None,
             reduction_axis='time',
             with_deltas=True,
             resample=None
     ):
-        assert not (standardize and (normalize or center)), 'standardize is mutually exclusive with normalize and center.'
-
         if features is None:
             feats = self.data()
-
-            if center or standardize:
-                feats -= self.mean(reduction_axis)
-            if normalize:
-                feats -= self.min(reduction_axis)
-                feats /= self.range(reduction_axis)
-            elif standardize:
-                feats /= self.sd(reduction_axis)
         else:
             feats = features
+
+        shift = self.normalization_shift(normalization, reduction_axis)
+        scale = self.normalization_scale(normalization, reduction_axis)
+
+        feats = (feats - shift) / scale
 
         if isinstance(segments, str):
             if segments == 'vad':
@@ -2470,8 +2567,6 @@ class Datafile(object):
         if seconds_per_step is None:
             seconds_per_step = self.seconds_per_step
 
-        pred_labels = set()
-
         if parent_segment_type == 'vad':
             parent_segs = self.vad_segments
         elif parent_segment_type == 'wrd':
@@ -2482,6 +2577,7 @@ class Datafile(object):
             parent_segs = self.rnd_segments
 
         out = []
+        relabel = []
 
         parent_starts = parent_segs.start.as_matrix()
         parent_ends = parent_segs.end.as_matrix()
@@ -2508,7 +2604,7 @@ class Datafile(object):
                     states_extracted = extract_states_at_timestamps_batch(
                         timestamps,
                         states[i],
-                        steps_per_second=seconds_per_step,
+                        seconds_per_step=seconds_per_step,
                         activation=state_activation,
                         discretize=discretize,
                         as_categories=True,
@@ -2552,20 +2648,18 @@ class Datafile(object):
                         df['d%s' %j] = labels[:,j]
 
                 df = pd.DataFrame(df)
-
-                pred_labels = pred_labels.union(set(df.label.unique()))
-
                 out.append(df)
+
+                # pred_labels_cur = sorted(list(set(df.label.unique())))
+                # relabel_cur = {}
+                # for i, x in enumerate(pred_labels_cur):
+                #     relabel_cur[x] = i
+                # relabel.append(relabel_cur)
         else:
             out = pd.DataFrame(columns=['start', 'end', 'label'])
-
-        pred_labels = sorted(list(pred_labels))
-        relabel = {}
-        for i, x in enumerate(pred_labels):
-            relabel[x] = i
-
-        for df in out:
-            df.label = df.label.map(relabel)
+        #
+        # for df, rl in zip(out, relabel):
+        #     df.label = df.label.map(rl)
 
         return out
 
@@ -2657,6 +2751,31 @@ class Datafile(object):
         score_dict = score_segmentation(true, pred, tol=tol)
 
         return score_dict
+
+    def extract_matching_segments(self, true, pred, tol=0.02):
+        if isinstance(true, str):
+            if true == 'vad':
+                true = self.vad_segments
+            elif true == 'wrd':
+                true = self.wrd_segments
+            elif true == 'phn':
+                true = self.phn_segments
+            elif true == 'rnd':
+                true = self.rnd_segments
+
+        if isinstance(pred, str):
+            if pred == 'vad':
+                pred = self.vad_segments
+            elif pred == 'wrd':
+                pred = self.wrd_segments
+            elif pred == 'phn':
+                pred = self.phn_segments
+            elif pred == 'rnd':
+                pred = self.rnd_segments
+
+        seg_df = extract_matching_segments(true, pred, tol=tol)
+
+        return seg_df
 
 
 class AcousticDatafile(Datafile):

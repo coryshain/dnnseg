@@ -30,7 +30,7 @@ class Config(object):
         if self.outdir is None:
             self.outdir = settings.get('logdir', None)
         if self.outdir is None:
-            self.outdir = './dtsr_model/'
+            self.outdir = './dnnseg_model/'
         if not os.path.exists(self.outdir):
             os.makedirs(self.outdir)
         if os.path.realpath(path) != os.path.realpath(self.outdir + '/config.ini'):

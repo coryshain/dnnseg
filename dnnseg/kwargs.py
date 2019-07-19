@@ -139,7 +139,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     # Global hyperparams
     Kwarg(
         'outdir',
-        './dtsr_model/',
+        './dnnseg_model/',
         str,
         "Path to output directory, where logs and model parameters are saved."
     ),
@@ -160,6 +160,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [int, None],
         "Append a **speaker_emb_dim** dimensional embedding of the speaker ID to each acoustic frame and to the utterance embedding. If ``None`` or ``0``, no speaker embedding used."
+    ),
+    Kwarg(
+        'adversarial_loss_scale',
+        None,
+        [float, None],
+        "Scale of adversarial loss for residualizing speaker information out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no adversarial training."
     ),
     Kwarg(
         'revnet_n_layers',
@@ -243,28 +249,16 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Maximum order of derivatives present in the input data. All lower orders must also be included."
     ),
     Kwarg(
-        'normalize_data',
-        False,
-        bool,
-        "Normalize utterances to the range :math:`[0, 1]`."
-    ),
-    Kwarg(
-        'center_data',
-        False,
-        bool,
-        "Center data about its mean."
-    ),
-    Kwarg(
-        'standardize_data',
-        False,
-        bool,
-        "Convert data into standard units (mean=0, variance=1). Mutually exclusive with **center_data** and **normalize_data**."
+        'data_normalization',
+        None,
+        [str, None],
+        "Normalization to apply to data as a preprocess. One of ``center`` (subtract the mean), ``standardize`` (Z-transform), ``range`` (divide by the range so values are in [0,1]), ``sum`` (divide by the sum so values sum to 1), and any norm type supported by ``np.linalg.norm`` (for example, using ``2`` yields a 2-norm, under which input vectors differ only by their angle). If ``None``, no data normalization."
     ),
     Kwarg(
         'reduction_axis',
         'time',
         str,
-        "Reduction axis to use for any centering, normalization, or standardization. One of ``['time', 'freq', 'both']``."
+        "Reduction axis to use for data normalization. One of ``['time', 'freq', 'both']``."
     ),
     Kwarg(
         'pad_seqs',
@@ -277,6 +271,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         True,
         bool,
         "Mask padding frames in reconstruction targets so that they are ignored in gradient updates."
+    ),
+    Kwarg(
+        'min_len',
+        None,
+        [int, None],
+        "Minimum sequence length. If ``None``, defaults to **max_len**."
     ),
     Kwarg(
         'max_len',
@@ -801,6 +801,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['resnet_n_layers_inner']
     ),
     Kwarg(
+        'encoder_use_bias',
+        True,
+        bool,
+        "Whether to include bias units in encoder layers."
+    ),
+    Kwarg(
+        'encoder_force_vad_boundaries',
+        True,
+        bool,
+        "Whether to force segmentation probabilities to 1 at the ends of VAD regions."
+    ),
+    Kwarg(
         'decoder_resnet_n_layers_inner',
         None,
         [int, None],
@@ -885,6 +897,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [float, None],
         "Scale of regularizer on boundary activations. If ``None``, no boundary regularization."
+    ),
+    Kwarg(
+        'cell_proposal_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer on HMLSTM cell proposal. If ``None``, no cell proposal regularization."
     ),
     Kwarg(
         'lm_loss_scale',
@@ -989,16 +1007,19 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'boundary_prob_smoothing',
         None,
         [str, None],
-        'Post-process segmentations by smoothing them using function defined by underscore_delimited string, where the first element is the type of smooth and all subsequent elements are positional arguments. One of ["rbf_<order>_<penalty>", "ema_<decay>", "dema_<decay>"], where "rbf", "ema", and "dema" are (respectively) radial basis function, exponential moving average, and double exponential moving average.  If ``None``, no smoothing. Has no effect unless **segment_at_peaks** is ``True``.'
+        'Post-process segmentations by smoothing them using function defined by underscore_delimited string, where the first element is the type of smooth and all subsequent elements are positional arguments. One of ["rbf_<order>_<penalty>", "ema_<decay>", "dema_<decay>", "wma_<width>"], where "rbf", "ema", "dema", and "wma" are (respectively) radial basis function, exponential moving average, double exponential moving average, and weighted moving average.  If ``None``, no smoothing. Has no effect unless **segment_at_peaks** is ``True``.'
     ),
-
-
-
     Kwarg(
         'label_map_file',
         None,
         [str, None],
         "Path to CSV file mapping segment labels to strings to use in plots. Must contain text columns named 'source' and 'target'. If ``None``, source labels will be used."
+    ),
+    Kwarg(
+        'feature_map_file',
+        None,
+        [str, None],
+        "Path to CSV file mapping segment labels to phonological distinctive features to use in plots. Must contain a text column named 'symbol', along with columns for any features of interest. If ``None``, no featural analysis will be performed."
     ),
     Kwarg(
         'keep_plot_history',
@@ -1062,7 +1083,7 @@ UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS = [
 ]
 
 
-def dtsr_kwarg_docstring():
+def synsemnet_kwarg_docstring():
     out = "**Both MLE and Bayes**\n\n"
 
     for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
