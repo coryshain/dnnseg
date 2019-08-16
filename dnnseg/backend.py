@@ -440,7 +440,7 @@ def identity_regularizer(scale, session=None):
             return lambda x: tf.reduce_mean(x) * scale
 
 
-def compose_lambdas(lambdas, **kwargs):
+def compose_lambdas(lambdas):
     def composed_lambdas(x, **kwargs):
         out = x
         for l in lambdas:
@@ -603,6 +603,19 @@ def wma(x, filter_width=5, session=None):
             return out
 
 
+HMLSTM_RETURN_SIGNATURE = [
+    'c',
+    'h',
+    'z_prob',
+    'z',
+    'lm',
+    'cell_proposal',
+    'u',
+    'v',
+    'w'
+]
+
+
 def hmlstm_state_size(
         units,
         layers,
@@ -610,8 +623,14 @@ def hmlstm_state_size(
         use_timing_unit=False,
         return_c=True,
         return_z_prob=True,
-        return_cell_proposal=True
+        return_lm=True,
+        return_cell_proposal=True,
+        return_cae=True
 ):
+    if return_lm:
+        assert units_below is not None, 'units_below must be provided when using return_lm'
+    if return_cae:
+        assert units_below is not None, 'units_below must be provided when using return_averaged_inputs'
     size = []
     if isinstance(units, tuple):
         units = list(units)
@@ -625,26 +644,44 @@ def hmlstm_state_size(
     for l in range(layers):
         size_cur = []
         size_names_cur = []
-        if return_c:
-            size_cur.append(units[l])
-            size_names_cur.append('c')
-        size_names_cur.append('h')
-        if use_timing_unit:
-            size_cur.append(units[l] + 1)
-        else:
-            size_cur.append(units[l])
-        if l < layers - 1:
-            if return_z_prob:
-                size_names_cur.append('z_prob')
-                size_cur.append(1)
-            size_names_cur.append('z')
-            size_cur.append(1)
-        if units_below is not None:
-            size_names_cur.append('lm')
-            size_cur.append(units_below[l])
-        if return_cell_proposal:
-            size_names_cur.append('cell_proposal')
-            size_cur.append(units[l])
+
+        for name in HMLSTM_RETURN_SIGNATURE:
+            include = False
+            value = None
+            if name == 'c' and return_c:
+                include = True
+                value = units[l]
+            elif name == 'h':
+                include = True
+                if use_timing_unit:
+                    value = units[l] + 1
+                else:
+                    value = units[l]
+            elif name in ['z', 'z_prob']:
+                if l < layers - 1 and (name == 'z' or return_z_prob):
+                    include = True
+                    value = 1
+            elif name == 'lm':
+                if return_lm:
+                    include = True
+                    value = units_below[l]
+            elif name == 'cell_proposal':
+                if return_cell_proposal:
+                    include = True
+                    value = units[l]
+            elif name in ['u', 'v', 'w']:
+                if return_cae and l < layers - 1:
+                    include = True
+                    if name == 'u':
+                        value = 1
+                    else:
+                        value = units_below[l]
+            else:
+                raise ValueError('No case defined for HMLSTM_RETURN_SIGNATURE item "%s".' % name)
+
+            if include:
+                size_names_cur.append(name)
+                size_cur.append(value)
 
         state_tuple = collections.namedtuple('HMLSTMStateTupleL%d' % l, ' '.join(size_names_cur))
         size_cur = state_tuple(*size_cur)
@@ -652,7 +689,6 @@ def hmlstm_state_size(
         size.append(size_cur)
 
     return size
-
 
 
 class HMLSTMCell(LayerRNNCell):
@@ -685,6 +721,7 @@ class HMLSTMCell(LayerRNNCell):
             bias_regularizer=None,
             temporal_dropout=None,
             temporal_dropout_plug_lm=False,
+            return_cae=True,
             return_lm_predictions=False,
             lm_order_bwd=0,
             lm_order_fwd=1,
@@ -743,10 +780,11 @@ class HMLSTMCell(LayerRNNCell):
                     self._kernel_depth = kernel_depth
                     self._resnet_n_layers = resnet_n_layers
 
+                    self._return_cae = return_cae
                     self._lm = return_lm_predictions or temporal_dropout_plug_lm
+                    self._return_lm_predictions = return_lm_predictions
                     self._lm_order_bwd = lm_order_bwd
                     self._lm_order_fwd = lm_order_fwd
-                    self._return_lm_predictions = return_lm_predictions
                     self._temporal_dropout_plug_lm = temporal_dropout_plug_lm
                     self._one_hot_inputs = one_hot_inputs
 
@@ -870,9 +908,11 @@ class HMLSTMCell(LayerRNNCell):
             self._num_layers,
             units_below=units_below,
             use_timing_unit=self._use_timing_unit,
+            return_lm = self._lm,
             return_c=True,
             return_z_prob=True,
-            return_cell_proposal=True
+            return_cell_proposal=True,
+            return_cae=self._return_cae
         )
 
     @property
@@ -919,6 +959,8 @@ class HMLSTMCell(LayerRNNCell):
                         self._kernel_lm_bottomup = []
                         self._kernel_lm_recurrent = []
                         self._lm_output_gain = []
+                    if self._return_cae:
+                        self._kernel_w = []
 
                     if self._use_bias:
                         self._bias = []
@@ -1212,6 +1254,8 @@ class HMLSTMCell(LayerRNNCell):
                             self._kernel_lm_bottomup.append(kernel_lm_bottomup)
 
                             lm_recurrent_in_dim = bottom_up_dim # intentional
+                            if l == 0 and self._decoder_embedding is not None:
+                                lm_recurrent_in_dim += int(self._decoder_embedding.shape[-1])
                             kernel_lm_recurrent_lambdas = []
                             for d in range(_kernel_depth):
                                 if d < _kernel_depth - 1:
@@ -1271,6 +1315,73 @@ class HMLSTMCell(LayerRNNCell):
                             kernel_lm_recurrent = compose_lambdas(kernel_lm_recurrent_lambdas)
 
                             self._kernel_lm_recurrent.append(kernel_lm_recurrent)
+
+                        if self._return_cae:
+                            _kernel_depth = self._kernel_depth
+                            w_out_dim = bottom_up_dim - (self._use_timing_unit and l > 0)
+                            w_in_dim = recurrent_dim
+                            if l == 0 and self._decoder_embedding is not None:
+                                w_in_dim += int(self._decoder_embedding.shape[-1])
+                            kernel_w_lambdas = []
+                            for d in range(_kernel_depth):
+                                if d < _kernel_depth - 1:
+                                    if self._resnet_n_layers > 1:
+                                        kernel_w_layer = DenseResidualLayer(
+                                            training=self._training,
+                                            units=w_in_dim,
+                                            use_bias=self._use_bias,
+                                            kernel_initializer='identity_initializer',
+                                            bias_initializer=self._bias_initializer,
+                                            kernel_regularizer=self._bottomup_regularizer,
+                                            bias_regularizer=self._bias_regularizer,
+                                            layers_inner=self._resnet_n_layers,
+                                            activation_inner=self._prefinal_activation,
+                                            activation=self._prefinal_activation,
+                                            batch_normalization_decay=self._batch_normalization_decay,
+                                            project_inputs=False,
+                                            normalize_weights=self._weight_normalization,
+                                            reuse=tf.AUTO_REUSE,
+                                            session=self._session,
+                                            name='kernel_w_l%d_d%d' % (l, d)
+                                        )
+                                    else:
+                                        kernel_w_layer = DenseLayer(
+                                            training=self._training,
+                                            units=w_in_dim,
+                                            use_bias=self._use_bias,
+                                            kernel_initializer='identity_initializer',
+                                            bias_initializer=self._bias_initializer,
+                                            kernel_regularizer=self._bottomup_regularizer,
+                                            bias_regularizer=self._bias_regularizer,
+                                            activation=self._prefinal_activation,
+                                            batch_normalization_decay=self._batch_normalization_decay,
+                                            normalize_weights=self._weight_normalization,
+                                            session=self._session,
+                                            reuse=tf.AUTO_REUSE,
+                                            name='kernel_w_l%d_d%d' % (l, d)
+                                        )
+                                else:
+                                    kernel_w_layer = DenseLayer(
+                                        training=self._training,
+                                        units=w_out_dim,
+                                        use_bias=True,
+                                        kernel_initializer=self._bottomup_initializer,
+                                        bias_initializer=self._bias_initializer,
+                                        kernel_regularizer=self._bottomup_regularizer,
+                                        bias_regularizer=self._bias_regularizer,
+                                        activation=None,
+                                        batch_normalization_decay=self._batch_normalization_decay,
+                                        normalize_weights=self._weight_normalization,
+                                        session=self._session,
+                                        reuse=tf.AUTO_REUSE,
+                                        name='kernel_w_l%d_d%d' % (l, d)
+                                    )
+                                kernel_w_lambdas.append(
+                                    make_lambda(kernel_w_layer, session=self._session))
+
+                            kernel_w_lambdas = compose_lambdas(kernel_w_lambdas)
+
+                            self._kernel_w.append(kernel_w_lambdas)
 
                         if not self._layer_normalization and self._use_bias:
                             bias = self.add_variable(
@@ -1410,6 +1521,7 @@ class HMLSTMCell(LayerRNNCell):
                         power = 1
 
                     for l, layer in enumerate(state):
+
                         if not self._bptt:
                             h_below = tf.stop_gradient(h_below)
                             # if z_below is not None:
@@ -1423,8 +1535,16 @@ class HMLSTMCell(LayerRNNCell):
                             z_behind = layer.z
                             # print('Stopping gradient z_behind')
                             # z_behind = tf.stop_gradient(z_behind)
+                            if self._return_cae:
+                                u = layer.u
+                                v = layer.v
+                            else:
+                                u = None
+                                v = None
                         else:
                             z_behind = None
+                            u = None
+                            v = None
 
                         # Compute probability of update, copy, and flush operations operations.
                         if z_behind is None:
@@ -1614,10 +1734,11 @@ class HMLSTMCell(LayerRNNCell):
                             h = tf.concat([h, timing_unit], axis=1)
 
                         if self._lm:
-                            pred_prev = state[l].lm
                             if l == 0 and self._decoder_embedding is not None:
                                 lm_bottomup_in = tf.concat([self._decoder_embedding, h], axis=-1)
+                                pred_prev = tf.concat([self._decoder_embedding, state[l].lm], axis=-1)
                             else:
+                                pred_prev = state[l].lm
                                 lm_bottomup_in = h
                             pred_new = self._kernel_lm_recurrent[l](pred_prev) + self._kernel_lm_bottomup[l](lm_bottomup_in)
                             pred_new = self._inner_activation(pred_new)
@@ -1673,18 +1794,44 @@ class HMLSTMCell(LayerRNNCell):
                             z_prob = None
                             z = None
 
-                        new_state_cur = [c, h]
-                        new_state_names_cur = ['c', 'h']
-                        if l < self._num_layers - 1:
-                            new_state_cur += [z_prob, z]
-                            new_state_names_cur += ['z_prob', 'z']
-                        if self._lm:
-                            new_state_cur.append(pred_new)
-                            new_state_names_cur.append('lm')
-                        new_state_cur.append(c_flush)
-                        new_state_names_cur.append('cell_proposal')
+                        if self._return_cae and l < self._num_layers - 1:
+                            v = (v * u + h_below) / (u + 1)
+                            z_comp = 1 - z
+                            u = u * z_comp + z_comp
+                            w = self._kernel_w[l](h)
+                        else:
+                            v = u = w = None
 
-                        state_tuple = collections.namedtuple('HMLSTMStateTupleL%d' % l, ' '.join(new_state_names_cur))
+                        new_state_names = []
+                        new_state_cur = []
+                        name_map = {
+                            'c': c,
+                            'h': h,
+                            'z': z,
+                            'z_prob': z_prob,
+                            'lm': pred_new,
+                            'cell_proposal': c_flush,
+                            'u': u,
+                            'v': v,
+                            'w': w
+                        }
+
+                        for name in HMLSTM_RETURN_SIGNATURE:
+                            include = False
+                            if name in ['c', 'h', 'cell_proposal']:
+                                include = True
+                            elif name in ['z', 'z_prob'] and l < self._num_layers - 1:
+                                include = True
+                            elif name == 'lm' and self._lm:
+                                include = True
+                            elif self._return_cae and l < self._num_layers - 1 and name in ['u', 'v', 'w']:
+                                include = True
+
+                            if include:
+                                new_state_names.append(name)
+                                new_state_cur.append(name_map[name])
+
+                        state_tuple = collections.namedtuple('HMLSTMStateTupleL%d' % l, ' '.join(new_state_names))
                         new_state_cur = state_tuple(*new_state_cur)
 
                         # Append layer to new state
@@ -1692,8 +1839,6 @@ class HMLSTMCell(LayerRNNCell):
 
                         h_below = h
                         z_below = z
-
-                        # print(new_state)
 
                     return new_state, new_state
 
@@ -1729,6 +1874,7 @@ class HMLSTMSegmenter(object):
             bottomup_dropout=None,
             temporal_dropout=None,
             temporal_dropout_plug_lm=False,
+            return_cae=True,
             return_lm_predictions=False,
             lm_order_bwd=0,
             lm_order_fwd=1,
@@ -1796,6 +1942,7 @@ class HMLSTMSegmenter(object):
                     self.bias_initializer = bias_initializer
 
                     self.temporal_dropout = temporal_dropout
+                    self.return_cae = return_cae
                     self.return_lm_predictions = return_lm_predictions
                     self.lm_order_bwd = lm_order_bwd
                     self.lm_order_fwd = lm_order_fwd
@@ -1875,6 +2022,7 @@ class HMLSTMSegmenter(object):
                         topdown_regularizer=self.topdown_regularizer,
                         boundary_regularizer=self.boundary_regularizer,
                         temporal_dropout=self.temporal_dropout,
+                        return_cae=self.return_cae,
                         return_lm_predictions=self.return_lm_predictions,
                         lm_order_bwd=self.lm_order_bwd,
                         lm_order_fwd=self.lm_order_fwd,
@@ -2014,13 +2162,35 @@ class HMLSTMOutput(object):
 
                 return cell_proposal
 
+    def averaged_inputs(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                v = [l.averaged_inputs(mask=mask) for l in self.l]
+
+                return v
+
+    def averaged_input_logits(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                w = [l.averaged_input_logits(mask=mask) for l in self.l]
+
+                return w
+
+    def segment_lengths(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                u = [l.segment_lengths(mask=mask) for l in self.l]
+
+                return u
+
+
 class HMLSTMOutputLevel(object):
     def __init__(self, output, session=None):
         self.session = get_session(session)
 
         with self.session.as_default():
             with self.session.graph.as_default():
-                for prop in ['c', 'h', 'z_prob', 'z', 'lm', 'cell_proposal']:
+                for prop in HMLSTM_RETURN_SIGNATURE:
                     setattr(self, prop, getattr(output, prop, None))
 
     def cell(self, mask=None):
@@ -2112,6 +2282,36 @@ class HMLSTMOutputLevel(object):
                         cell_proposal *= mask[..., None]
 
                 return cell_proposal
+
+    def averaged_inputs(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                v = self.v
+                if v is not None:
+                    if mask is not None:
+                        v *= mask[..., None]
+
+                return v
+
+    def averaged_input_logits(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                w = self.w
+                if w is not None:
+                    if mask is not None:
+                        w *= mask[..., None]
+
+                return w
+
+    def segment_lengths(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                u = self.u
+                if u is not None:
+                    if mask is not None:
+                        u *= mask[..., None]
+
+                return u
 
 class MultiLSTMCell(LayerRNNCell):
     def __init__(

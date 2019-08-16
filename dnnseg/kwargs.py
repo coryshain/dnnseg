@@ -911,6 +911,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of encoder language modeling objective in the loss function. If ``None`` or 0, no language modeling objective is used."
     ),
     Kwarg(
+        'backprop_into_targets',
+        True,
+        bool,
+        "Whether to backprop into prediction targets."
+    ),
+    Kwarg(
         'lm_order_fwd',
         1,
         int,
@@ -962,9 +968,9 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Step number (batch if **streaming** or iteration otherwise) at which to start minimizing correpondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
     ),
     Kwarg(
-        'correspondence_loss_weight',
-        1.,
-        float,
+        'correspondence_loss_scale',
+        None,
+        [float, None],
         "Coefficient by which to scale correspondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
     ),
     Kwarg(

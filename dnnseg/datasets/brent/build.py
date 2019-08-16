@@ -6,7 +6,7 @@ argparser = argparse.ArgumentParser('''
 Builds Brent dataset into appropriate format for use with DNN-Seg.
 ''')
 argparser.add_argument('dir_path', help='Path to Brent source directory')
-argparser.add_argument('-o', '--outdir', default='./brent/', help='')
+argparser.add_argument('-o', '--outdir', default='../dnnseg_data/brent/', help='')
 args = argparser.parse_args()
 
 if not os.path.exists(args.outdir):

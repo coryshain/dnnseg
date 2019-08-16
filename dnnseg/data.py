@@ -7,7 +7,8 @@ import numpy as np
 import scipy.signal
 import pandas as pd
 from scipy.interpolate import Rbf
-from sklearn.manifold import TSNE
+from sklearn.manifold import LocallyLinearEmbedding, MDS, SpectralEmbedding, TSNE
+from sklearn.decomposition import PCA
 
 
 def binary_to_integer_np(b, int_type='int32'):
@@ -556,7 +557,58 @@ def score_segmentation(true, pred, tol=0.02):
     return out
 
 
-def extract_matching_segments(true, pred, tol=0.02):
+def extract_segment_embeddings(segs):
+    embedding_columns = [c for c in segs.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
+    embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
+    if len(embedding_columns) < 1:
+        sys.stderr.write('No embeddings in prediction dataframe. Skipping segment extraction...\n')
+        sys.stderr.flush()
+        return segs
+
+    out = segs
+    out = out[['start', 'end', 'label'] + embedding_columns]
+
+    return out
+
+
+def extract_predicted_segment_embeddings_with_true_labels(true, pred):
+    embedding_columns = [c for c in pred.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
+    embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
+    if len(embedding_columns) < 1:
+        sys.stderr.write('No embeddings in prediction dataframe. Skipping segment extraction...\n')
+        sys.stderr.flush()
+        return pred
+
+    _true = np.array(true[['start', 'end']])
+    _pred = np.array(pred[['start', 'end']])
+    _embeddings = np.array(pred[embedding_columns])
+    _labels = np.array(true.label)
+
+    i = 0
+    j = 0
+    
+    label = []
+
+    while i < len(_true) and j < len(_pred):
+        # Neither true nor pred have finished
+        s_true, e_true = _true[i]
+        s_pred, e_pred = _pred[j]
+        if s_true < e_pred - 1e-5: # True before end of current pred
+            if e_true >= e_pred - 1e-5: # True ends past end of current pred
+                label.append(_labels[i])
+                j += 1
+            else: # True ends within current pred
+                i += 1
+        else: # True starts after end of current pred
+            j += 1
+
+    out = pred[['start', 'end'] + embedding_columns]
+    out['label'] = label
+
+    return out
+
+
+def extract_matching_segment_embeddings(true, pred, tol=0.02):
     embedding_columns = [c for c in pred.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
     embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
     if len(embedding_columns) < 1:
@@ -638,10 +690,7 @@ def extract_matching_segments(true, pred, tol=0.02):
     return out
 
 
-def project_matching_segments(df, verbose=True):
-    if verbose:
-        sys.stderr.write('Projecting %d segments using t-SNE...\n' % len(df))
-        sys.stderr.flush()
+def project_matching_segments(df, method='tsne'):
     embedding_columns = [c for c in df.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
     embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
     if len(embedding_columns) < 1:
@@ -651,10 +700,23 @@ def project_matching_segments(df, verbose=True):
 
     X = df[embedding_columns]
 
-    tsne = TSNE(n_components=2).fit_transform(np.array(X))
+    if method.lower() == 'lle':
+        projector = LocallyLinearEmbedding(n_components=2, method='modified')
+    elif method.lower() == 'mds':
+        projector = MDS(n_components=2)
+    elif method.lower() == 'pca':
+        projector = PCA(n_components=2)
+    elif method.lower() == 'spectral_embedding':
+        projector = SpectralEmbedding(n_components=2)
+    elif method.lower() == 'tnse':
+        projector = TSNE(n_components=2)
+    else:
+        raise ValueError('Unrecognized dimensionality reduction method "%s".' % method)
 
-    df['tsne0'] = tsne[:, 0]
-    df['tsne1'] = tsne[:, 1]
+    projections = projector.fit_transform(np.array(X))
+
+    df['projection1'] = projections[:, 0]
+    df['projection2'] = projections[:, 1]
 
     return df
 
@@ -2018,8 +2080,62 @@ class Dataset(object):
                 padding=padding
             )
 
-            for j in range(n_levels):
-                if len(dfs) > 0:
+            if len(dfs) > 0:
+                for j in range(n_levels):
+                    out[j][f] = dfs[j]
+
+            i += n_utt
+
+        return out
+
+    def get_segment_tables_from_true_boundaries(
+            self,
+            true_segment_type='phn',
+            parent_segment_type='vad',
+            states=None,
+            discretize=True,
+            state_activation='tanh',
+            seconds_per_step=None,
+            mask=None,
+            padding=None
+    ):
+        assert states is not None, 'Calling get_segment_tables_from_true_boundaries with states=None does not make sense and is not supported.'
+
+        if seconds_per_step is None:
+            seconds_per_step = self.seconds_per_step
+
+        n_levels = len(states)
+        out = []
+
+        for i in range(n_levels):
+            out.append({})
+
+        i = 0
+
+        for f in self.fileIDs:
+            F = self.data[f]
+            if parent_segment_type == 'vad':
+                n_utt = len(F.vad_segments)
+            elif parent_segment_type == 'wrd':
+                n_utt = len(F.wrd_segments)
+            elif parent_segment_type == 'phn':
+                n_utt = len(F.phn_segments)
+            elif parent_segment_type == 'rnd':
+                n_utt = len(F.rnd_segments)
+
+            dfs = F.get_segment_tables_from_true_boundaries(
+                true_segment_type=true_segment_type,
+                parent_segment_type=parent_segment_type,
+                states=[s[i:i+n_utt] for s in states],
+                discretize=discretize,
+                mask=None if mask is None else mask[i:i + n_utt],
+                state_activation=state_activation,
+                seconds_per_step=seconds_per_step,
+                padding=padding
+            )
+
+            if len(dfs) > 0:
+                for j in range(n_levels):
                     out[j][f] = dfs[j]
 
             i += n_utt
@@ -2068,7 +2184,39 @@ class Dataset(object):
 
         return global_score_dict, score_dict
 
-    def extract_matching_segments(self, true, pred, tol=0.02, as_dict=False):
+    def extract_segment_embeddings(self, segs, as_dict=False, true=None):
+        seg_dict = {}
+        for f in self.fileIDs:
+            if isinstance(true, str):
+                true_cur = self.data[f].segments(true)
+            elif true is not None:
+                # ``true`` is a dictionary
+                true_cur = true[f]
+            else:
+                true_cur = None
+
+            if isinstance(segs, str):
+                pred_cur = self.data[f].segments(segs)
+            else:
+                # ``true`` is a dictionary
+                if f in segs:
+                    pred_cur = segs[f]
+                else:
+                    pred_cur = None
+
+            seg_dict[f] = self.data[f].extract_segment_embeddings(pred_cur, true=true_cur)
+
+        if as_dict:
+            out = seg_dict
+        else:
+            out = []
+            for f in self.fileIDs:
+                out.append(seg_dict[f])
+            out = pd.concat(out, axis=0)
+
+        return out
+
+    def extract_matching_segment_embeddings(self, true, pred, tol=0.02, as_dict=False):
         seg_dict = {}
         for f in self.fileIDs:
             if isinstance(true, str):
@@ -2080,13 +2228,13 @@ class Dataset(object):
             if isinstance(pred, str):
                 pred_cur = self.data[f].segments(pred)
             else:
-                # ``true`` is a dictionary
+                # ``pred`` is a dictionary
                 if f in pred:
                     pred_cur = pred[f]
                 else:
                     pred_cur = None
 
-            seg_dict[f] = self.data[f].extract_matching_segments(true_cur, pred_cur, tol=tol)
+            seg_dict[f] = self.data[f].extract_matching_segment_embeddings(true_cur, pred_cur, tol=tol)
 
         if as_dict:
             out = seg_dict
@@ -2575,14 +2723,14 @@ class Datafile(object):
             parent_segs = self.phn_segments
         elif parent_segment_type == 'rnd':
             parent_segs = self.rnd_segments
-
-        out = []
-        relabel = []
+        else:
+            raise ValueError('Unrecognized parent segment type "%s".' % parent_segment_type)
 
         parent_starts = parent_segs.start.as_matrix()
         parent_ends = parent_segs.end.as_matrix()
 
         n_layers = len(segmentations)
+        out = []
 
         if len(segmentations[0]) > 0:
             for i in range(n_layers):
@@ -2649,17 +2797,100 @@ class Datafile(object):
 
                 df = pd.DataFrame(df)
                 out.append(df)
-
-                # pred_labels_cur = sorted(list(set(df.label.unique())))
-                # relabel_cur = {}
-                # for i, x in enumerate(pred_labels_cur):
-                #     relabel_cur[x] = i
-                # relabel.append(relabel_cur)
         else:
             out = pd.DataFrame(columns=['start', 'end', 'label'])
-        #
-        # for df, rl in zip(out, relabel):
-        #     df.label = df.label.map(rl)
+
+        return out
+
+    def get_segment_tables_from_true_boundaries(
+            self,
+            true_segment_type='phn',
+            parent_segment_type='vad',
+            states=None,
+            discretize=True,
+            state_activation='tanh',
+            seconds_per_step=None,
+            mask=None,
+            padding=None,
+            snap_ends=True
+    ):
+        assert states is not None, 'Calling get_segment_tables_from_true_boundaries with states=None does not make sense and is not supported.'
+
+        if seconds_per_step is None:
+            seconds_per_step = self.seconds_per_step
+
+        if true_segment_type == 'vad':
+            true_segs = self.vad_segments
+        elif true_segment_type == 'wrd':
+            true_segs = self.wrd_segments
+        elif true_segment_type == 'phn':
+            true_segs = self.phn_segments
+        elif true_segment_type == 'rnd':
+            true_segs = self.rnd_segments
+        else:
+            raise ValueError('Unrecognized true segment type "%s".' % true_segment_type)
+
+        if parent_segment_type == 'vad':
+            parent_segs = self.vad_segments
+        elif parent_segment_type == 'wrd':
+            parent_segs = self.wrd_segments
+        elif parent_segment_type == 'phn':
+            parent_segs = self.phn_segments
+        elif parent_segment_type == 'rnd':
+            parent_segs = self.rnd_segments
+        else:
+            raise ValueError('Unrecognized parent segment type "%s".' % parent_segment_type)
+
+        timestamps = true_segs.end.as_matrix()
+        parent_starts = parent_segs.start.as_matrix()
+        parent_ends = parent_segs.end.as_matrix()
+
+        n_layers = len(states)
+        out = []
+
+        labels = true_segs.label
+
+        for i in range(n_layers):
+            starts = []
+            ends = []
+
+            states_extracted = extract_states_at_timestamps_batch(
+                timestamps,
+                states,
+                seconds_per_step=seconds_per_step,
+                activation=state_activation,
+                discretize=discretize,
+                as_categories=True,
+                mask=mask,
+                padding=padding
+            )
+    
+            for j, s in enumerate(timestamps):
+                s = np.concatenate([[0.], s], axis=0)
+                segs = s + parent_starts[j]
+                starts_cur = segs[:-1]
+                ends_cur = segs[1:]
+                if snap_ends:
+                    ends_cur[-1] = parent_ends[j]
+                select = ends_cur > starts_cur
+                starts_cur = starts_cur[select]
+                ends_cur = ends_cur[select]
+                starts.append(starts_cur)
+                ends.append(ends_cur)
+    
+            df = {
+                'start': starts,
+                'end': ends,
+                'label': labels
+            }
+    
+            if not discretize:
+                for j in range(labels.shape[1]):
+                    df['d%s' % j] = states_extracted[:, j]
+    
+            df = pd.DataFrame(df)
+            
+            out.append(df)
 
         return out
 
@@ -2752,7 +2983,25 @@ class Datafile(object):
 
         return score_dict
 
-    def extract_matching_segments(self, true, pred, tol=0.02):
+    def extract_segment_embeddings(self, segs, true=None):
+        if isinstance(segs, str):
+            if segs == 'vad':
+                segs = self.vad_segments
+            elif segs == 'wrd':
+                segs = self.wrd_segments
+            elif segs == 'phn':
+                segs = self.phn_segments
+            elif segs == 'rnd':
+                segs = self.rnd_segments
+
+        if true is None:
+            seg_df = extract_segment_embeddings(segs)
+        else:
+            seg_df = extract_predicted_segment_embeddings_with_true_labels(true, segs)
+
+        return seg_df
+
+    def extract_matching_segment_embeddings(self, true, pred, tol=0.02):
         if isinstance(true, str):
             if true == 'vad':
                 true = self.vad_segments
@@ -2773,7 +3022,7 @@ class Datafile(object):
             elif pred == 'rnd':
                 pred = self.rnd_segments
 
-        seg_df = extract_matching_segments(true, pred, tol=tol)
+        seg_df = extract_matching_segment_embeddings(true, pred, tol=tol)
 
         return seg_df
 

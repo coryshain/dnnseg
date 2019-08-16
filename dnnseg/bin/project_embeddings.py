@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import pandas as pd
 import argparse
 
@@ -7,15 +8,25 @@ from dnnseg.config import Config
 from dnnseg.data import project_matching_segments
 from dnnseg.plot import plot_projections
 
+
+emb_file = re.compile('embeddings_(.+)_segs_l([0-9]+).csv')
+
+
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser('''
     Project saved embeddings from a DNN-Seg run.
     ''')
     argparser.add_argument('config', help='Path to configuration file.')
     argparser.add_argument('-f', '--feature_names', default=['english'], nargs='+', help='Names of phonological features to use to color plots.')
+    argparser.add_argument('-m', '--method', default='mds', help='Embedding method to use for projections. One of ["lle", "mds", "pca", "spectral_embedding", "tsne"].')
     args = argparser.parse_args()
 
     p = Config(args.config)
+
+    outdir = p.outdir + '/projections'
+
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
 
     if p['label_map_file'] is not None and os.path.exists(p['label_map_file']):
         label_map = pd.read_csv(p['label_map_file'])
@@ -41,19 +52,30 @@ if __name__ == '__main__':
     else:
         feature_names = args.feature_names
 
-    embeddings = [x for x in os.listdir(p.outdir) if x.startswith('matching_')]
+    embeddings = [x for x in os.listdir(p.outdir) if x.startswith('embeddings') and x.endswith('.csv')]
 
     for e in embeddings:
-        l = int(e.split('_')[-1].split('.')[0][1:])
+        segtype, l = emb_file.match(e).groups()
+        outdir_cur = outdir + '/' + segtype + '/l' + l + '/' + args.method
+        if not os.path.exists(outdir_cur):
+            os.makedirs(outdir_cur)
         df = pd.read_csv(p.outdir + '/' + e, sep=' ')
-        df = project_matching_segments(df)
+
+        sys.stderr.write('Projecting using %s. Segtype = %s. Layer = %s. Segments = %d.\n' % (args.method.upper(), segtype, l, len(df)))
+        sys.stderr.flush()
+
+        df = project_matching_segments(df, method=args.method)
+
+        sys.stderr.write('Plotting...\n')
+        sys.stderr.flush()
+
         plot_projections(
             df,
             label_map=label_map,
             feature_table=feature_table,
             feature_names=feature_names,
-            directory=p.outdir,
-            prefix='l%d_' % l,
+            directory=outdir_cur,
+            prefix='l%s_' % l,
             suffix='.png'
         )
 

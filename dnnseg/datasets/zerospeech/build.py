@@ -11,7 +11,7 @@ argparser.add_argument('zs', help='Path to Zerospeech 2015 challenge metadata re
 argparser.add_argument('tde', help='Path to Zerospeech 2015 challenge Track 2 repository (https://github.com/bootphon/tde)')
 argparser.add_argument('-b', '--bsc', type=str, default=None, help='Path to Buckeye Speech Corpus')
 argparser.add_argument('-x', '--xit', type=str, default=None, help='Path to directory containing Xitsonga portion of NCHLT')
-argparser.add_argument('-o', '--outdir', default='./', help='Path to output directory (if not specified, uses current working directory)')
+argparser.add_argument('-o', '--outdir', default='../dnnseg_data/zerospeech/', help='Path to output directory (if not specified, uses current working directory)')
 args = argparser.parse_args()
 
 sample_files = []
@@ -66,73 +66,73 @@ xitsonga_phn.end = xitsonga_phn.end.round(3)
 
 sys.stderr.write('Processing Buckeye Speech Corpus data...\n')
 if args.bsc is not None:
-    if not os.path.exists(args.outdir + '/zerospeech/sample'):
-        os.makedirs(args.outdir + '/zerospeech/sample')
+    if not os.path.exists(args.outdir + '/sample'):
+        os.makedirs(args.outdir + '/sample')
 
     for fileID in sample_files:
         subject = fileID[:3]
         in_path = args.bsc + '/' + subject + '/' + fileID + '/' + fileID + '.wav'
-        out_path = args.outdir + '/zerospeech/sample/' + fileID + '.wav'
+        out_path = args.outdir + '/sample/' + fileID + '.wav'
         shutil.copy2(in_path, out_path)
 
         to_print = sample_vad[sample_vad.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/sample/%s.vad' %fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/sample/%s.vad' %fileID, sep=' ', index=False)
 
         to_print = sample_wrd[sample_wrd.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/sample/%s.wrd' %fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/sample/%s.wrd' %fileID, sep=' ', index=False)
 
         to_print = sample_phn[sample_phn.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/sample/%s.phn' %fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/sample/%s.phn' %fileID, sep=' ', index=False)
 
-    if not os.path.exists(args.outdir + '/zerospeech/english'):
-        os.makedirs(args.outdir + '/zerospeech/english')
+    if not os.path.exists(args.outdir + '/english'):
+        os.makedirs(args.outdir + '/english')
 
     for fileID in english_files:
         subject = fileID[:3]
         in_path = args.bsc + '/' + subject + '/' + fileID + '/' + fileID + '.wav'
-        out_path = args.outdir + '/zerospeech/english/' + fileID + '.wav'
+        out_path = args.outdir + '/english/' + fileID + '.wav'
         shutil.copy2(in_path, out_path)
 
         to_print = english_vad[english_vad.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/english/%s.vad' % fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/english/%s.vad' % fileID, sep=' ', index=False)
 
         to_print = english_wrd[english_wrd.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/english/%s.wrd' % fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/english/%s.wrd' % fileID, sep=' ', index=False)
 
         to_print = english_phn[english_phn.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/english/%s.phn' % fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/english/%s.phn' % fileID, sep=' ', index=False)
 
 else:
     sys.stderr.write('No path provided to Buckeye Speech Corpus. Skipping...\n')
 
 sys.stderr.write('Processing NCHST (Xitsonga) data...\n')
 if args.xit is not None:
-    if not os.path.exists(args.outdir + '/zerospeech/xitsonga'):
-        os.makedirs(args.outdir + '/zerospeech/xitsonga')
+    if not os.path.exists(args.outdir + '/xitsonga'):
+        os.makedirs(args.outdir + '/xitsonga')
 
     for fileID in xitsonga_files:
         subject = fileID[10:13]
         in_path = args.xit + '/audio/' + subject + '/' + fileID + '.wav'
-        out_path = args.outdir + '/zerospeech/xitsonga/' + fileID + '.wav'
+        out_path = args.outdir + '/xitsonga/' + fileID + '.wav'
         shutil.copy2(in_path, out_path)
 
         to_print = xitsonga_vad[xitsonga_vad.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/xitsonga/%s.vad' % fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/xitsonga/%s.vad' % fileID, sep=' ', index=False)
 
         to_print = xitsonga_wrd[xitsonga_wrd.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/xitsonga/%s.wrd' % fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/xitsonga/%s.wrd' % fileID, sep=' ', index=False)
 
         to_print = xitsonga_phn[xitsonga_phn.fileID == fileID]
         to_print['speaker'] = subject
-        to_print.to_csv(args.outdir + '/zerospeech/xitsonga/%s.phn' % fileID, sep=' ', index=False)
+        to_print.to_csv(args.outdir + '/xitsonga/%s.phn' % fileID, sep=' ', index=False)
 
 else:
     sys.stderr.write('No path provided to Xitsonga data. Skipping...\n')

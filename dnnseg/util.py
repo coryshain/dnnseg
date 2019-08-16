@@ -21,7 +21,7 @@ def load_dnnseg(dir_path):
     graph.
 
     :param dir_path: Path to directory containing the DTSR checkpoint files.
-    :return: The loaded DTSR instance.
+    :return: The loaded DNNSeg instance.
     """
 
     with open(dir_path + '/m.obj', 'rb') as f:

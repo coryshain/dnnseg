@@ -24,7 +24,12 @@ if __name__ == '__main__':
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
     t0 = time.time()
-    data_name = 'data_f%s_d%s.obj' %(p['n_coef'], p['order'])
+    data_path = 'data'
+    if p['os']:
+        data_path += '_os'
+    if p['root']:
+        data_path += '_root'
+    data_path += '.obj'
 
     sys.stderr.write('Loading saved training data...\n')
     sys.stderr.flush()

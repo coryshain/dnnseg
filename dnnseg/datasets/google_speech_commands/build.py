@@ -9,7 +9,7 @@ argparser = argparse.ArgumentParser('''
 Builds Google Speech Commands dataset into appropriate format for use with DNN-Seg.
 ''')
 argparser.add_argument('dir_path', help='Path to Google Speech Commands source directory')
-argparser.add_argument('-o', '--outdir', default='./google_speech_commands/', help='')
+argparser.add_argument('-o', '--outdir', default='../dnnseg_data/google_speech_commands/', help='')
 args = argparser.parse_args()
 
 if args.outdir is None:

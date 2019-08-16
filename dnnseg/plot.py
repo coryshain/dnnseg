@@ -560,16 +560,14 @@ def plot_projections(
             df[c] = df[c].map({0: '-', 1: '+'})
         colors += feature_names
 
-    df['t-SNE 1'] = df.tsne0
-    df['t-SNE 2'] = df.tsne1
+    df['Projection 1'] = df.projection1
+    df['Projection 2'] = df.projection2
 
     for c in colors:
-        df['Segment Type'] = df[c]
-
         sns.set_style('white')
 
         with sns.plotting_context(rc={'legend.fontsize': 'small', 'lines.markersize': 2}):
-            g = sns.relplot(x='t-SNE 1', y='t-SNE 2', kind='scatter', hue='Segment Type', data=df.sort_values('Segment Type'), palette=cmap, legend='full')
+            g = sns.relplot(x='Projection 1', y='Projection 2', kind='scatter', hue=c, data=df.sort_values(c), palette=cmap, legend='full')
         try:
             g.savefig(directory + '/' + prefix + 'projections_%s' % c + suffix)
         except Exception:
