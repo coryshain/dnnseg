@@ -11,7 +11,7 @@ import tensorflow as tf
 from sklearn.metrics import homogeneity_completeness_v_measure, adjusted_mutual_info_score, fowlkes_mallows_score
 
 from .backend import *
-from .data import get_random_permutation
+from .data import cache_data
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
 from .util import f_measure, pretty_print_seconds
 from .plot import plot_acoustic_features, plot_label_histogram, plot_label_heatmap, plot_binary_unit_heatmap
@@ -70,7 +70,7 @@ class AcousticEncoderDecoder(object):
         else:
             self.spectrogram_inverter = None
 
-        if self.revnet_n_layers:
+        if self.speaker_revnet_n_layers:
             assert self.speaker_emb_dim, "DNNSeg's RevNet setting is used for speaker adaptation. Supply a non-zero value for speaker_emb_dim."
             if self.order:
                 assert self.predict_deltas, 'RevNets require inputs and outputs with matched dimensionality. Use either order=0 or predict_deltas=True.'
@@ -390,21 +390,21 @@ class AcousticEncoderDecoder(object):
                 self.X_feat_mean = tf.reduce_sum(self.X, axis=-2) / tf.reduce_sum(self.X_mask, axis=-1, keepdims=True)
                 self.X_time_mean = tf.reduce_mean(self.X, axis=-1)
 
-                if self.speaker_emb_dim and not self.revnet_n_layers and not self.adversarial_loss_scale:
+                if self.speaker_emb_dim and not self.speaker_revnet_n_layers and not self.adversarial_loss_scale:
                     tiled_embeddings = tf.tile(self.speaker_embeddings[:, None, :], [1, tf.shape(self.X)[1], 1])
                     self.inputs = tf.concat([self.X, tiled_embeddings], axis=-1)
                 else:
                     self.inputs = self.X
 
-                if self.revnet_n_layers:
-                    self.revnet = RevNet(
+                if self.speaker_revnet_n_layers:
+                    self.speaker_revnet = RevNet(
                         training=self.training,
-                        layers=self.revnet_n_layers,
-                        layers_inner=self.revnet_n_layers_inner,
-                        activation=self.revnet_activation,
-                        batch_normalization_decay=self.revnet_batch_normalization_decay,
+                        layers=self.speaker_revnet_n_layers,
+                        layers_inner=self.speaker_revnet_n_layers_inner,
+                        activation=self.speaker_revnet_activation,
+                        batch_normalization_decay=self.speaker_revnet_batch_normalization_decay,
                         session=self.sess,
-                        name='RevNet'
+                        name='SpeakerRevNet'
                     )
 
                 if not self.streaming or self.predict_backward:
@@ -611,8 +611,8 @@ class AcousticEncoderDecoder(object):
 
                 encoder = encoder_in
 
-                if self.revnet_n_layers:
-                    encoder = self.revnet.forward(encoder, weights=self.speaker_embeddings)
+                if self.speaker_revnet_n_layers:
+                    encoder = self.speaker_revnet.forward(encoder, weights=self.speaker_embeddings)
 
                 if self.embed_inputs:
                     encoder = DenseLayer(
@@ -742,6 +742,10 @@ class AcousticEncoderDecoder(object):
                         global_step=self.step,
                         implementation=self.encoder_boundary_implementation,
                         decoder_embedding=self.speaker_embeddings if self.adversarial_loss_scale else None,
+                        revnet_n_layers=self.encoder_revnet_n_layers,
+                        revnet_n_layers_inner=self.encoder_revnet_n_layers_inner,
+                        revnet_activation=self.encoder_revnet_activation,
+                        revnet_batch_normalization_decay=self.encoder_revnet_batch_normalization_decay,
                         bptt=self.encoder_bptt,
                         session=self.sess,
                         # device=device_func
@@ -756,11 +760,24 @@ class AcousticEncoderDecoder(object):
                     self.encoder_segmentations = self.segmenter_output.boundary(mask=self.X_mask)
                     self.mean_segmentation_prob = tf.reduce_sum(self.segmentation_probs) / (tf.reduce_sum(self.X_mask) + self.epsilon)
                     if self.lm_loss_scale:
-                        self.encoder_lm_logits = self.segmenter_output.lm_logits(mask=self.X_mask)
-                        if self.data_type.lower() == 'text':
-                            self.encoder_lm_preds = tf.nn.softmax(self.encoder_lm_logits[0])
+                        self.encoder_lm_src_logits = self.segmenter_output.lm_logits(mask=self.X_mask)
+                        self.encoder_lm_revnet_logits = self.segmenter_output.lm_revnet_logits(mask=self.X_mask)
+
+                        if self.encoder_revnet_n_layers:
+                            encoder_lm_logits = self.encoder_lm_revnet_logits
+                            encoder_lm_preds = self.encoder_lm_revnet_logits[0]
                         else:
-                            self.encoder_lm_preds = self.encoder_lm_logits[0]
+                            encoder_lm_logits = self.encoder_lm_src_logits
+                            encoder_lm_preds = self.encoder_lm_src_logits[0]
+
+                        if self.data_type.lower() == 'text':
+                            encoder_lm_preds = tf.nn.softmax(encoder_lm_preds)
+                        else:
+                            encoder_lm_preds = encoder_lm_preds
+
+                        self.encoder_lm_logits = encoder_lm_logits
+                        self.encoder_lm_preds = encoder_lm_preds
+
                     self.cell_proposals = self.segmenter_output.cell_proposals(mask=self.X_mask)
                     if self.correspondence_loss_scale:
                         self.averaged_inputs = self.segmenter_output.averaged_inputs(mask=self.X_mask)
@@ -1082,7 +1099,7 @@ class AcousticEncoderDecoder(object):
                                     axis=1
                                 )
 
-                if self.speaker_emb_dim and not self.revnet_n_layers:
+                if self.speaker_emb_dim and not self.speaker_revnet_n_layers:
                     speaker_embeddings = self.speaker_embeddings
                     if extra_dims is None:
                         extra_dims = speaker_embeddings
@@ -1306,8 +1323,8 @@ class AcousticEncoderDecoder(object):
                     if self.decoder_temporal_encoding_type:
                         temporal_encoding = tf.reshape(temporal_encoding, final_shape_temporal_encoding)
 
-                if self.revnet_n_layers:
-                    decoder = self.revnet.backward(decoder, weights=self.speaker_embeddings)
+                if self.speaker_revnet_n_layers:
+                    decoder = self.speaker_revnet.backward(decoder, weights=self.speaker_embeddings)
 
                 return decoder, temporal_encoding
 
@@ -3011,15 +3028,26 @@ class AcousticEncoderDecoder(object):
 
                         segmentation_probs = [[] for _ in range(n_layers)]
                         segmentations = [[] for _ in range(n_layers)]
+                        true_labels = []
                         true_boundaries = []
                         states = [[] for _ in range(n_layers)]
 
                         for i, file in enumerate(data_feed):
                             X_batch = file['X']
                             fixed_boundaries_batch = file['fixed_boundaries']
+                            oracle_labels_batch = file['oracle_labels']
                             oracle_boundaries_batch = file['oracle_boundaries']
                             speaker_batch = file['speaker']
                             splits = np.where(np.concatenate([np.zeros((1,)), fixed_boundaries_batch[0,:-1]]))[0]
+
+                            # file_name = data.fileIDs[file['file_ix']]
+                            # print(file_name)
+                            # print(fixed_boundaries_batch.sum())
+                            # print(len(data.data[file_name].vad_segments))
+                            # print(oracle_boundaries_batch)
+                            # print(oracle_boundaries_batch.sum())
+                            # print(len(data.data[file_name].phn_segments))
+                            # input()
 
                             fd_minibatch = {
                                 self.X: X_batch,
@@ -3036,7 +3064,7 @@ class AcousticEncoderDecoder(object):
                             if oracle_boundaries_batch is not None and self.oracle_boundaries:
                                 fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
 
-                            [segmentation_probs_cur, segmentations_cur, states_cur] = self.sess.run(
+                            segmentation_probs_cur, segmentations_cur, states_cur = self.sess.run(
                                 [
                                     self.segmentation_probs,
                                     self.segmentations,
@@ -3047,14 +3075,18 @@ class AcousticEncoderDecoder(object):
 
                             for l in range(n_layers):
                                 segmentation_probs_l = segmentation_probs_cur[l][0]
-                                segmentation_probs_l = np.split(segmentation_probs_l,splits)
+                                segmentation_probs_l = np.split(segmentation_probs_l, splits)
                                 segmentation_probs[l] += segmentation_probs_l
 
                                 segmentations_l = segmentations_cur[l][0]
-                                segmentations_l = np.split(segmentations_l,splits)
+                                segmentations_l = np.split(segmentations_l, splits)
                                 segmentations[l] += segmentations_l
 
                                 if l == 0:
+                                    true_labels_cur = oracle_labels_batch[0]
+                                    true_labels_cur = np.split(true_labels_cur, splits)
+                                    true_labels += true_labels_cur
+
                                     true_boundaries_cur = oracle_boundaries_batch[0]
                                     true_boundaries_cur = np.split(true_boundaries_cur, splits)
                                     true_boundaries += true_boundaries_cur
@@ -3076,11 +3108,14 @@ class AcousticEncoderDecoder(object):
                         states = [[] for _ in range(n_layers)]
                         X_mask = []
 
+                        true_labels=None
+
                         for i, batch in enumerate(data_feed):
                             X_batch = batch['X']
                             X_mask_batch = batch['X_mask']
                             speaker_batch = batch['speaker']
                             fixed_boundaries_batch = batch['fixed_boundaries']
+                            oracle_labels_batch = None
                             oracle_boundaries_batch = batch['oracle_boundaries']
 
                             fd_minibatch = {
@@ -3163,6 +3198,7 @@ class AcousticEncoderDecoder(object):
                         segmentations,
                         parent_segment_type=segtype,
                         states=states,
+                        true_labels=true_labels,
                         state_activation=state_activation,
                         smoothing_algorithm=smoothing_algorithm,
                         smoothing_algorithm_params=None,
@@ -3186,7 +3222,7 @@ class AcousticEncoderDecoder(object):
                     }
                     summary += summary_cur
 
-                    summary += '\nCLASSIFICATION EVAL:\n\n'
+                    # summary += '\nCLASSIFICATION EVAL:\n\n'
                     scores['classification_scores'] = []
                     for l in range(len(tables)):
                         if self.data_type.lower() == 'acoustic':
@@ -3199,12 +3235,12 @@ class AcousticEncoderDecoder(object):
                             true = {}
                             for f in data.fileIDs:
                                 true[f] = data.data[f].segments(s)
-                            summary += 'LAYER %d, GOLD=%s\n' % (l + 1, s)
+                            # summary += 'LAYER %d, GOLD=%s\n' % (l + 1, s)
                             for g in ['goldseg', 'predseg']:
-                                if g == 'goldseg':
-                                    summary += '  Using gold segmentations\n'
-                                else:
-                                    summary += '  Using predicted segmentations\n'
+                                # if g == 'goldseg':
+                                #     summary += '  Using gold segmentations\n'
+                                # else:
+                                #     summary += '  Using predicted segmentations\n'
                                 aligned = data.align_gold_labels_to_segments(true, tables[l], use_gold_segs=g=='goldseg')
                                 summary_cur, eval_dict_cur = self._evaluate_classifier_inner(
                                     aligned.gold_label,
@@ -3215,7 +3251,7 @@ class AcousticEncoderDecoder(object):
                                     ix2label=None,
                                     verbose=False
                                 )
-                                summary += summary_cur
+                                # summary += summary_cur
                                 scores['classification_scores'][l][s][g] = eval_dict_cur
 
                     sys.stderr.write(summary)
@@ -3228,6 +3264,7 @@ class AcousticEncoderDecoder(object):
                             [true_boundaries] * n_layers,
                             parent_segment_type=segtype,
                             states=states,
+                            true_labels=true_labels,
                             discretize=False,
                             state_activation=state_activation,
                             smoothing_algorithm=smoothing_algorithm,
@@ -3241,6 +3278,7 @@ class AcousticEncoderDecoder(object):
                             segmentations,
                             parent_segment_type=segtype,
                             states=states,
+                            true_labels=true_labels,
                             discretize=False,
                             state_activation=state_activation,
                             smoothing_algorithm=smoothing_algorithm,
@@ -3251,13 +3289,12 @@ class AcousticEncoderDecoder(object):
                         )
 
                         for l in range(self.n_layers_encoder - 1):
-                            found_seg_embeddings = data.extract_segment_embeddings(pred_tables[l], true=true_tables[l])
-                            found_seg_embeddings.to_csv(self.outdir + '/embeddings_found_segs_l%d.csv' % l, sep=' ', index=False)
+                            pred_seg_embeddings = data.extract_segment_embeddings(pred_tables[l])
+                            pred_seg_embeddings.to_csv(self.outdir + '/embeddings_pred_segs_l%d.csv' % l, sep=' ', index=False)
                             true_seg_embeddings = data.extract_segment_embeddings(true_tables[l])
                             true_seg_embeddings.to_csv(self.outdir + '/embeddings_true_segs_l%d.csv' % l, sep=' ', index=False)
                             matching_seg_embeddings = data.extract_matching_segment_embeddings('phn', pred_tables[l], tol=0.02)
                             matching_seg_embeddings.to_csv(self.outdir + '/embeddings_matched_segs_l%d.csv' % l, sep=' ', index=False)
-
 
                     self.set_predict_mode(False)
 
@@ -3581,86 +3618,27 @@ class AcousticEncoderDecoder(object):
             n_train = len(X)
 
         else:
-            if not train_data.cached('train'):
-                if self.streaming:
-                    train_data.cache_streaming_data(
-                        'train',
-                        self.max_len,
-                        self.window_len_bwd,
-                        self.window_len_fwd,
-                        mask=self.segtype,
-                        input_normalization=self.data_normalization,
-                        target_normalization=self.data_normalization,
-                        reduction_axis=self.reduction_axis,
-                        predict_deltas=self.predict_deltas,
-                        target_bwd_resampling=self.resample_targets_bwd,
-                        target_fwd_resampling=self.resample_targets_fwd,
-                        oracle_boundaries=self.oracle_boundaries
-                    )
-                else:
-                    train_data.cache_utterance_data(
-                        'train',
-                        segments=self.segtype,
-                        max_len=self.max_len,
-                        input_normalization=self.data_normalization,
-                        target_normalization=self.data_normalization,
-                        reduction_axis=self.reduction_axis,
-                        predict_deltas=self.predict_deltas,
-                        input_padding=self.input_padding,
-                        input_resampling=self.resample_inputs,
-                        target_padding=self.target_padding,
-                        target_resampling=self.resample_targets_bwd,
-                        reverse_targets=self.reverse_targets,
-                        oracle_boundaries=self.oracle_boundaries
-                    )
-
-            if not val_data.cached('val'):
-                if self.streaming:
-                    val_data.cache_streaming_data(
-                        'val',
-                        self.max_len,
-                        self.window_len_bwd,
-                        self.window_len_fwd,
-                        mask=self.segtype,
-                        input_normalization=self.data_normalization,
-                        target_normalization=self.data_normalization,
-                        reduction_axis=self.reduction_axis,
-                        predict_deltas=self.predict_deltas,
-                        target_bwd_resampling=self.resample_targets_bwd,
-                        target_fwd_resampling=self.resample_targets_fwd,
-                        oracle_boundaries = self.oracle_boundaries
-                    )
-                else:
-                    if self.task.lower() == 'classifier':
-                        max_len = self.max_len
-                    else:
-                        max_len = None
-                    val_data.cache_utterance_data(
-                        'val',
-                        segments=self.segtype,
-                        max_len=max_len,
-                        input_normalization=self.data_normalization,
-                        target_normalization=self.data_normalization,
-                        reduction_axis=self.reduction_axis,
-                        predict_deltas=self.predict_deltas,
-                        input_padding=self.input_padding,
-                        input_resampling=self.resample_inputs,
-                        target_padding=self.target_padding,
-                        target_resampling=self.resample_targets_bwd,
-                        reverse_targets=self.reverse_targets,
-                        oracle_boundaries=self.oracle_boundaries
-                    )
-                if self.task.lower() == 'segmenter':
-                    oracle_boundaries = self.oracle_boundaries
-                    if oracle_boundaries is None and self.data_type.lower() == 'acoustic':
-                        oracle_boundaries = 'phn'
-                    val_data.cache_files_data(
-                        'val_files',
-                        mask=self.segtype,
-                        normalization=self.data_normalization,
-                        reduction_axis=self.reduction_axis,
-                        oracle_boundaries=oracle_boundaries
-                    )
+            cache_data(
+                    train_data=train_data,
+                    val_data=val_data,
+                    streaming=self.streaming,
+                    max_len=self.max_len,
+                    window_len_bwd=self.window_len_bwd,
+                    window_len_fwd=self.window_len_fwd,
+                    segtype=self.segtype,
+                    data_normalization=self.data_normalization,
+                    reduction_axis=self.reduction_axis,
+                    predict_deltas=self.predict_deltas,
+                    input_padding=self.input_padding,
+                    target_padding=self.target_padding,
+                    reverse_targets=self.reverse_targets,
+                    resample_inputs=self.resample_inputs,
+                    resample_targets_bwd=self.resample_targets_bwd,
+                    resample_targets_fwd=self.resample_targets_fwd,
+                    oracle_boundaries=self.oracle_boundaries,
+                    task=self.task,
+                    data_type=self.data_type
+            )
 
             n_train = train_data.get_n('train')
 
@@ -3749,50 +3727,6 @@ class AcousticEncoderDecoder(object):
                         sys.stderr.write('-' * 50 + '\n')
                         sys.stderr.write('Iteration %d\n' % int(self.global_step.eval(session=self.sess) + 1))
                         sys.stderr.write('\n')
-
-                    # ix_rnd = np.random.randint(0, len(X))
-                    #
-                    # seg_feats_src, seg_feats_mask, seg_feats = self.sess.run([self.correspondence_seg_feats_src[0], self.correspondence_seg_feats_mask[0], self.correspondence_seg_feats[0]],
-                    #                                          feed_dict={self.X: X[ix_rnd:ix_rnd+64], self.X_mask: X_mask[ix_rnd:ix_rnd+64]})
-                    #
-                    # print('input padding: %s' %self.input_padding)
-                    # print('seg_feats_src')
-                    # print(seg_feats_src)
-                    # print('seg_feats')
-                    # print(seg_feats)
-                    # print('seg_feats_mask.sum(axis=1)')
-                    # print(seg_feats_mask.sum(axis=1))
-                    #
-                    # seg_feats_rsmp = []
-                    # for j, s in enumerate(seg_feats_src):
-                    #     s_rsmp = scipy.signal.resample(s[seg_feats_mask[j].astype('bool')], self.resample_correspondence, axis=0)
-                    #     seg_feats_rsmp.append(s_rsmp)
-                    # seg_feats_rsmp = np.stack(seg_feats_rsmp)
-                    #
-                    # plot_acoustic_features(
-                    #     seg_feats_src[:50],
-                    #     seg_feats_rsmp[:50],
-                    #     seg_feats[:50],
-                    #     segmentation_probs=seg_feats_mask[..., None],
-                    #     segmentations=seg_feats_mask[..., None],
-                    #     prefix='resamp_test'
-                    # )
-                    #
-                    # exit()
-
-
-
-                    # if self.n_correspondence and self.global_step.eval(session=self.sess) + 1 >= self.correspondence_start_step:
-                    #     if verbose:
-                    #         sys.stderr.write('Extracting and caching correspondence autoencoder targets...\n')
-                    #     segment_embeddings, segment_spans = self._collect_previous_segments(
-                    #         self.n_correspondence,
-                    #         train_data,
-                    #         self.segtype,
-                    #         X=X,
-                    #         X_mask=X_mask,
-                    #         training=True
-                    #     )
 
                     if verbose:
                         if self.streaming:
@@ -4335,17 +4269,28 @@ class AcousticEncoderDecoder(object):
                         scale = scale[:, start_ix:]
 
                     X_plot = X_plot * scale + shift
+                    if self.residual_targets:
+                        X_plot = X_plot[:, 1:] - X_plot[:, :-1]
+
                     if not self.predict_deltas:
                         shift = shift[..., :self.n_coef]
                         scale = scale[..., :self.n_coef]
                     if y_bwd_plot is not None:
                         y_bwd_plot = y_bwd_plot * scale + shift
+                        if self.residual_targets:
+                            y_bwd_plot = y_bwd_plot[:, 1:] - y_bwd_plot[:, :-1]
                     if reconstructions is not None:
                         reconstructions = reconstructions * scale + shift
+                        if self.residual_targets:
+                            reconstructions = reconstructions[:, 1:] - reconstructions[:, :-1]
                     if y_fwd_plot is not None:
                         y_fwd_plot = y_fwd_plot * scale + shift
+                        if self.residual_targets:
+                            y_fwd_plot = y_fwd_plot[:, 1:] - y_fwd_plot[:, :-1]
                     if extrapolations is not None:
                         extrapolations = extrapolations * scale + shift
+                        if self.residual_targets:
+                            extrapolations = extrapolations[:, 1:] - extrapolations[:, :-1]
 
                 # print(extrapolations)
                 # print(extrapolations.min())
@@ -4371,7 +4316,7 @@ class AcousticEncoderDecoder(object):
                     directory=self.outdir
                 )
 
-                if invert_spectrograms and self.spectrogram_inverter is not None:
+                if invert_spectrograms and self.spectrogram_inverter is not None and not self.residual_targets:
                     fps = [1000 / data.offset] * 5
                     if self.resample_inputs is not None and self.max_len is not None:
                         fps[0] = fps[0] * self.resample_inputs / self.max_len
@@ -4677,8 +4622,8 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                         logits=logits
                     )
                 else:
-                    if l == 0 and self.revnet_n_layers and self.data_type.lower() == 'acoustic':
-                        logits = self.revnet.backward(logits, weights=self.speaker_embeddings)
+                    if l == 0 and self.speaker_revnet_n_layers and self.data_type.lower() == 'acoustic':
+                        logits = self.speaker_revnet.backward(logits, weights=self.speaker_embeddings)
                     loss = (targets - logits) ** 2
 
                 if loss.shape[-1] > 1:
@@ -4864,8 +4809,8 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                 if not self.backprop_into_targets:
                                     correspondence_targets = tf.stop_gradient(correspondence_targets)
                                 correspondence_logits = self.averaged_input_logits[l]
-                                if l == 0 and self.revnet_n_layers:
-                                    correspondence_logits = self.revnet.backward(correspondence_logits, weights=self.speaker_embeddings)
+                                if l == 0 and self.speaker_revnet_n_layers:
+                                    correspondence_logits = self.speaker_revnet.backward(correspondence_logits, weights=self.speaker_embeddings)
 
                                 cae_loss = (correspondence_targets - correspondence_logits) ** 2
 
@@ -4882,9 +4827,9 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                         LM_LOSS_TYPE = 'micha'
 
                         self.encoder_lm_losses = []
-                        for l in range(len(self.encoder_lm_logits)-1, -1, -1):
+                        for l in range(len(self.encoder_lm_logits) - 1, -1, -1):
                             if LM_LOSS_TYPE == 'decoder_output':
-                                lm_logits = self.encoder_lm_logits[l][:,:-1]
+                                lm_logits = self.encoder_lm_logits[l][:, :-1]
                                 if l == 0:
                                     lm_targets = self.inputs[:,1:]
                                 else:
@@ -4902,8 +4847,8 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                         logits=lm_logits
                                     )[..., None]
                                 elif self.encoder_state_discretizer is None or l == 0:
-                                    if l == 0 and self.revnet_n_layers:
-                                        lm_logits = self.revnet.backward(lm_logits, weights=self.speaker_embeddings)
+                                    if l == 0 and self.speaker_revnet_n_layers:
+                                        lm_logits = self.speaker_revnet.backward(lm_logits, weights=self.speaker_embeddings)
                                     lm_losses = (lm_targets - lm_logits) ** 2
                                 else:
                                     lm_losses = tf.nn.sigmoid_cross_entropy_with_logits(
@@ -4925,42 +4870,32 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                             elif LM_LOSS_TYPE == 'micha':
                                 AMP = 1
 
+                                lm_preds = self.encoder_lm_logits[l][:, :-1]
+
                                 if l == 0:
                                     lm_targets = self.inputs * AMP
                                 else:
-                                    # lm_targets = tf.stop_gradient(self.encoder_hidden_states[l - 1])
-                                    lm_targets = self.encoder_hidden_states[l - 1]
+                                    if self.backprop_into_targets:
+                                        lm_targets = self.encoder_hidden_states[l - 1]
+                                    else:
+                                        lm_targets = tf.stop_gradient(self.encoder_hidden_states[l - 1])
                                     if not self.encoder_state_discretizer:
                                         lm_targets *= AMP
+
+                                if self.residual_targets:
+                                    lm_targets = lm_targets[:,1:] - lm_targets[:,:-1]
+                                    # lm_targets = lm_targets[:,1:] - lm_preds
+                                else:
+                                    lm_targets = lm_targets[:,1:]
 
                                 if l == 0:
                                     k = int(self.inputs.shape[-1])
                                 else:
                                     k = int(self.encoder_hidden_states[l-1].shape[-1]) - self.encoder_use_timing_unit
-
-                                lm_preds = self.encoder_lm_logits[l]
-
-                                # if False and l == 0:
-                                #     activation = None
-                                # else:
-                                #     activation = self.decoder_inner_activation
-                                # if True or l == self.n_layers_encoder - 1:
-                                #     decoder_in = self.encoder_hidden_states[l]
-                                # else:
-                                #     decoder_in = lm_preds
-                                #
-                                # lm_preds = tf.keras.layers.SimpleRNN(
-                                #     k,
-                                #     activation=activation,
-                                #     return_sequences=True
-                                # )(decoder_in)
-
-                                # lm_targets = tf.Print(lm_targets, ['targets_l%d' % l, lm_targets, tf.reduce_min(lm_targets), tf.reduce_max(lm_targets)], summarize=32)
-                                # lm_preds = tf.Print(lm_preds, ['preds_l%d' % l, lm_preds, tf.reduce_min(lm_preds), tf.reduce_max(lm_preds)], summarize=32)
-
+                                
                                 lm_losses = self._get_loss(
-                                    lm_targets[...,1:,:],
-                                    lm_preds[...,:-1,:],
+                                    lm_targets,
+                                    lm_preds,
                                     use_dtw=False,
                                     distance_func=self._lm_distance_func(l),
                                     mask=self.X_mask[...,1:],

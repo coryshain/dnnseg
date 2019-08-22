@@ -168,29 +168,38 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of adversarial loss for residualizing speaker information out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no adversarial training."
     ),
     Kwarg(
-        'revnet_n_layers',
+        'residual_targets',
+        False,
+        bool,
+        "Use the difference from one timestep to the next as the prediction target, rather than the raw data."
+    ),
+    Kwarg(
+        'speaker_revnet_n_layers',
         None,
         [int, None],
-        "Number of layers in RevNet projection of spectral features. If ``None``, no RevNet projection."
+        "Number of layers in RevNet projection of spectral features. If ``None``, no RevNet projection.",
+        aliases=['revnet_n_layers']
     ),
     Kwarg(
-        'revnet_n_layers_inner',
+        'speaker_revnet_n_layers_inner',
         1,
         int,
-        "Number of internal layers in each block of RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``."
+        "Number of internal layers in each block of RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['revnet_n_layers_inner']
     ),
     Kwarg(
-        'revnet_activation',
+        'speaker_revnet_activation',
         'tanh',
         str,
-        "Activation function to use in RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``."
+        "Activation function to use in RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['revnet_activation']
     ),
     Kwarg(
-        'revnet_batch_normalization_decay',
+        'speaker_revnet_batch_normalization_decay',
         None,
         [float, None],
         "Decay rate to use for batch normalization in RevNet projection of spectral features. If ``None``, no batch normalization. Ignored if **revnet_n_layers** is ``None``.",
-        aliases=['batch_normalization_decay']
+        aliases=['batch_normalization_decay', 'revnet_batch_normalization_decay']
     ),
     Kwarg(
         'utt_len_emb_dim',
@@ -704,6 +713,34 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Batch normalize latent segment encodings."
+    ),
+    Kwarg(
+        'encoder_revnet_n_layers',
+        None,
+        [int, None],
+        "Number of layers in RevNet projection of layerwise encoder inputs. If ``None``, no RevNet projection.",
+        aliases=['revnet_n_layers']
+    ),
+    Kwarg(
+        'encoder_revnet_n_layers_inner',
+        1,
+        int,
+        "Number of internal layers in each block of RevNet projection of layerwise encoder inputs. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['revnet_n_layers_inner']
+    ),
+    Kwarg(
+        'encoder_revnet_activation',
+        'elu',
+        str,
+        "Activation function to use in RevNet projection of layerwise encoder inputs. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['revnet_activation']
+    ),
+    Kwarg(
+        'encoder_revnet_batch_normalization_decay',
+        None,
+        [float, None],
+        "Decay rate to use for batch normalization in RevNet projection of layerwise encoder inputs. If ``None``, no batch normalization. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['batch_normalization_decay', 'revnet_batch_normalization_decay']
     ),
 
     # Decoder hyperparams

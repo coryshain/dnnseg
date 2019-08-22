@@ -2,17 +2,15 @@ import sys
 import os
 import shutil
 import time
-import numpy as np
 import pickle
-import gzip
+import numpy as np
 import argparse
 
 sys.setrecursionlimit(2000)
 
 from dnnseg.config import Config
-from dnnseg.data import Dataset, score_segmentation, score_text_segmentation
+from dnnseg.data import Dataset, cache_data
 from dnnseg.kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
-from dnnseg.plot import plot_acoustic_features
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser('''
@@ -57,49 +55,6 @@ if __name__ == '__main__':
         assert p['random_oracle_segmentation_rate'], 'random_oracle_segmentation_rate must be provided when oracle_boundaries=="rnd".'
         train_data.initialize_random_segmentation(p['random_oracle_segmentation_rate'])
 
-    # train_data_feed = train_data.get_streaming_data_feed(500,50,50,minibatch_size=100,filter='vad',randomize=True)
-    # inputs, left_targets, right_targets, file_ix, time_ix, feats = next(train_data_feed)
-    # timestamps = np.zeros(inputs.shape[:-1])
-    # plot_acoustic_features(
-    #     inputs,
-    #     left_targets,
-    #     right_targets,
-    #     segmentation_probs=timestamps[..., None],
-    #     segmentations=timestamps[..., None],
-    #     hard_segmentations=True,
-    #     prefix='resamp_test'
-    # )
-    #
-    # # for i in range(10):
-    # #     inputs, left_targets, right_targets = next(train_data_feed)
-    # #     print(inputs)
-    # #     print(left_targets)
-    # #     print(right_targets)
-    # #     print(inputs.shape)
-    # #     print(left_targets.shape)
-    # #     print(right_targets.shape)
-    # #     input()
-    # exit()
-
-    # from dnnseg.data import compute_unsupervised_classifications
-    #
-    # phn_segs = train_data.data['s2801a'].segments('phn')
-    # wrd_segs = train_data.data['s2801a'].segments('wrd')
-    #
-    # phn_realigned = compute_unsupervised_classifications(phn_segs, phn_segs)
-    #
-    # print(phn_realigned)
-    #
-    # phn_realigned = compute_unsupervised_classifications(phn_segs, wrd_segs)
-    #
-    # print(phn_realigned)
-    #
-    # phn_realigned = compute_unsupervised_classifications(wrd_segs, phn_segs)
-    #
-    # print(phn_realigned)
-    #
-    # exit()
-
     sys.stderr.write('=' * 50 + '\n')
     sys.stderr.write('TRAINING DATA SUMMARY\n\n')
     sys.stderr.write(train_data.summary(indent=2))
@@ -142,6 +97,46 @@ if __name__ == '__main__':
         if val_data is not None:
             val_data.initialize_random_segmentation(7.4153)
 
+    sys.stderr.write('Caching data...\n')
+    sys.stderr.flush()
+
+    if p['pad_seqs']:
+        if p['mask_padding'] and ('hmlstm' in p['encoder_type'].lower() or 'rnn' in p['encoder_type'].lower()):
+            input_padding = 'post'
+        else:
+            input_padding = 'pre'
+        target_padding = 'post'
+    else:
+        input_padding = None
+        target_padding = None
+
+    cache_data(
+        train_data=train_data,
+        val_data=val_data,
+        streaming=p['streaming'],
+        max_len=p['max_len'],
+        window_len_bwd=p['window_len_bwd'],
+        window_len_fwd=p['window_len_fwd'],
+        segtype=p['segtype'],
+        data_normalization=p['data_normalization'],
+        reduction_axis=p['reduction_axis'],
+        predict_deltas=p['predict_deltas'],
+        input_padding=input_padding,
+        target_padding=target_padding,
+        reverse_targets=p['reverse_targets'],
+        resample_inputs=p['resample_inputs'],
+        resample_targets_bwd=p['resample_targets_bwd'],
+        resample_targets_fwd=p['resample_targets_fwd'],
+        oracle_boundaries=p['oracle_boundaries'],
+        task=p['task'],
+        data_type=p['data_type']
+    )
+
+    # data_feed = train_data.get_data_feed('val_files', minibatch_size=1, randomize=False)
+    # for batch in data_feed:
+    #     print(np.stack([batch['oracle_boundaries'][0,:,0],batch['oracle_labels'][0,:,0]], axis=1)[:100])
+    #     input()
+
     sys.stderr.write('Initializing encoder-decoder...\n\n')
 
     if args.restart and os.path.exists(p.outdir + '/tensorboard'):
@@ -178,7 +173,6 @@ if __name__ == '__main__':
             train_data,
             **kwargs
         )
-
 
     dnnseg_model.build(len(train_data.segments(segment_type=p['segtype'])), outdir=p.outdir, restore=not args.restart)
 

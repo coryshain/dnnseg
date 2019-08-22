@@ -541,19 +541,21 @@ def plot_projections(
 ):
     df = df.copy()
 
-    df['CV'] = df.label.map(lambda x: 'V' if (not x[0] in ['el', 'en'] and x[0] in ['a', 'e', 'i', 'o', 'u']) else 'C')
+    df['CV'] = df.gold_label.map(lambda x: 'V' if (not x[0] in ['el', 'en'] and x[0] in ['a', 'e', 'i', 'o', 'u']) else 'C')
 
     if label_map is not None:
-        df['IPA'] = df.label.map(label_map)
+        df['IPA'] = df.gold_label.map(label_map)
 
     if feature_table is not None:
-        df = df.merge(feature_table, on=['label'])
+        if not 'gold_label' in feature_table.columns:
+            feature_table['gold_label'] = feature_table.label
+        df = df.merge(feature_table, on=['gold_label'])
 
     colors = ['CV']
     if 'IPA' in df.columns:
         colors.append('IPA')
     else:
-        colors.append('label')
+        colors.append('gold_label')
 
     if feature_names is not None:
         for c in feature_names:

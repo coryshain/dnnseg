@@ -18,7 +18,7 @@ if __name__ == '__main__':
     ''')
     argparser.add_argument('config', help='Path to configuration file.')
     argparser.add_argument('-f', '--feature_names', default=['english'], nargs='+', help='Names of phonological features to use to color plots.')
-    argparser.add_argument('-m', '--method', default='mds', help='Embedding method to use for projections. One of ["lle", "mds", "pca", "spectral_embedding", "tsne"].')
+    argparser.add_argument('-m', '--method', default='tsne', help='Embedding method to use for projections. One of ["lle", "mds", "pca", "spectral_embedding", "tsne"].')
     args = argparser.parse_args()
 
     p = Config(args.config)

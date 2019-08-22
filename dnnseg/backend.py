@@ -609,6 +609,7 @@ HMLSTM_RETURN_SIGNATURE = [
     'z_prob',
     'z',
     'lm',
+    'lm_revnet',
     'cell_proposal',
     'u',
     'v',
@@ -621,6 +622,7 @@ def hmlstm_state_size(
         layers,
         units_below=None,
         use_timing_unit=False,
+        revnet=False,
         return_c=True,
         return_z_prob=True,
         return_lm=True,
@@ -663,6 +665,10 @@ def hmlstm_state_size(
                     value = 1
             elif name == 'lm':
                 if return_lm:
+                    include = True
+                    value = units_below[l]
+            elif name == 'lm_revnet':
+                if return_lm and revnet:
                     include = True
                     value = units_below[l]
             elif name == 'cell_proposal':
@@ -748,6 +754,10 @@ class HMLSTMCell(LayerRNNCell):
             implementation=1,
             batch_normalization_decay=None,
             decoder_embedding=None,
+            revnet_n_layers=None,
+            revnet_n_layers_inner=1,
+            revnet_activation='elu',
+            revnet_batch_normalization_decay=None,
             bptt=True,
             reuse=None,
             name=None,
@@ -873,15 +883,20 @@ class HMLSTMCell(LayerRNNCell):
                         self._state_discretizer = None
                     self._discretize_state_at_boundary = discretize_state_at_boundary
                     self._nested_boundaries = nested_boundaries
-                    self.state_noise_sd = state_noise_sd
+                    self._state_noise_sd = state_noise_sd
                     self._sample_at_train = sample_at_train
                     self._sample_at_eval = sample_at_eval
-                    self.global_step = global_step
+                    self._global_step = global_step
                     self._implementation = implementation
 
                     self._batch_normalization_decay = batch_normalization_decay
 
                     self._decoder_embedding = decoder_embedding
+
+                    self._revnet_n_layers = revnet_n_layers
+                    self._revnet_n_layers_inner = revnet_n_layers_inner
+                    self._revnet_activation = revnet_activation
+                    self._revnet_batch_normalization_decay = revnet_batch_normalization_decay
 
                     self._bptt = bptt
 
@@ -908,6 +923,7 @@ class HMLSTMCell(LayerRNNCell):
             self._num_layers,
             units_below=units_below,
             use_timing_unit=self._use_timing_unit,
+            revnet=self._revnet_n_layers,
             return_lm = self._lm,
             return_c=True,
             return_z_prob=True,
@@ -961,6 +977,8 @@ class HMLSTMCell(LayerRNNCell):
                         self._lm_output_gain = []
                     if self._return_cae:
                         self._kernel_w = []
+                    if self._revnet_n_layers:
+                        self._revnet = []
 
                     if self._use_bias:
                         self._bias = []
@@ -1478,24 +1496,38 @@ class HMLSTMCell(LayerRNNCell):
                                     self._regularize(bias_boundary, self._bias_regularizer)
                                     self._bias_boundary.append(bias_boundary)
 
+                        if self._revnet_n_layers:
+                            revnet = RevNet(
+                                training=self._training,
+                                layers=self._revnet_n_layers,
+                                layers_inner=self._revnet_n_layers_inner,
+                                kernel_initializer='identity_initializer',
+                                activation=self._revnet_activation,
+                                batch_normalization_decay=self._revnet_batch_normalization_decay,
+                                session=self._session,
+                                reuse=tf.AUTO_REUSE,
+                                name='encoder_revnet_L%d' % l
+                            )
+                            self._revnet.append(revnet)
+
                     if not self._oracle_boundary:
-                        if self._boundary_slope_annealing_rate and self.global_step is not None:
+                        if self._boundary_slope_annealing_rate and self._global_step is not None:
                             rate = self._boundary_slope_annealing_rate
                             if self._slope_annealing_max is None:
-                                self.boundary_slope_coef = 1 + rate * tf.cast(self.global_step, dtype=tf.float32)
+                                self.boundary_slope_coef = 1 + rate * tf.cast(self._global_step, dtype=tf.float32)
                             else:
-                                self.boundary_slope_coef = tf.minimum(self._slope_annealing_max, 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
+                                self.boundary_slope_coef = tf.minimum(self._slope_annealing_max, 1 + rate * tf.cast(self._global_step, dtype=tf.float32))
                         else:
                             self.boundary_slope_coef = None
                     else:
                         self.boundary_slope_coef = None
 
-                    if self._state_slope_annealing_rate and self.global_step is not None:
+                    if self._state_slope_annealing_rate and self._global_step is not None:
                         rate = self._state_slope_annealing_rate
                         if self._slope_annealing_max is None:
-                            self.state_slope_coef = 1 + rate * tf.cast(self.global_step, dtype=tf.float32)
+                            self.state_slope_coef = 1 + rate * tf.cast(self._global_step, dtype=tf.float32)
                         else:
-                            self.state_slope_coef = tf.minimum(self._slope_annealing_max, 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
+                            self.state_slope_coef = tf.minimum(self._slope_annealing_max, 1 + rate * tf.cast(self._global_step, dtype=tf.float32))
                     else:
                         self.state_slope_coef = None
 
@@ -1527,6 +1559,9 @@ class HMLSTMCell(LayerRNNCell):
                             # if z_below is not None:
                             #     print('Stopping gradient z_below')
                             #     z_below = tf.stop_gradient(z_below)
+                            
+                        if self._revnet_n_layers:
+                            h_below = self._revnet[l].forward(h_below)
 
                         timing = int(self._use_timing_unit and l < self._num_layers - 1)
 
@@ -1601,7 +1636,7 @@ class HMLSTMCell(LayerRNNCell):
                             h_below = tf.concat([z_behind, h_below], axis=1)
 
                         # h_below = self._temporal_dropout[l](h_below)
-                        if l > 0 and self._state_discretizer and self._discretize_state_at_boundary and self.global_step is not None:
+                        if l > 0 and self._state_discretizer and self._discretize_state_at_boundary and self._global_step is not None:
                             h_below = self._state_discretizer(h_below)
                         h_below = self._bottomup_dropout(h_below)
 
@@ -1673,9 +1708,9 @@ class HMLSTMCell(LayerRNNCell):
                         o = s[:, units * 2:units * 3]
                         if self._layer_normalization:
                             o = self.norm(o, 'o_ln_%d' % l)
-                        if self.state_noise_sd and self._state_discretizer:
+                        if self._state_noise_sd and self._state_discretizer:
                             # h_in = tf.cond(self._training, lambda: c + tf.random_normal(shape=tf.shape(c), stddev=self.state_noise_sd), lambda: c)
-                            output_gate_noise = tf.random_normal(shape=tf.shape(o), stddev=self.state_noise_sd)
+                            output_gate_noise = tf.random_normal(shape=tf.shape(o), stddev=self._state_noise_sd)
                             o += output_gate_noise
                         o = self._recurrent_activation(o)
 
@@ -1703,13 +1738,13 @@ class HMLSTMCell(LayerRNNCell):
                         if self._state_discretizer is not None:
                             activation = tf.sigmoid
                             # activation = tf.keras.backend.hard_sigmoid
-                        if self.state_noise_sd:
+                        if self._state_noise_sd:
                             # h_in = tf.cond(self._training, lambda: c + tf.random_normal(shape=tf.shape(c), stddev=self.state_noise_sd), lambda: c)
-                            state_noise = tf.random_normal(shape=tf.shape(c), stddev=self.state_noise_sd)
+                            state_noise = tf.random_normal(shape=tf.shape(c), stddev=self._state_noise_sd)
                             h_in = c + state_noise
                         else:
                             h_in = c
-                        if self._state_slope_annealing_rate and self.global_step is not None:
+                        if self._state_slope_annealing_rate and self._global_step is not None:
                             h = activation(h_in * self.state_slope_coef)
                         else:
                             h = activation(h_in)
@@ -1720,7 +1755,7 @@ class HMLSTMCell(LayerRNNCell):
                         # h = tf.Print(h, [h])
 
                         # if l < self._num_layers - 1 and self._state_discretizer and not self._discretize_state_at_boundary and self.global_step is not None:
-                        if self._state_discretizer and not self._discretize_state_at_boundary and self.global_step is not None:
+                        if self._state_discretizer and not self._discretize_state_at_boundary and self._global_step is not None:
                             h = self._state_discretizer(h)
 
                         # Mix gated output with the previous hidden state proportionally to the copy probability
@@ -1734,21 +1769,21 @@ class HMLSTMCell(LayerRNNCell):
                             h = tf.concat([h, timing_unit], axis=1)
 
                         if self._lm:
+                            lm_prev = state[l].lm
                             if l == 0 and self._decoder_embedding is not None:
                                 lm_bottomup_in = tf.concat([self._decoder_embedding, h], axis=-1)
-                                pred_prev = tf.concat([self._decoder_embedding, state[l].lm], axis=-1)
+                                lm_recurrent_in = tf.concat([self._decoder_embedding, lm_prev], axis=-1)
                             else:
-                                pred_prev = state[l].lm
                                 lm_bottomup_in = h
-                            pred_new = self._kernel_lm_recurrent[l](pred_prev) + self._kernel_lm_bottomup[l](lm_bottomup_in)
-                            pred_new = self._inner_activation(pred_new)
-                            pred_new *= self._lm_output_gain[l]
+                                lm_recurrent_in = lm_prev
+                            lm_new = self._kernel_lm_recurrent[l](lm_recurrent_in) + self._kernel_lm_bottomup[l](lm_bottomup_in)
+                            lm_new = self._inner_activation(lm_new)
+                            lm_new *= self._lm_output_gain[l]
                         else:
-                            pred_new = None
+                            lm_new = None
 
                         # Compute the current boundary probability
                         if l < self._num_layers - 1:
-                            print()
                             if self._oracle_boundary:
                                 inputs_last_dim = inputs.shape[-1] - self._num_layers + 1
                                 z_prob = inputs[:, inputs_last_dim + l:inputs_last_dim + l+1]
@@ -1767,7 +1802,7 @@ class HMLSTMCell(LayerRNNCell):
                                     if self._use_bias:
                                         z_logit += self._bias_boundary[l]
 
-                                if self._boundary_slope_annealing_rate and self.global_step is not None:
+                                if self._boundary_slope_annealing_rate and self._global_step is not None:
                                     z_logit *= self.boundary_slope_coef
 
                                 if self.boundary_noise_sd:
@@ -1802,6 +1837,11 @@ class HMLSTMCell(LayerRNNCell):
                         else:
                             v = u = w = None
 
+                        if self._revnet_n_layers:
+                            lm_revnet = self._revnet[l].backward(lm_new)
+                        else:
+                            lm_revnet = None
+
                         new_state_names = []
                         new_state_cur = []
                         name_map = {
@@ -1809,7 +1849,8 @@ class HMLSTMCell(LayerRNNCell):
                             'h': h,
                             'z': z,
                             'z_prob': z_prob,
-                            'lm': pred_new,
+                            'lm': lm_new,
+                            'lm_revnet': lm_revnet,
                             'cell_proposal': c_flush,
                             'u': u,
                             'v': v,
@@ -1822,7 +1863,9 @@ class HMLSTMCell(LayerRNNCell):
                                 include = True
                             elif name in ['z', 'z_prob'] and l < self._num_layers - 1:
                                 include = True
-                            elif name == 'lm' and self._lm:
+                            elif self._lm and name == 'lm':
+                                include = True
+                            elif self._lm and self._revnet_n_layers and name == 'lm_revnet':
                                 include = True
                             elif self._return_cae and l < self._num_layers - 1 and name in ['u', 'v', 'w']:
                                 include = True
@@ -1899,6 +1942,10 @@ class HMLSTMSegmenter(object):
             global_step=None,
             implementation=1,
             decoder_embedding=None,
+            revnet_n_layers=None,
+            revnet_n_layers_inner=1,
+            revnet_activation='elu',
+            revnet_batch_normalization_decay=None,
             bptt=True,
             reuse=None,
             name=None,
@@ -1976,6 +2023,10 @@ class HMLSTMSegmenter(object):
                     self.global_step = global_step
                     self.implementation = implementation
                     self.decoder_embedding = decoder_embedding
+                    self.revnet_n_layers = revnet_n_layers
+                    self.revnet_n_layers_inner = revnet_n_layers_inner
+                    self.revnet_activation = revnet_activation
+                    self.revnet_batch_normalization_decay = revnet_batch_normalization_decay
                     self.bptt = bptt
 
                     self.reuse = reuse
@@ -2050,6 +2101,10 @@ class HMLSTMSegmenter(object):
                         global_step=self.global_step,
                         implementation=self.implementation,
                         decoder_embedding=self.decoder_embedding,
+                        revnet_n_layers = self.revnet_n_layers,
+                        revnet_n_layers_inner = self.revnet_n_layers_inner,
+                        revnet_activation = self.revnet_activation,
+                        revnet_batch_normalization_decay = self.revnet_batch_normalization_decay,
                         bptt=self.bptt,
                         reuse=self.reuse,
                         name=self.name,
@@ -2154,6 +2209,13 @@ class HMLSTMOutput(object):
                 lm_logits = [l.lm_logits(mask=mask) for l in self.l]
 
                 return lm_logits
+
+    def lm_revnet_logits(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                lm_revnet_logits = [l.lm_revnet_logits(mask=mask) for l in self.l]
+
+                return lm_revnet_logits
 
     def cell_proposals(self, mask=None):
         with self.session.as_default():
@@ -2272,6 +2334,16 @@ class HMLSTMOutputLevel(object):
                         logits *= mask[..., None]
 
                 return logits
+
+    def lm_revnet_logits(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                lm_revnet_logits = self.lm_revnet
+                if lm_revnet_logits is not None:
+                    if mask is not None:
+                        lm_revnet_logits *= mask[..., None]
+
+                return lm_revnet_logits
 
     def cell_proposals(self, mask=None):
         with self.session.as_default():
@@ -3337,40 +3409,39 @@ class RevNetBlock(object):
         if not self.built:
             with self.session.as_default():
                 with self.session.graph.as_default():
-                    assert int(inputs.shape[-1]) % 2 == 0, 'Final dimension of inputs to RevNetBlock must have even number of units, saw %d.' % int(inputs.shape[-1])
-                    k = int(int(inputs.shape[-1]) / 2)
-                    if weights is None:
-                        p = 1
-                    else:
-                        p = weights.shape[-1]
-
-                    for l in range(self.layers_inner):
-                        if self.name:
-                            name_cur = self.name + '_W_%d' % (l + 1)
+                    with tf.variable_scope(self.name, reuse=self.reuse):
+                        assert int(inputs.shape[-1]) % 2 == 0, 'Final dimension of inputs to RevNetBlock must have even number of units, saw %d.' % int(inputs.shape[-1])
+                        k = int(int(inputs.shape[-1]) / 2)
+                        if weights is None:
+                            p = 1
+                            shape = [k,k]
                         else:
-                            name_cur = 'revnet_W_%d' % (l + 1)
-                        W = tf.get_variable(
-                            name_cur,
-                            shape=[p, k, k],
-                            initializer=self.kernel_initializer,
-                        )
-                        self.regularize(W, self.kernel_regularizer)
-                        self.W.append(W)
-                        
-                        if self.use_bias:
-                            if self.name:
-                                name_cur = self.name + '_b_%d' % (l + 1)
-                            else:
-                                name_cur = 'revnet_b_%d' % (l + 1)
-                            b = tf.get_variable(
+                            p = weights.shape[-1]
+                            shape = [p, k, k]
+
+                        for l in range(self.layers_inner):
+                            name_cur = 'W_d%d' % l
+                            W = tf.get_variable(
                                 name_cur,
-                                shape=[p, k],
+                                shape=shape,
                                 initializer=self.kernel_initializer,
                             )
-                            self.regularize(b, self.kernel_regularizer)
-                            self.b.append(b)
+                            if weights is None:
+                                W = W[None, ...]
+                            self.regularize(W, self.kernel_regularizer)
+                            self.W.append(W)
 
-                    self.built = True
+                            if self.use_bias:
+                                name_cur = 'b_d%d' % l
+                                b = tf.get_variable(
+                                    name_cur,
+                                    shape=[p, k],
+                                    initializer=self.kernel_initializer,
+                                )
+                                self.regularize(b, self.kernel_regularizer)
+                                self.b.append(b)
+
+                        self.built = True
 
     def _apply_inner(self, X, l, weights=None):
         with self.session.as_default():
@@ -3383,6 +3454,7 @@ class RevNetBlock(object):
                     if self.use_bias:
                         out += b[0]
                 else:
+                    W = tf.tensordot(weights, W, 1)
                     W = tf.tensordot(weights, W, 1)
                     retile = False
                     while len(W.shape) <= len(X.shape):
@@ -3481,7 +3553,7 @@ class RevNet(object):
             layers=1,
             layers_inner=1,
             use_bias=True,
-            kernel_initializer='glorot_normal_initializer',
+            kernel_initializer='he_normal_initializer',
             bias_initializer='zeros_initializer',
             kernel_regularizer=None,
             bias_regularizer=None,
@@ -3523,7 +3595,7 @@ class RevNet(object):
                     activation=self.activation,
                     batch_normalization_decay=self.batch_normalization_decay,
                     reuse=self.reuse,
-                    name=self.name + '_%d' % l
+                    name=self.name + '_l%d' % l
                 )
             )
         self.built = False
