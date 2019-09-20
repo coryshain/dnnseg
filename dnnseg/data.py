@@ -106,7 +106,7 @@ def extract_segment_timestamps(
         basis = np.linspace(0, max_len, n_points)
         response = segs
         if len(seg_ix) > 0:
-            timestamps = seg_ix * seconds_per_step + seconds_per_step / 2
+            timestamps = (seg_ix + 1) * seconds_per_step
         else:
             timestamps = np.array([max_len])
 
@@ -679,15 +679,23 @@ def extract_matching_segment_embeddings(true, pred, tol=0.02):
             j += not jump_pred
             e_pred_prev = e_pred
 
-    embeddings = np.stack(embeddings, axis=0)
 
-    out = true[match_true].reset_index(drop=True)
-    for c in range(len(embedding_columns)):
-        out[embedding_columns[c]] = embeddings[:,c]
-    out['predStart'] = pred_starts
-    out['predEnd'] = pred_ends
+    if len(embeddings) > 0:
+        embeddings = np.stack(embeddings, axis=0)
 
-    out['gold_label'] = out.label
+        out = true[match_true].reset_index(drop=True)
+        for c in range(len(embedding_columns)):
+            out[embedding_columns[c]] = embeddings[:,c]
+        out['predStart'] = pred_starts
+        out['predEnd'] = pred_ends
+
+        out['gold_label'] = out.label
+    else:
+        out = true[np.zeros(len(true))].reset_index(drop=True)
+        for c in range(len(embedding_columns)):
+            out[embedding_columns[c]] = np.zeros((0,))
+        out['predStart'] = np.zeros((0,))
+        out['predEnd'] = np.zeros((0,))
 
     return out
 
@@ -1718,14 +1726,15 @@ class Dataset(object):
         self,
         name,
         minibatch_size=None,
-        randomize=True
+        randomize=True,
+        n_samples=1
     ):
         if self.cache[name]['type'] == 'utterance':
-            return self.get_utterance_data_feed(name, minibatch_size, randomize=randomize)
+            return self.get_utterance_data_feed(name, minibatch_size, randomize=randomize, n_samples=n_samples)
         elif self.cache[name]['type'] == 'streaming':
-            return self.get_streaming_data_feed(name, minibatch_size, randomize=randomize)
+            return self.get_streaming_data_feed(name, minibatch_size, randomize=randomize, n_samples=n_samples)
         elif self.cache[name]['type'] == 'files':
-            return self.get_files_data_feed(name, randomize=randomize)
+            return self.get_files_data_feed(name, randomize=randomize, n_samples=n_samples)
         else:
             raise ValueError('Unrecognized data feed type: "%s".' % self.cache[name]['type'])
 
@@ -1733,7 +1742,8 @@ class Dataset(object):
             self,
             name,
             minibatch_size,
-            randomize=False
+            randomize=False,
+            n_samples=1
     ):
         n = self.cache[name]['n']
         i = 0
@@ -1754,6 +1764,9 @@ class Dataset(object):
 
         while i < n:
             indices = ix[i:i + minibatch_size]
+
+            if n_samples is not None and n_samples > 1:
+                indices = np.repeat(indices, n_samples, axis=0)
 
             out = {
                 'X': X[indices],
@@ -1776,6 +1789,7 @@ class Dataset(object):
             self,
             name,
             minibatch_size=1,
+            n_samples=1,
             randomize=True
     ):
         n = self.cache[name]['n']
@@ -1804,6 +1818,9 @@ class Dataset(object):
 
         while i < n:
             indices = ix[i:i+minibatch_size]
+
+            if n_samples is not None and n_samples > 1:
+                indices = np.repeat(indices, n_samples, axis=0)
 
             file_ix_cur = file_ix[indices]
             time_ix_cur = time_ix[indices]
@@ -1875,8 +1892,10 @@ class Dataset(object):
     def get_files_data_feed(
             self,
             name,
-            randomize=True
+            randomize=True,
+            n_samples=1
     ):
+        assert n_samples is None or n_samples <= 1, 'n_samples > 1 does not make sense for files data feeds and is not supported. Just reinitialize the data feed after iterating it.'
         n = self.cache[name]['n']
         feats = self.cache[name]['feats']
         fixed_boundaries = self.cache[name]['fixed_boundaries']
@@ -2207,7 +2226,7 @@ class Dataset(object):
                 [s[i:i+n_utt] for s in segmentations],
                 parent_segment_type=parent_segment_type,
                 states=[s[i:i+n_utt] for s in states],
-                true_labels=true_labels[i:i+n_utt],
+                true_labels=None if true_labels is None else true_labels[i:i+n_utt],
                 discretize=discretize,
                 mask=None if mask is None else mask[i:i + n_utt],
                 state_activation=state_activation,

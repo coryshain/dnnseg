@@ -50,7 +50,6 @@ class Config(object):
         self.model_settings['gpu_frac'] = gpu_frac
         self.model_settings['use_gpu_if_available'] = settings.getboolean('use_gpu_if_available', True)
 
-
     def __getitem__(self, item):
         return self.model_settings[item]
 

@@ -104,7 +104,7 @@ class Kwarg(object):
                             val = x(from_settings)
                             parsed = True
                             break
-                        except TypeError:
+                        except ValueError:
                             pass
 
                 assert parsed, 'Invalid value "%s" received for %s' %(from_settings, self.key)
@@ -159,13 +159,33 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'speaker_emb_dim',
         None,
         [int, None],
-        "Append a **speaker_emb_dim** dimensional embedding of the speaker ID to each acoustic frame and to the utterance embedding. If ``None`` or ``0``, no speaker embedding used."
+        "Train a **speaker_emb_dim** dimensional embedding of the speaker ID to each acoustic frame and to the utterance embedding. If ``None`` or ``0``, no speaker embedding used."
     ),
     Kwarg(
-        'adversarial_loss_scale',
+        'append_speaker_emb_to_inputs',
+        False,
+        bool,
+        "Concatenate speaker embedding to inputs to encoder. Ignored if **speaker_emb_dim** is ``None`` or ``0``."
+    ),
+    Kwarg(
+        'n_passthru_neurons',
+        None,
+        [int, None],
+        "Number of passthru neurons to apply at the first layer of the encoder. Passthru neurons are dimensions of the underlying hidden state that get passed directly to the decoder without discretization or other constraints, and are adversarially regressed out of the rest of the hidden state. If ``None`` or ``0``, no passthru used."
+    ),
+    Kwarg(
+        'speaker_adversarial_loss_scale',
         None,
         [float, None],
-        "Scale of adversarial loss for residualizing speaker information out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no adversarial training."
+        "Scale of adversarial loss for residualizing speaker information out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no speaker adversarial training.",
+        aliases=['adversarial_loss_scale']
+    ),
+    Kwarg(
+        'passthru_adversarial_loss_scale',
+        None,
+        [float, None],
+        "Scale of adversarial loss for residualizing contents of passthru neurons out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no passthru adversarial training.",
+        aliases=['adversarial_loss_scale']
     ),
     Kwarg(
         'residual_targets',
@@ -261,7 +281,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'data_normalization',
         None,
         [str, None],
-        "Normalization to apply to data as a preprocess. One of ``center`` (subtract the mean), ``standardize`` (Z-transform), ``range`` (divide by the range so values are in [0,1]), ``sum`` (divide by the sum so values sum to 1), and any norm type supported by ``np.linalg.norm`` (for example, using ``2`` yields a 2-norm, under which input vectors differ only by their angle). If ``None``, no data normalization."
+        "Normalization to apply to data as a preprocess. One of ``center`` (subtract the mean), ``standardize`` (Z-transform), ``range`` (divide by the range so values are in [0,1]), ``sum`` (divide by the sum so values sum to 1), ``scale##`` (where ## is a float by which to scale the response), and any norm type supported by ``np.linalg.norm`` (for example, using ``2`` yields a 2-norm, under which input vectors differ only by their angle). If ``None``, no data normalization."
     ),
     Kwarg(
         'reduction_axis',
@@ -517,7 +537,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'embed_inputs',
-        True,
+        False,
         bool,
         "Apply a dense layer to each input frame prior to processing with the encoder."
     ),
@@ -567,6 +587,13 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['boundary_activation']
     ),
     Kwarg(
+        'encoder_prefinal_activation',
+        'elu',
+        [str, None],
+        "Name of activation to use for prefinal layers in an HM-LSTM encoder with deep transitions. Ignored if encoder is not an HM-LSTM or if **hmlstm_kernel_depth** < 2.",
+        aliases=['boundary_activation']
+    ),
+    Kwarg(
         'encoder_boundary_implementation',
         2,
         int,
@@ -580,6 +607,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['conv_kernel_size']
     ),
     Kwarg(
+        'encoder_l2_normalize_states',
+        False,
+        bool,
+        "Whether to L2 normalize encoder states.",
+    ),
+    Kwarg(
+        'l2_normalize_targets',
+        False,
+        bool,
+        "Whether to L2 normalize decoder targets.",
+    ),
+    Kwarg(
         'encoder_bptt',
         True,
         bool,
@@ -587,9 +626,15 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'hmlstm_kernel_depth',
-        2,
+        1,
         int,
         "Depth of deep kernel in HM-LSTM transition model."
+    ),
+    Kwarg(
+        'hmlstm_prefinal_mode',
+        'max',
+        str,
+        "Mode for choosing the number of hidden units in pre-final layers of HM-LSTM's with deep transitions. One of ``['in', 'out', 'max']``, for number input dimensions, number of output dimensions, and max of input and output dimensions, respectively. Ignored unless **hmlstm_kernel_depth** > 1."
     ),
     Kwarg(
         'decoder_concatenate_hidden_states',
@@ -608,12 +653,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [float, None],
         "Rate of segmentation to use if **oracle_boundaries** is ``rnd``."
-    ),
-    Kwarg(
-        'encoder_boundary_power',
-        None,
-        [int, None],
-        "Power to raise boundary probabilities to for information flow in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM."
     ),
     Kwarg(
         'encoder_use_timing_unit',
@@ -653,6 +692,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Discretize state at boundary only. Otherwise, encoder state is fully discretized. Ignored if **encoder_state_discretizer** is ``None``."
     ),
     Kwarg(
+        'encoder_discretize_final',
+        False,
+        bool,
+        "Whether to discretize the final layer. Ignored if **encoder_state_discretizer** is ``None``."
+    ),
+    Kwarg(
         'encoder_state_noise_sd',
         None,
         [float, None],
@@ -666,10 +711,43 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['slope_annealing_rate']
     ),
     Kwarg(
+        'encoder_bottomup_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder bottom-up inputs at each layer.",
+        aliases=['encoder_input_noise_sd']
+    ),
+    Kwarg(
+        'encoder_recurrent_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder recurrent inputs at each layer.",
+        aliases = ['encoder_input_noise_sd']
+    ),
+    Kwarg(
+        'encoder_topdown_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder top-down inputs at each layer.",
+        aliases=['encoder_input_noise_sd']
+    ),
+    Kwarg(
         'slope_annealing_max',
         None,
         [float, None],
         "Maximum allowed value of the slope annealing coefficient. If ``None``, no maximum will be enforced."
+    ),
+    Kwarg(
+        'min_discretization_prob',
+        None,
+        [float, None],
+        "Minimum probability of discretizing. If ``None``, always discretize discretized variables."
+    ),
+    Kwarg(
+        'trainable_self_discretization',
+        True,
+        bool,
+        "Whether to allow gradients into the decision to discretize. Ignored if **min_discretization_prob** is ``None``."
     ),
     Kwarg(
         'sample_at_train',
@@ -688,12 +766,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Apply weight normalization to encoder. Ignored unless encoder is recurrent."
-    ),
-    Kwarg(
-        'encoder_weight_regularization',
-        None,
-        [str, float, None],
-        "If ``str``, underscore-delimited name and scale of encoder weight regularization. If ``float``, scale of encoder L2 weight regularization. If ``None``, no encoder weight regularization."
     ),
     Kwarg(
         'encoder_layer_normalization',
@@ -742,6 +814,24 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Decay rate to use for batch normalization in RevNet projection of layerwise encoder inputs. If ``None``, no batch normalization. Ignored if **revnet_n_layers** is ``None``.",
         aliases=['batch_normalization_decay', 'revnet_batch_normalization_decay']
     ),
+    Kwarg(
+        'encoder_weight_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder weight regularization. If ``float``, scale of encoder L2 weight regularization. If ``None``, no encoder weight regularization."
+    ),
+    Kwarg(
+        'encoder_state_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder state regularization. If ``float``, scale of encoder L2 state regularization. If ``None``, no encoder state regularization."
+    ),
+    Kwarg(
+        'encoder_cell_proposal_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder cell proposal regularization. If ``float``, scale of encoder L2 cell proposal regularization. If ``None``, no encoder cell proposal regularization."
+    ),
 
     # Decoder hyperparams
     Kwarg(
@@ -758,7 +848,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'decoder_temporal_encoding_type',
-        'periodic',
+        None,
         [None, str],
         "Technique for representing time to the decoder. One of [``periodic``, ``weights``], where ``periodic`` uses **decoder_temporal_encoding_units** sine waves with tunable frequency and phase, while ``weights`` uses trainable vectors of **decoder_temporal_encoding_units**, one for each timestep. If ``None``, no temporal encoding."
     ),
@@ -936,22 +1026,40 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of regularizer on boundary activations. If ``None``, no boundary regularization."
     ),
     Kwarg(
-        'cell_proposal_regularizer_scale',
-        None,
-        [float, None],
-        "Scale of regularizer on HMLSTM cell proposal. If ``None``, no cell proposal regularization."
-    ),
-    Kwarg(
         'lm_loss_scale',
         None,
-        [float, None],
-        "Scale of encoder language modeling objective in the loss function. If ``None`` or 0, no language modeling objective is used."
+        [float, str, None],
+        "Scale of layerwise encoder language modeling objective in the loss function. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
+    ),
+    Kwarg(
+        'lm_loss_type',
+        'masked_neighbors',
+        str,
+        "Type of LM loss. One of ``['neighbors', 'masked_neighbors', 'srn']``."
+    ),
+    Kwarg(
+        'lm_use_upper',
+        False,
+        bool,
+        "Whether to condition LM predictions on upper layers."
+    ),
+    Kwarg(
+        'scale_losses_by_boundaries',
+        False,
+        bool,
+        "Whether to scale LM and CAE losses by the corresponding boundary decisions.",
     ),
     Kwarg(
         'backprop_into_targets',
         True,
         bool,
         "Whether to backprop into prediction targets."
+    ),
+    Kwarg(
+        'xent_state_predictions',
+        False,
+        bool,
+        "Whether to convert encoder state values to probabilities and predict them using cross-entropy."
     ),
     Kwarg(
         'lm_order_fwd',
@@ -1063,6 +1171,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [str, None],
         "Path to CSV file mapping segment labels to phonological distinctive features to use in plots. Must contain a text column named 'symbol', along with columns for any features of interest. If ``None``, no featural analysis will be performed."
+    ),
+    Kwarg(
+        'plot_position_anchor',
+        'input',
+        str,
+        "Type of temporal slice to use for plotting, one of ``['input', 'output']``. If ``'input'``, plot all predicted outputs from a single input timepoint. If ``'output'``, plot a single output position at all input timepoints."
+    ),
+    Kwarg(
+        'plot_position_index',
+        'mid',
+        [int, str],
+        "Position of index at which to plot. Can be a scalar or a space-delimited pair. If a scalar, the same index is used both forward and backward. If a pair, the first element is the backward index and the second element is the forward index. Also accepts the keyword ``'mid'``, which will use a point in the middle of the time series."
     ),
     Kwarg(
         'keep_plot_history',

@@ -16,16 +16,20 @@ class SmartDict(dict):
 
 def plot_acoustic_features(
         inputs,
+        states=None,
+        segmentation_probs=None,
+        segmentation_probs_smoothed=None,
+        segmentations=None,
+        targets=None,
+        preds=None,
+        positional_encodings=None,
+        plot_keys=None,
         targets_bwd=None,
         preds_bwd=None,
         preds_bwd_attn=None,
         targets_fwd=None,
         preds_fwd=None,
         preds_fwd_attn=None,
-        segmentation_probs=None,
-        segmentation_probs_smoothed=None,
-        segmentations=None,
-        states=None,
         target_means=None,
         sr=16000,
         hop_length=160,
@@ -33,6 +37,7 @@ def plot_acoustic_features(
         cmap='Blues',
         titles=None,
         label_map=None,
+        char_map=None,
         directory='./',
         prefix='',
         suffix='.png'
@@ -45,13 +50,27 @@ def plot_acoustic_features(
     if label_map is not None:
         label_map = dict(zip(label_map.source,label_map.target))
 
-    has_targets_bwd = targets_bwd is not None
-    has_preds_bwd = preds_bwd is not None
-    has_preds_bwd_attn = preds_bwd_attn is not None
-    has_targets_fwd = targets_fwd is not None
-    has_preds_fwd = preds_fwd is not None
-    has_preds_fwd_attn = preds_fwd_attn is not None
-    has_means = target_means is not None
+    # Add plot labels if plots are provided as lists
+    if targets is not None:
+        if isinstance(targets, list):
+            targets = {str(x):y for x, y in zip(range(len(targets)), targets)}
+            if plot_keys is None:
+                plot_keys = sorted(list(targets.keys()))
+    if preds is not None:
+        if isinstance(preds, list):
+            preds = {str(x):y for x, y in zip(range(len(preds)), preds)}
+            if plot_keys is None:
+                plot_keys = sorted(list(preds.keys()))
+    if positional_encodings is not None:
+        if isinstance(preds, list):
+            positional_encodings = {str(x):y for x, y in zip(range(len(positional_encodings)), positional_encodings)}
+            if plot_keys is None:
+                plot_keys = sorted(list(preds.keys()))
+    assert targets.keys() == preds.keys() == positional_encodings.keys(), 'Keys for targets, preds, and positional encodings should be identical. Saw %s, %s, %s.' % (targets.keys(), preds.keys(), positional_encodings.keys())
+
+    if plot_keys is None:
+        plot_keys = []
+
     has_segs = segmentation_probs is not None
     has_smoothing = segmentations is None or segmentation_probs_smoothed is not None
     has_states = states is not None
@@ -60,116 +79,59 @@ def plot_acoustic_features(
     fig = plt.figure()
 
     n_plots = 1
-    if has_means:
-        n_plots += 1
     if has_segs:
         n_plots += 2
         if has_smoothing:
             n_plots += 1
     if has_states:
         n_plots += n_states
-    if has_targets_bwd:
-        n_plots += 1
-    if has_preds_bwd:
-        n_plots += 1
-    if has_preds_bwd_attn:
-        n_plots += 1
-    if has_targets_fwd:
-        n_plots += 1
-    if has_preds_fwd:
-        n_plots += 1
-    if has_preds_fwd_attn:
-        n_plots += 1
+    if targets is not None:
+        n_plots += len(targets)
+    if preds is not None:
+        n_plots += len(preds)
+    if positional_encodings is not None:
+        n_plots += len(positional_encodings)
 
     fig.set_size_inches(10, 3 * n_plots)
-    axes = []
+    axes_src = []
     for i in range(n_plots):
-        axes.append(fig.add_subplot(n_plots, 1, i+1))
+        axes_src.append(fig.add_subplot(n_plots, 1, i+1))
 
-    ax_input = axes[0]
+    axes = {}
+
+    axes['input'] = axes_src[0]
     plot_ix = 1
 
     if has_segs:
-        ax_seg = axes[plot_ix]
+        axes['seg'] = axes_src[plot_ix]
         plot_ix += 1
-        ax_seg_hard = axes[plot_ix]
+        axes['seg_hard'] = axes_src[plot_ix]
         plot_ix += 1
         if has_smoothing:
-            ax_seg_smoothed = axes[plot_ix]
+            axes['seg_smoothed'] = axes_src[plot_ix]
             plot_ix += 1
-
-    if has_means:
-        ax_targ_means = axes[plot_ix]
-        plot_ix += 1
 
     if has_states:
-        ax_states = []
         for i in range(n_states):
-            ax_states.append(axes[plot_ix])
+            axes['states_%d' % i] = axes_src[plot_ix]
             plot_ix += 1
 
-    if has_preds_bwd_attn:
-        ax_pred_bwd_attn = axes[plot_ix]
-        plot_ix += 1
-
-        if has_preds_bwd and has_preds_fwd:
-            plot_name = 'Temporal attention (Backward)'
-        else:
-            plot_name = 'Temporal attention'
-
-        preds_bwd_attn_cur = np.swapaxes(preds_bwd_attn, -2, -1)
-
-        if preds_bwd_attn_cur.shape[-1] > 0:
-            librosa.display.specshow(
-                preds_bwd_attn_cur,
-                sr=sr,
-                hop_length=hop_length,
-                fmax=8000,
-                x_axis='time',
-                cmap='Greys',
-                ax=ax_pred_bwd_attn
-            )
-        ax_pred_bwd_attn.set_title(plot_name)
-    if has_targets_bwd:
-        ax_targ_bwd = axes[plot_ix]
-        plot_ix += 1
-    if has_preds_bwd:
-        ax_pred_bwd = axes[plot_ix]
-        plot_ix += 1
-
-    if has_preds_fwd_attn:
-        ax_pred_fwd_attn = axes[plot_ix]
-        plot_ix += 1
-
-        if has_preds_bwd and has_preds_fwd:
-            plot_name = 'Temporal attention (Forward)'
-        else:
-            plot_name = 'Temporal attention'
-
-        preds_fwd_attn_cur = np.swapaxes(preds_fwd_attn, -2, -1)
-
-        if preds_fwd_attn_cur.shape[-1] > 0:
-            librosa.display.specshow(
-                preds_fwd_attn_cur,
-                sr=sr,
-                hop_length=hop_length,
-                fmax=8000,
-                x_axis='time',
-                cmap='Greys',
-                ax=ax_pred_fwd_attn
-            )
-        ax_pred_fwd_attn.set_title(plot_name)
-    if has_targets_fwd:
-        ax_targ_fwd = axes[plot_ix]
-        plot_ix += 1
-    if has_preds_fwd:
-        ax_pred_fwd = axes[plot_ix]
-        plot_ix += 1
+    for k in plot_keys:
+        if targets is not None:
+            axes['Targets ' + k] = axes_src[plot_ix]
+            plot_ix += 1
+        if positional_encodings is not None:
+            axes['Positional Encodings ' + k] = axes_src[plot_ix]
+            plot_ix += 1
+        if preds is not None:
+            axes['Predictions ' + k] = axes_src[plot_ix]
+            plot_ix += 1
 
     for i in range(len(inputs)):
+        ax = axes['input']
         inputs_cur = inputs[i]
         if drop_zeros:
-            inputs_select = np.where(np.any(np.logical_not(np.isclose(inputs_cur[:,:-1], 0.)), axis=1))[0]
+            inputs_select = np.where(np.any(inputs_cur[:,:-1] != 0., axis=1))[0]
             inputs_cur = inputs_cur[inputs_select]
         inputs_cur = np.swapaxes(inputs_cur, -2, -1)
 
@@ -180,11 +142,12 @@ def plot_acoustic_features(
             fmax=8000,
             x_axis='time',
             cmap=cmap,
-            ax=ax_input
+            ax=ax
         )
-        ax_input.set_title('Inputs')
+        ax.set_title('Inputs')
 
         if has_segs:
+            ax = axes['seg']
             segmentation_probs_cur = segmentation_probs[i]
             if drop_zeros:
                 segmentation_probs_cur = segmentation_probs_cur[inputs_select]
@@ -204,13 +167,15 @@ def plot_acoustic_features(
                 index=list(range(1, segmentation_probs_cur.shape[0] + 1))
             )
 
-            pcm = ax_seg.pcolormesh(df, cmap='Greys', vmin=0., vmax=1.)
-            ax_seg.xaxis.set_major_formatter(time_tick_formatter)
-            ax_seg.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
-            ax_seg.set_yticklabels(df.index)
-            ax_seg.set_xlabel('Time')
-            ax_seg.set_title('Segmentation Probabilities')
+            pcm = axes['seg'].pcolormesh(df, cmap='Greys', vmin=0., vmax=1.)
+            ax.xaxis.set_major_formatter(time_tick_formatter)
+            ax.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
+            ax.set_yticklabels(df.index)
+            ax.set_xlabel('Time')
+            ax.set_title('Segmentation Probabilities')
 
+            ax_h = axes['seg_hard']
+            ax_s = axes['seg_smoothed']
             colors = [plt.get_cmap('gist_rainbow')(1. * j / len(segmentation_probs_cur)) for j in range(len(segmentation_probs_cur))]
             segs_hard = []
 
@@ -235,27 +200,28 @@ def plot_acoustic_features(
                         segs_smoothed = segs_smoothed[inputs_select]
                 segs_hard.append(timestamps)
                 if has_smoothing:
-                    ax_seg_smoothed.plot(basis, segmentation_probs_cur[j], color=list(colors[j][:-1]) + [0.5], linestyle=':', label='L%d source' %(j+1))
-                    ax_seg_smoothed.plot(basis, segs_smoothed, color=colors[j], label='L%d smoothed' %(j+1))
+                    ax_s.plot(basis, segmentation_probs_cur[j], color=list(colors[j][:-1]) + [0.5], linestyle=':', label='L%d source' %(j+1))
+                    ax_s.plot(basis, segs_smoothed, color=colors[j], label='L%d smoothed' %(j+1))
                 # _, _, w, _ = ax_seg_hard.get_window_extent().bounds
                 # linewidth = w / len(segs_smoothed)
-                ax_seg_hard.vlines(timestamps, j, j+1, color='k', linewidth=1)
+                ax_h.vlines(timestamps, j, j+1, color='k', linewidth=1)
 
             if has_smoothing:
-                ax_seg_smoothed.set_xlim(0., basis[-1])
-                ax_seg_smoothed.legend(fancybox=True, framealpha=0.75, frameon=True, facecolor='white', edgecolor='gray')
-                ax_seg_smoothed.set_xlabel('Time')
-                ax_seg_smoothed.set_title('Smoothed Segmentations')
+                ax_s.set_xlim(0., basis[-1])
+                ax_s.legend(fancybox=True, framealpha=0.75, frameon=True, facecolor='white', edgecolor='gray')
+                ax_s.set_xlabel('Time')
+                ax_s.set_title('Smoothed Segmentations')
 
-            ax_seg_hard.set_xlim(0., basis[-1])
-            ax_seg_hard.set_ylim(0., n_states - 1)
-            ax_seg_hard.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
-            ax_seg_hard.set_yticklabels(df.index)
-            ax_seg_hard.set_xlabel('Time')
-            ax_seg_hard.set_title('Hard segmentations')
+            ax_h.set_xlim(0., basis[-1])
+            ax_h.set_ylim(0., n_states - 1)
+            ax_h.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
+            ax_h.set_yticklabels(df.index)
+            ax_h.set_xlabel('Time')
+            ax_h.set_title('Hard segmentations')
 
         if has_states:
             for j in range(n_states):
+                ax = axes['states_%d' % j]
                 states_cur = states[j][i]
 
                 if drop_zeros:
@@ -270,51 +236,40 @@ def plot_acoustic_features(
                     fmax=8000,
                     x_axis='time',
                     cmap=cmap,
-                    ax=ax_states[j]
+                    ax=ax
                 )
-                ax_states[j].set_title('Hidden States (%s)' %(j+1))
+                ax.set_title('Hidden States (%s)' %(j+1))
 
-        if has_means:
-            target_means_cur = target_means[i]
-            if drop_zeros:
-                target_means_select = np.where(np.any(np.logical_not(np.isclose(target_means_cur[:,:-1], 0.)), axis=1))[0]
-                target_means_cur = target_means_cur[target_means_select]
-            target_means_cur = np.swapaxes(target_means_cur, -2, -1)
+        for k in plot_keys:
+            for j, t in enumerate([targets, positional_encodings, preds]):
+                if t is not None:
+                    if j == 0:
+                        plot_name = 'Targets '
+                    elif j == 1:
+                        plot_name = 'Positional Encodings '
+                    else:
+                        plot_name = 'Predictions '
+                    plot_name += k
 
-            librosa.display.specshow(
-                target_means_cur,
-                sr=sr,
-                hop_length=hop_length,
-                fmax=8000,
-                x_axis='time',
-                cmap=cmap,
-                ax=ax_targ_means
-            )
-            ax_targ_means.set_title('Target means')
+                    ax = axes[plot_name]
 
-        if has_targets_bwd:
-            if has_targets_bwd and has_targets_fwd:
-                plot_name = 'Targets (Backward)'
-            else:
-                plot_name = 'Targets'
+                    arr = t[i]
+                    if drop_zeros:
+                        arr_select = np.where(np.any(arr[:,:-1] != 0., axis=1))[0]
+                        arr = arr[arr_select]
+                    arr = np.swapaxes(arr, -2, -1)
 
-            targets_cur = targets_bwd[i]
-            if drop_zeros:
-                targets_select = np.where(np.any(np.logical_not(np.isclose(targets_cur[:,:-1], 0.)), axis=1))[0]
-                targets_cur = targets_cur[targets_select]
-            targets_cur = np.swapaxes(targets_cur, -2, -1)
-
-            if targets_cur.shape[-1] > 0:
-                librosa.display.specshow(
-                    targets_cur,
-                    sr=sr,
-                    hop_length=hop_length,
-                    fmax=8000,
-                    x_axis='time',
-                    cmap=cmap,
-                    ax=ax_targ_bwd
-                )
-            ax_targ_bwd.set_title(plot_name)
+                    if arr.shape[-1] > 0:
+                        librosa.display.specshow(
+                            arr,
+                            sr=sr,
+                            hop_length=hop_length,
+                            fmax=8000,
+                            x_axis='time',
+                            cmap=cmap,
+                            ax=ax_targ_bwd
+                        )
+                    ax_targ_bwd.set_title(plot_name)
 
         if has_preds_bwd:
             if has_preds_bwd and has_preds_fwd:
@@ -325,9 +280,9 @@ def plot_acoustic_features(
             preds_cur = preds_bwd[i]
             if drop_zeros:
                 if has_targets_bwd:
-                    preds_select = targets_select
+                    preds_select = arr_select
                 else:
-                    preds_select = np.where(np.any(np.logical_not(np.isclose(preds_cur[:,:-1], 0.)), axis=1))[0]
+                    preds_select = np.where(np.any(preds_cur[:,:-1] != 0., axis=1))[0]
                 preds_cur = preds_cur[preds_select]
             preds_cur = np.swapaxes(preds_cur, -2, -1)
 
@@ -349,15 +304,15 @@ def plot_acoustic_features(
             else:
                 plot_name = 'Targets'
 
-            targets_cur = targets_fwd[i]
+            arr = targets_fwd[i]
             if drop_zeros:
-                targets_select = np.where(np.any(np.logical_not(np.isclose(targets_cur[:,:-1], 0.)), axis=1))[0]
-                targets_cur = targets_cur[targets_select]
-            targets_cur = np.swapaxes(targets_cur, -2, -1)
+                arr_select = np.where(np.any(arr[:,:-1] != 0., axis=1))[0]
+                arr = arr[arr_select]
+            arr = np.swapaxes(arr, -2, -1)
 
-            if targets_cur.shape[-1] > 0:
+            if arr.shape[-1] > 0:
                 librosa.display.specshow(
-                    targets_cur,
+                    arr,
                     sr=sr,
                     hop_length=hop_length,
                     fmax=8000,
@@ -376,9 +331,9 @@ def plot_acoustic_features(
             preds_cur = preds_fwd[i]
             if drop_zeros:
                 if has_targets_fwd:
-                    preds_select = targets_select
+                    preds_select = arr_select
                 else:
-                    preds_select = np.where(np.all(np.logical_not(np.isclose(preds_cur, 0.)), axis=1))[0]
+                    preds_select = np.where(np.any(preds_cur != 0., axis=1))[0]
                 preds_cur = preds_cur[preds_select]
             preds_cur = np.swapaxes(preds_cur, -2, -1)
 
@@ -569,7 +524,17 @@ def plot_projections(
         sns.set_style('white')
 
         with sns.plotting_context(rc={'legend.fontsize': 'small', 'lines.markersize': 2}):
-            g = sns.relplot(x='Projection 1', y='Projection 2', kind='scatter', hue=c, data=df.sort_values(c), palette=cmap, legend='full')
+            g = sns.relplot(
+                x='Projection 1',
+                y='Projection 2',
+                kind='scatter',
+                hue=c,
+                data=df.sort_values(c),
+                palette=cmap,
+                legend='full',
+                size=0.5,
+                alpha=0.5
+            )
         try:
             g.savefig(directory + '/' + prefix + 'projections_%s' % c + suffix)
         except Exception:

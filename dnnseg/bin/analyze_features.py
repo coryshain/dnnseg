@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree  import DecisionTreeClassifier, export_graphviz
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 import pydot
 import argparse
@@ -18,6 +19,7 @@ if __name__ == '__main__':
     ''')
     argparser.add_argument('data', help='Path to data containing predicted and gold classification labels.')
     argparser.add_argument('gold_cols', nargs='+', help='Names of column in data set to use as regression target.')
+    argparser.add_argument('-l', '--language', default='English', help='Language to extract features for.')
     argparser.add_argument('-d', '--direction', type=str, default='pred2gold', help='Direction of classification. One of ["gold2pred", "pred2gold"].')
     argparser.add_argument('-M', '--max_depth', type=float, default=None, help='Maximum permissible tree depth.')
     argparser.add_argument('-m', '--min_impurity_decrease', type=float, default=0., help='Minimum impurity decrease necessary to make a split.')
@@ -32,7 +34,18 @@ if __name__ == '__main__':
     if not os.path.exists(args.outdir):
         os.makedirs(args.outdir)
 
-    df = pd.read_csv(args.data)
+    df = pd.read_csv(args.data, sep=' ')
+    if args.language.lower() == 'english':
+        gold_feats = pd.read_csv('english_sampa_to_feats.csv')
+    elif args.language.lower() == 'xitsonga':
+        gold_feats = pd.read_csv('xitsonga_sampa_to_feats.csv')
+    else:
+        raise ValueError('Unsupported language "%s"' % args.language)
+
+    gold_feats['gold_label'] = gold_feats.symbol
+
+    df = df.merge(gold_feats, on='gold_label')
+
     latent_dim_names = [c for c in df.columns if is_embedding_dimension.match(c)]
 
     precision = {}
@@ -46,6 +59,8 @@ if __name__ == '__main__':
         gold_cols = ['syllabic', 'consonantal', 'sonorant', 'continuant', 'delayed_release', 'approximant', 'trill', 'nasal', 'voice', 'spread_glottis', 'constricted_glottis', 'labial', 'round', 'labiodental', 'coronal', 'anterior', 'distributed', 'strident', 'lateral', 'dorsal', 'high', 'low', 'front', 'back', 'tense', 'implosive']
     else:
         gold_cols = args.gold_cols
+
+    gold_cols = [c for c in gold_cols if c in df.columns]
 
     if args.direction.lower() == 'pred2gold':
         X = df[latent_dim_names] > 0.5
@@ -139,6 +154,11 @@ if __name__ == '__main__':
                     max_depth=args.max_depth,
                     min_impurity_decrease=args.min_impurity_decrease
                 )
+
+                # classifier = LogisticRegression(
+                #     class_weight='balanced',
+                #     C = 0.1
+                # )
 
                 train_select = np.zeros(len(X)).astype('bool')
                 train_select[i:i+fold_size] = True
