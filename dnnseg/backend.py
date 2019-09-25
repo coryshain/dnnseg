@@ -59,37 +59,48 @@ def mask_and_lag(X, mask, n_forward=0, n_backward=0, session=None):
             X_src = tf.boolean_mask(X, mask)
             pad_base = [(0,0) for _ in range(len(X_src.shape)-2)]
 
-            time_ix = tf.range(tf.shape(X)[-2])
+            # Compute batch element IDs to prevent spillover across batch elements
+            batch_ix = tf.range(tf.shape(X)[0])
             tile_ix = [1]
-            for i in range(len(mask.shape) - len(time_ix.shape) - 1, -1, -1):
-                tile_ix.insert(0, tf.shape(mask)[i])
-                time_ix = time_ix[None,...]
-            time_ix = tf.tile(time_ix, tile_ix)
-
-            n_mask = tf.cast(tf.reduce_sum(mask, axis=-1, keepdims=True), dtype=tf.int32)
-            time_mask = time_ix < n_mask
+            for i in range(1, len(mask.shape)):
+                tile_ix.append(tf.shape(mask)[i])
+                batch_ix = batch_ix[..., None]
+            batch_ix = tf.tile(batch_ix, tile_ix)
+            batch_ids = tf.boolean_mask(batch_ix, mask)
 
             _X_bwd = []
             _X_fwd = []
             _X_mask_bwd = []
             _X_mask_fwd = []
 
-            for i in range(1, n_backward+1):
-                _pad_left = tf.minimum(i, tf.shape(X_src)[-2])
-                _X_cur = tf.pad(X_src[...,:-i,:], pad_base + [(_pad_left,0), (0,0)])
-                _X_bwd.append(_X_cur)
+            for i in range(n_backward):
+                if i == 0:
+                    _X_cur = X_src
+                    _batch_ids_cur = batch_ids
+                else:
+                    _pad_left = tf.minimum(i, tf.shape(X_src)[-2])
+                    _X_cur = tf.pad(X_src[...,:-i,:], pad_base + [(_pad_left,0), (0,0)])
+                    _batch_ids_cur = tf.pad(batch_ids[...,:-i], pad_base + [(_pad_left,0)], constant_values=-1)
 
-                _X_mask_cur = tf.cast(time_ix >= i, dtype=mask.dtype)
-                _X_mask_cur = tf.boolean_mask(_X_mask_cur, time_mask)
+                _X_mask_cur = tf.cast(
+                    tf.equal(_batch_ids_cur, batch_ids),
+                    dtype=mask.dtype
+                )
+
+                _X_bwd.append(_X_cur)
                 _X_mask_bwd.append(_X_mask_cur)
 
             for i in range(1, n_forward+1):
                 _pad_right = tf.minimum(i, tf.shape(X_src)[-2])
                 _X_cur = tf.pad(X_src[...,i:,:], pad_base + [(0,_pad_right), (0,0)])
-                _X_fwd.append(_X_cur)
+                _batch_ids_cur = tf.pad(batch_ids[...,i:], pad_base + [(0,_pad_right)], constant_values=-1)
 
-                _X_mask_cur = tf.cast(time_ix < (n_mask - i), dtype=mask.dtype)
-                _X_mask_cur = tf.boolean_mask(_X_mask_cur, time_mask)
+                _X_mask_cur = tf.cast(
+                    tf.equal(_batch_ids_cur, batch_ids),
+                    dtype=mask.dtype
+                )
+
+                _X_fwd.append(_X_cur)
                 _X_mask_fwd.append(_X_mask_cur)
 
             if n_backward:
@@ -1022,7 +1033,6 @@ class HMLSTMCell(LayerRNNCell):
                     prefinal_mode = self._prefinal_mode
 
                 resnet_kernel_initializer = 'he_normal_initializer'
-                intermediate_kernel_initializer = 'identity_initializer'
 
                 if prefinal_mode.lower() == 'max':
                     if out_dim > in_dim:
@@ -1361,7 +1371,7 @@ class HMLSTMCell(LayerRNNCell):
                         h_below_clean = h_below
                         if not self._bptt:
                             h_below = tf.stop_gradient(h_below)
-                            
+
                         if self._revnet_n_layers:
                             h_below = self._revnet[l].forward(h_below)
 
@@ -1432,8 +1442,17 @@ class HMLSTMCell(LayerRNNCell):
                                 def train_func():
                                     a = self._min_discretization_prob
                                     discretization_prob = 2 * (1 - a) * tf.abs(h_below_prob - 0.5) + a
-                                    sample = tf.random_uniform(tf.shape(h_below_prob))
-                                    out = tf.where(sample < discretization_prob, h_below_discrete, h_below_prob)
+                                    if self._trainable_self_discretization:
+                                        discretize = self._state_discretizer(discretization_prob)
+                                        discrete = h_discrete * discretize
+                                        continuous = h_prob * (1 - discretize)
+                                        out = discrete + continuous
+                                    else:
+                                        if self._sample_at_train:
+                                            discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
+                                        else:
+                                            discretize = discretization_prob < 0.5
+                                        out = tf.where(discretize, h_below_discrete, h_below_prob)
                                     return out
 
                                 def eval_func():
@@ -1587,13 +1606,16 @@ class HMLSTMCell(LayerRNNCell):
                                     a = self._min_discretization_prob
                                     discretization_prob = 2 * (1 - a) * tf.abs(h_prob - 0.5) + a
                                     if self._trainable_self_discretization:
-                                        discretization_decision = self._state_discretizer(discretization_prob)
-                                        discrete = h_discrete * discretization_decision
-                                        continuous = h_prob * (1 - discretization_decision)
+                                        discretize = self._state_discretizer(discretization_prob)
+                                        discrete = h_discrete * discretize
+                                        continuous = h_prob * (1 - discretize)
                                         out = discrete + continuous
                                     else:
-                                        sample = tf.random_uniform(tf.shape(h_prob))
-                                        out = tf.where(sample < discretization_prob, h_discrete, h_prob)
+                                        if self._sample_at_train:
+                                            discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
+                                        else:
+                                            discretize = discretization_prob < 0.5
+                                        out = tf.where(discretize, h_discrete, h_prob)
                                     return out
 
                                 def eval_func():
@@ -1657,8 +1679,11 @@ class HMLSTMCell(LayerRNNCell):
                                                 continuous = z_prob * (1 - discretization_decision)
                                                 out = discrete + continuous
                                             else:
-                                                sample = tf.random_uniform(tf.shape(z_prob))
-                                                out = tf.where(sample < discretization_prob, z_discrete, z_prob)
+                                                if self._sample_at_train:
+                                                    discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
+                                                else:
+                                                    discretize = discretization_prob < 0.5
+                                                out = tf.where(discretize, z_discrete, z_prob)
                                             return out
 
                                         def eval_func():
@@ -1742,8 +1767,11 @@ class HMLSTMCell(LayerRNNCell):
                                             continuous = lm_h_in_prob * (1 - discretization_decision)
                                             out = discrete + continuous
                                         else:
-                                            sample = tf.random_uniform(tf.shape(lm_h_in_prob))
-                                            out = tf.where(sample < discretization_prob, lm_h_in_discrete, lm_h_in_prob)
+                                            if self._sample_at_train:
+                                                discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
+                                            else:
+                                                discretize = discretization_prob < 0.5
+                                            out = tf.where(discretize, lm_h_in_discrete, lm_h_in_prob)
                                         return out
 
                                     def eval_func():
@@ -1831,8 +1859,11 @@ class HMLSTMCell(LayerRNNCell):
                                             continuous = w_h_in_prob * (1 - discretization_decision)
                                             out = discrete + continuous
                                         else:
-                                            sample = tf.random_uniform(tf.shape(w_h_in_prob))
-                                            out = tf.where(sample < discretization_prob, w_h_in_discrete, w_h_in_prob)
+                                            if self._sample_at_train:
+                                                discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
+                                            else:
+                                                discretize = discretization_prob < 0.5
+                                            out = tf.where(discretize, w_h_in_discrete, w_h_in_prob)
                                         return out
 
                                     def eval_func():
@@ -3112,7 +3143,8 @@ class RNNLayer(object):
             units=None,
             activation=None,
             recurrent_activation='sigmoid',
-            kernel_initializer='he_normal_initializer',
+            kernel_initializer='glorot_uniform_initializer',
+            recurrent_initializer='orthogonal_initializer',
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             return_sequences=True,
@@ -3127,6 +3159,7 @@ class RNNLayer(object):
         self.activation = get_activation(activation, session=self.session, training=self.training)
         self.recurrent_activation = get_activation(recurrent_activation, session=self.session, training=self.training)
         self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
+        self.recurrent_initializer = get_initializer(recurrent_initializer, session=self.session)
         self.bias_initializer = get_initializer(bias_initializer, session=self.session)
         self.refeed_outputs = refeed_outputs
         self.return_sequences = return_sequences
@@ -3151,6 +3184,9 @@ class RNNLayer(object):
                     self.rnn_layer = RNN(
                         output_dim,
                         return_sequences=self.return_sequences,
+                        kernel_initializer=self.kernel_initializer,
+                        recurrent_initializer=self.recurrent_initializer,
+                        bias_initializer=self.bias_initializer,
                         activation=self.activation,
                         recurrent_activation=self.recurrent_activation,
                         name=self.name
@@ -3190,7 +3226,8 @@ class RNNResidualLayer(object):
             activation=None,
             activation_inner=None,
             recurrent_activation='sigmoid',
-            kernel_initializer='he_normal_initializer',
+            kernel_initializer='glorot_uniform_initializer',
+            recurrent_initializer='orthogonal_initializer',
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             return_sequences=True,
@@ -3208,6 +3245,7 @@ class RNNResidualLayer(object):
         self.activation_inner = get_activation(activation_inner, session=self.session, training=self.training)
         self.recurrent_activation = get_activation(recurrent_activation, session=self.session, training=self.training)
         self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
+        self.recurrent_initializer = get_initializer(recurrent_initializer, session=self.session)
         self.bias_initializer = get_initializer(bias_initializer, session=self.session)
         self.refeed_outputs = refeed_outputs
         self.return_sequences = return_sequences
@@ -3241,6 +3279,9 @@ class RNNResidualLayer(object):
                         rnn_layer = RNN(
                             output_dim,
                             return_sequences=self.return_sequences,
+                            kernel_initializer=self.kernel_initializer,
+                            recurrent_initializer=self.recurrent_initializer,
+                            bias_initializer=self.bias_initializer,
                             activation=self.activation,
                             recurrent_activation=self.recurrent_activation,
                             name=name
@@ -4063,15 +4104,12 @@ def preprocess_decoder_inputs(
                 # Create a set of periodic functions with trainable phase and frequency
                 elif decoder_temporal_encoding_type.lower() == 'periodic':
                     time = np.arange(1., n_timesteps + 1.)[None, ..., None]
-                    # coef = np.exp(np.arange(0, temporal_encoding_units, 2) * -(np.log(10000.) / temporal_encoding_units))[None, None, ...]
                     coef = np.exp(np.linspace(-2,2, temporal_encoding_units // 2))[None, None, ...]
                     sin = np.sin(time * coef)
                     cos = np.cos(time * coef)
                     temporal_encoding = np.zeros([1, n_timesteps, temporal_encoding_units], dtype=FLOAT_NP)
                     temporal_encoding[..., 0::2] = sin
                     temporal_encoding[..., 1::2] = cos
-                    scale = tf.Variable(tf.ones(temporal_encoding_units))
-                    temporal_encoding *= scale[None, None, ...]
 
                 else:
                     raise ValueError(

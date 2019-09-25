@@ -414,7 +414,7 @@ def segment_length_summary(segs, indent=0, steps_per_second=100.):
     return out
 
 
-def score_segmentation(true, pred, tol=0.02):
+def score_segmentation(true, pred, tol=0.02, count_vad_bounds=True):
     _true = np.array(true[['start', 'end']])
     _pred = np.array(pred[['start', 'end']])
 
@@ -2735,6 +2735,15 @@ class Datafile(object):
 
         return one_hot
 
+    def segments_to_mask(self, segments):
+        mask = np.zeros(len(self), dtype=bool)
+        starts = np.round(segments.start * self.steps_per_second).astype('int')
+        ends = np.round(segments.end * self.steps_per_second).astype('int')
+        for s, e in zip(starts, ends):
+            mask[s:e] = 1
+        
+        return mask
+
     def one_hot_boundaries(self, segments='vad'):
         segments = self.segments(segments)
         one_hot = self.segments_to_one_hot(segments)
@@ -2757,8 +2766,9 @@ class Datafile(object):
         if features is None:
             feats = self.data()
             if normalization is not None:
-                shift = self.normalization_shift(normalization, reduction_axis)
-                scale = self.normalization_scale(normalization, reduction_axis)
+                normalization_mask = self.segments_to_mask(self.segments(segments))
+                shift = self.normalization_shift(normalization, reduction_axis, mask=normalization_mask)
+                scale = self.normalization_scale(normalization, reduction_axis, mask=normalization_mask)
                 feats = (feats - shift) / scale
         else:
             feats = features
@@ -3516,10 +3526,10 @@ class TextDatafile(Datafile):
         indices = []
         for c in self.data_src:
             indices.append(self.char2ix[c])
-        data = np.zeros((len(self), n_char))
-        data[np.arange(len(self)), indices] = 1
+        out = np.zeros((len(self), n_char))
+        out[np.arange(len(self)), indices] = 1
 
-        return data
+        return out
 
     def update_charset(self, ix2char, char2ix=None):
         assert isinstance(ix2char, list), 'New charset c must be of type ``list``.'

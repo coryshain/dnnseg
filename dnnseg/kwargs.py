@@ -222,6 +222,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['batch_normalization_decay', 'revnet_batch_normalization_decay']
     ),
     Kwarg(
+        'input_batch_normalization_decay',
+        None,
+        [float, None],
+        "Decay rate to use for batch normalization of inputs. If ``None``, no batch normalization."
+    ),
+    Kwarg(
         'utt_len_emb_dim',
         None,
         [int, None],
@@ -961,7 +967,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'constrain_output',
-        True,
+        False,
         bool,
         "Use an output model constrained to :math:`[0, 1]` (sigmoid with cross-entropy loss if MLE and LogitNormal if Bayesian). Otherwise, use linear/normal output. Ignored unless **normalize_data* is ``True``."
     ),
