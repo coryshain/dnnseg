@@ -23,8 +23,8 @@ def compute_hypercube(windows, sizes, discretizations):
             name = 's%s' % s
             s = s.split('-')
             k = s[-1]
+            n = str(len(s))
             s = s[:-1]
-            n = len(s)
             params[-1].append([('n_layers_encoder', n), ('n_units_encoder', ' '.join(s)), ('k', k), name])
 
     if len(discretizations) > 0:
