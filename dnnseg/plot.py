@@ -8,10 +8,7 @@ matplotlib.use('Agg')
 from matplotlib import ticker, pyplot as plt
 import seaborn as sns
 from .data import extract_segment_timestamps
-
-class SmartDict(dict):
-    def __missing__(self, key):
-        return key
+from .util import stderr
 
 
 def plot_acoustic_features_old(
@@ -404,7 +401,7 @@ def plot_acoustic_features_old(
         try:
             fig.savefig(directory + '/' + prefix + '%d_featureplot' % i + suffix)
         except Exception:
-            sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
+            stderr('IO error when saving plot. Skipping plotting...\n')
 
         ax_input.clear()
         if has_segs:
@@ -703,7 +700,7 @@ def plot_acoustic_features(
         try:
             fig.savefig(directory + '/' + prefix + '%d_featureplot' % i + suffix)
         except Exception:
-            sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
+            stderr('IO error when saving plot. Skipping plotting...\n')
 
         for ax in axes.values():
             ax.clear()
@@ -732,7 +729,7 @@ def plot_label_histogram(labels, title=None, bins='auto', label_map=None, dir='.
     try:
         fig.savefig(dir + '/' + prefix + 'label_histogram' + suffix)
     except:
-        sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
+        stderr('IO error when saving plot. Skipping plotting...\n')
 
     plt.close(fig)
 
@@ -768,7 +765,7 @@ def plot_label_heatmap(labels, preds, title=None, label_map=None, cmap='Blues', 
     try:
         fig.savefig(dir + '/' + prefix + 'label_heatmap' + suffix)
     except:
-        sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
+        stderr('IO error when saving plot. Skipping plotting...\n')
 
     plt.close(fig)
 
@@ -807,7 +804,7 @@ def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cm
     try:
         cm.savefig(dir + '/' + prefix + 'binary_unit_heatmap' + suffix)
     except Exception:
-        sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
+        stderr('IO error when saving plot. Skipping plotting...\n')
 
     plt.close('all')
 
@@ -866,7 +863,7 @@ def plot_projections(
         try:
             g.savefig(directory + '/' + prefix + 'projections_%s' % c + suffix)
         except Exception:
-            sys.stderr.write('IO error when saving plot. Skipping plotting...\n')
+            stderr('IO error when saving plot. Skipping plotting...\n')
 
         plt.close('all')
 

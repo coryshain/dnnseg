@@ -50,7 +50,7 @@ with open(args.dir_path + '/testing_list.txt', 'r') as f:
             test_files[command].append(file)
 
 for c in commands:
-    sys.stderr.write('Processing subdirectory "%s"...\n' %c)
+    stderr('Processing subdirectory "%s"...\n' %c)
     files = os.listdir(args.dir_path + '/' + c + '/')
     n = len(files)
     dev_list = dev_files[c]
@@ -76,7 +76,7 @@ for c in commands:
 
     for i, f in enumerate(files):
         ID = c + '_' + os.path.basename(f)[:-4]
-        sys.stderr.write('\r%d/%d' %(i+1, n))
+        stderr('\r%d/%d' %(i+1, n))
         sys.stderr.flush()
         speaker, _, _ = f.split('_')
         _, wav = wavfile.read(args.dir_path + '/' + c + '/' + f)
@@ -121,7 +121,7 @@ for c in commands:
             train_label.append(c)
             train_speaker.append(speaker)
 
-    sys.stderr.write('\nSaving preprocessed data...\n')
+    stderr('\nSaving preprocessed data...\n')
 
     train_data = pd.DataFrame(
         {

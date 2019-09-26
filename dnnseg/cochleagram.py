@@ -5,7 +5,7 @@ sys.stderr.write('IGNORE ANY IMMEDIATELY FOLLOWING ERRORS. These are spuriously 
 from pycochleagram.cochleagram import cochleagram, invert_cochleagram
 import soundfile
 
-from .util import suppress_output
+from .util import suppress_output, stderr
 
 def wav_to_cochleagram(path, sr=16000, offset=10, low_lim=50, hi_lim=None, sample_factor=1, n_coef=13, order=2):
     assert sr % 1000 == 0, 'Must use a sampling rate that is a multiple of 1000'
@@ -147,4 +147,4 @@ def invert_cochleagrams(
                 try:
                     soundfile.write(path, wav, sr, format='AIFF')
                 except RuntimeError:
-                    sys.stderr.write('Error saving audio to path: %s. Skipping...\n' % path)
+                    stderr('Error saving audio to path: %s. Skipping...\n' % path)

@@ -11,6 +11,7 @@ sys.setrecursionlimit(2000)
 from dnnseg.config import Config
 from dnnseg.data import Dataset, cache_data
 from dnnseg.kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
+from dnnseg.util import stderr
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser('''
@@ -35,7 +36,7 @@ if __name__ == '__main__':
         data_name = 'data.obj'
 
     if not args.preprocess and os.path.exists(p.train_data_dir + '/' + data_name):
-        sys.stderr.write('Loading saved training data...\n')
+        stderr('Loading saved training data...\n')
         sys.stderr.flush()
         with open(p.train_data_dir + '/' + data_name, 'rb') as f:
             train_data = pickle.load(f)
@@ -48,21 +49,21 @@ if __name__ == '__main__':
             order=p['order'],
         )
         if p.save_preprocessed_data:
-            sys.stderr.write('Saving preprocessed training data...\n')
+            stderr('Saving preprocessed training data...\n')
             with open(p.train_data_dir + '/' + data_name, 'wb') as f:
                 pickle.dump(train_data, f, protocol=2)
     if p['oracle_boundaries'] and p['oracle_boundaries'].lower() == 'rnd':
         assert p['random_oracle_segmentation_rate'], 'random_oracle_segmentation_rate must be provided when oracle_boundaries=="rnd".'
         train_data.initialize_random_segmentation(p['random_oracle_segmentation_rate'])
 
-    sys.stderr.write('=' * 50 + '\n')
-    sys.stderr.write('TRAINING DATA SUMMARY\n\n')
-    sys.stderr.write(train_data.summary(indent=2))
-    sys.stderr.write('=' * 50 + '\n\n')
+    stderr('=' * 50 + '\n')
+    stderr('TRAINING DATA SUMMARY\n\n')
+    stderr(train_data.summary(indent=2))
+    stderr('=' * 50 + '\n\n')
 
     if p.train_data_dir != p.val_data_dir:
         if not args.preprocess and os.path.exists(p.val_data_dir + '/' + data_name):
-            sys.stderr.write('Loading saved validation data...\n')
+            stderr('Loading saved validation data...\n')
             sys.stderr.flush()
             with open(p.val_data_dir + '/' + data_name, 'rb') as f:
                 val_data = pickle.load(f)
@@ -75,21 +76,21 @@ if __name__ == '__main__':
                 order=p['order'],
             )
             if p.save_preprocessed_data:
-                sys.stderr.write('Saving preprocessed dev data...\n')
+                stderr('Saving preprocessed dev data...\n')
                 with open(p.val_data_dir + '/' + data_name, 'wb') as f:
                     pickle.dump(val_data, f, protocol=2)
 
-            sys.stderr.write('=' * 50 + '\n')
-            sys.stderr.write('VALIDATION DATA SUMMARY\n\n')
-            sys.stderr.write(val_data.summary(indent=2))
-            sys.stderr.write('=' * 50 + '\n\n')
+            stderr('=' * 50 + '\n')
+            stderr('VALIDATION DATA SUMMARY\n\n')
+            stderr(val_data.summary(indent=2))
+            stderr('=' * 50 + '\n\n')
 
     else:
         val_data = None
 
     t1 = time.time()
 
-    sys.stderr.write('Data loaded in %ds\n\n' %(t1-t0))
+    stderr('Data loaded in %ds\n\n' %(t1-t0))
     sys.stderr.flush()
 
     if p['segtype'] == 'rnd':
@@ -97,7 +98,7 @@ if __name__ == '__main__':
         if val_data is not None:
             val_data.initialize_random_segmentation(7.4153)
 
-    sys.stderr.write('Caching data...\n')
+    stderr('Caching data...\n')
     sys.stderr.flush()
 
     if p['pad_seqs']:
@@ -137,7 +138,7 @@ if __name__ == '__main__':
     #     print(np.stack([batch['oracle_boundaries'][0,:,0],batch['oracle_labels'][0,:,0]], axis=1)[:100])
     #     input()
 
-    sys.stderr.write('Initializing encoder-decoder...\n\n')
+    stderr('Initializing encoder-decoder...\n\n')
 
     if args.restart and os.path.exists(p.outdir + '/tensorboard'):
         shutil.rmtree(p.outdir + '/tensorboard')
@@ -176,7 +177,7 @@ if __name__ == '__main__':
 
     dnnseg_model.build(len(train_data.segments(segment_type=p['segtype'])), outdir=p.outdir, restore=not args.restart)
 
-    sys.stderr.write('Fitting encoder-decoder...\n\n')
+    stderr('Fitting encoder-decoder...\n\n')
 
     dnnseg_model.fit(
         train_data,

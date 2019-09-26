@@ -12,6 +12,7 @@ import pydot
 import argparse
 
 from dnnseg.data import get_random_permutation
+from dnnseg.util import stderr
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser('''
@@ -109,7 +110,7 @@ if __name__ == '__main__':
             accuracy[gold_col] = accuracy_score(gold, predictions)
 
             if args.verbose:
-                sys.stderr.write('Cross-validation F1 for variable "%s": %.4f\n' % (gold_col, f1[gold_col]))
+                stderr('Cross-validation F1 for variable "%s": %.4f\n' % (gold_col, f1[gold_col]))
 
             tree_ix = np.random.randint(args.n_estimators)
 
@@ -186,7 +187,7 @@ if __name__ == '__main__':
             accuracy[latent_dim] = accuracy_score(gold, predictions)
 
             if args.verbose:
-                sys.stderr.write('Cross-validation F1 for latent dimension "%s": %.4f\n' % (latent_dim, f1[latent_dim]))
+                stderr('Cross-validation F1 for latent dimension "%s": %.4f\n' % (latent_dim, f1[latent_dim]))
 
             tree_ix = np.random.randint(args.n_estimators)
 

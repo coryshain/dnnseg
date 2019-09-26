@@ -7,7 +7,7 @@ import argparse
 from dnnseg.config import Config
 from dnnseg.data import project_matching_segments
 from dnnseg.plot import plot_projections
-
+from dnnseg.util import stderr
 
 emb_file = re.compile('embeddings_(.+)_segs_l([0-9]+).csv')
 
@@ -61,12 +61,12 @@ if __name__ == '__main__':
             os.makedirs(outdir_cur)
         df = pd.read_csv(p.outdir + '/' + e, sep=' ')
 
-        sys.stderr.write('Projecting using %s. Segtype = %s. Layer = %s. Segments = %d.\n' % (args.method.upper(), segtype, l, len(df)))
+        stderr('Projecting using %s. Segtype = %s. Layer = %s. Segments = %d.\n' % (args.method.upper(), segtype, l, len(df)))
         sys.stderr.flush()
 
         df = project_matching_segments(df, method=args.method)
 
-        sys.stderr.write('Plotting...\n')
+        stderr('Plotting...\n')
         sys.stderr.flush()
 
         plot_projections(

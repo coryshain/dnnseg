@@ -64,7 +64,7 @@ xitsonga_phn.start = xitsonga_phn.start.round(3)
 xitsonga_phn.end = xitsonga_phn.end.round(3)
 
 
-sys.stderr.write('Processing Buckeye Speech Corpus data...\n')
+stderr('Processing Buckeye Speech Corpus data...\n')
 if args.bsc is not None:
     if not os.path.exists(args.outdir + '/sample'):
         os.makedirs(args.outdir + '/sample')
@@ -109,9 +109,9 @@ if args.bsc is not None:
         to_print.to_csv(args.outdir + '/english/%s.phn' % fileID, sep=' ', index=False)
 
 else:
-    sys.stderr.write('No path provided to Buckeye Speech Corpus. Skipping...\n')
+    stderr('No path provided to Buckeye Speech Corpus. Skipping...\n')
 
-sys.stderr.write('Processing NCHST (Xitsonga) data...\n')
+stderr('Processing NCHST (Xitsonga) data...\n')
 if args.xit is not None:
     if not os.path.exists(args.outdir + '/xitsonga'):
         os.makedirs(args.outdir + '/xitsonga')
@@ -135,4 +135,4 @@ if args.xit is not None:
         to_print.to_csv(args.outdir + '/xitsonga/%s.phn' % fileID, sep=' ', index=False)
 
 else:
-    sys.stderr.write('No path provided to Xitsonga data. Skipping...\n')
+    stderr('No path provided to Xitsonga data. Skipping...\n')

@@ -14,7 +14,7 @@ from sklearn.metrics import homogeneity_completeness_v_measure, adjusted_mutual_
 from .backend import *
 from .data import cache_data
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
-from .util import f_measure, pretty_print_seconds
+from .util import f_measure, pretty_print_seconds, stderr
 from .plot import plot_acoustic_features, plot_label_histogram, plot_label_heatmap, plot_binary_unit_heatmap
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -259,7 +259,7 @@ class AcousticEncoderDecoder(object):
             if os.path.exists(self.label_map_file):
                 self.label_map = pd.read_csv(self.label_map_file)
             else:
-                sys.stderr.write('Label map file %s does not exist. Label mapping will not be used.' %self.label_map_file)
+                stderr('Label map file %s does not exist. Label mapping will not be used.' %self.label_map_file)
 
         self.predict_mode = False
 
@@ -371,6 +371,8 @@ class AcousticEncoderDecoder(object):
                     var_list=None
                 )
         self.load(restore=restore)
+
+        self.sess.graph.finalize()
 
     def _initialize_inputs(self):
         with self.sess.as_default():
@@ -2492,7 +2494,7 @@ class AcousticEncoderDecoder(object):
                     segtype = self.segtype
 
                 if X is None or X_mask is None:
-                    sys.stderr.write('Getting input data...\n')
+                    stderr('Getting input data...\n')
                     X, X_mask, _ = data.inputs(
                         segments=segtype,
                         padding=self.input_padding,
@@ -2502,7 +2504,7 @@ class AcousticEncoderDecoder(object):
                         max_len=self.max_len
                     )
 
-                sys.stderr.write('Collecting boundary and state predictions...\n')
+                stderr('Collecting boundary and state predictions...\n')
                 segmentation_probs, segmentations, states = self._get_segs_and_states(X, X_mask, training=training)
 
                 if 'bsn' in self.encoder_boundary_activation.lower():
@@ -2510,7 +2512,7 @@ class AcousticEncoderDecoder(object):
                 else:
                     smoothing_algorithm = 'rbf'
 
-                sys.stderr.write('Converting predictions into tables of segments...\n')
+                stderr('Converting predictions into tables of segments...\n')
                 segment_tables = data.get_segment_tables_from_segmenter_states(
                     segmentations,
                     parent_segment_type=segtype,
@@ -2522,7 +2524,7 @@ class AcousticEncoderDecoder(object):
                 )
 
 
-                sys.stderr.write('Resegmenting input data...\n')
+                stderr('Resegmenting input data...\n')
                 y = []
 
                 for l in range(len(segment_tables)):
@@ -2553,7 +2555,7 @@ class AcousticEncoderDecoder(object):
 
                     y.append(y_cur)
 
-                sys.stderr.write('Collecting segment embeddings...\n')
+                stderr('Collecting segment embeddings...\n')
                 n_units = self.units_encoder
                 embeddings = []
                 for l in range(len(segment_tables)):
@@ -3044,7 +3046,7 @@ class AcousticEncoderDecoder(object):
                     else:
                         self.saver.restore(self.sess, path)
                 except tf.errors.DataLossError:
-                    sys.stderr.write('Read failure during load. Trying from backup...\n')
+                    stderr('Read failure during load. Trying from backup...\n')
                     if predict:
                         self.ema_saver.restore(self.sess, path[:-5] + '_backup.ckpt')
                     else:
@@ -3063,12 +3065,12 @@ class AcousticEncoderDecoder(object):
 
                         missing_in_ckpt = model_var_names_set - ckpt_var_names_set
                         if len(missing_in_ckpt) > 0:
-                            sys.stderr.write(
+                            stderr(
                                 'Checkpoint file lacked the variables below. They will be left at their initializations.\n%s.\n\n' % (
                                     sorted(list(missing_in_ckpt))))
                         missing_in_model = ckpt_var_names_set - model_var_names_set
                         if len(missing_in_model) > 0:
-                            sys.stderr.write(
+                            stderr(
                                 'Checkpoint file contained the variables below which do not exist in the current model. They will be ignored.\n%s.\n\n' % (
                                     sorted(list(missing_in_ckpt))))
 
@@ -3154,7 +3156,7 @@ class AcousticEncoderDecoder(object):
                 out_data = None
         else:
             if verbose:
-                sys.stderr.write('The system is in segmentation mode and does not perform utterance classification. Skipping classifier evaluation...\n')
+                stderr('The system is in segmentation mode and does not perform utterance classification. Skipping classifier evaluation...\n')
             out_data = None
             summary = None
 
@@ -3176,7 +3178,7 @@ class AcousticEncoderDecoder(object):
 
         if self.task == 'classifier':
             if verbose:
-                sys.stderr.write('Evaluating utterance classifier...\n')
+                stderr('Evaluating utterance classifier...\n')
 
             n = data.get_n('val')
             if self.pad_seqs:
@@ -3196,7 +3198,7 @@ class AcousticEncoderDecoder(object):
                     self.set_predict_mode(True)
 
                     if verbose:
-                        sys.stderr.write('  Predicting labels...\n\n')
+                        stderr('  Predicting labels...\n\n')
                         pb = tf.contrib.keras.utils.Progbar(n_minibatch)
 
                     to_run = []
@@ -3246,7 +3248,7 @@ class AcousticEncoderDecoder(object):
                             pb.update(i + 1, values=[])
 
                     if verbose:
-                        sys.stderr.write('\n')
+                        stderr('\n')
 
                     labels_pred = np.concatenate(labels_pred, axis=0)
 
@@ -3272,7 +3274,7 @@ class AcousticEncoderDecoder(object):
 
         else:
             if verbose:
-                sys.stderr.write('The system is in segmentation mode and does not perform utterance classification. Skipping classifier evaluation...\n')
+                stderr('The system is in segmentation mode and does not perform utterance classification. Skipping classifier evaluation...\n')
             labels_pred = None
             encoding = None
 
@@ -3339,7 +3341,7 @@ class AcousticEncoderDecoder(object):
         pred_eval_summary += '    Fowlkes-Mallows index:       %s\n\n' % fmi
 
         if verbose:
-            sys.stderr.write(pred_eval_summary)
+            stderr(pred_eval_summary)
             sys.stderr.flush()
 
         summary += pred_eval_summary
@@ -3373,7 +3375,7 @@ class AcousticEncoderDecoder(object):
             rand_eval_summary += '    Fowlkes-Mallows index:       %s\n\n' % fmi
 
             if verbose:
-                sys.stderr.write(rand_eval_summary)
+                stderr(rand_eval_summary)
                 sys.stderr.flush()
 
             summary += rand_eval_summary
@@ -3446,7 +3448,7 @@ class AcousticEncoderDecoder(object):
                 )
 
         else:
-            sys.stderr.write('Cannot score acoustics for text data. Skipping...\n')
+            stderr('Cannot score acoustics for text data. Skipping...\n')
 
         return segmentation_scores, summary
 
@@ -3493,7 +3495,7 @@ class AcousticEncoderDecoder(object):
                     parent_segments='vad'
                 )
         else:
-            sys.stderr.write('Cannot score text for acoustic data. Skipping...\n')
+            stderr('Cannot score text for acoustic data. Skipping...\n')
 
         return segmentation_scores, summary
 
@@ -3512,7 +3514,7 @@ class AcousticEncoderDecoder(object):
             summary = ''
 
             if verbose:
-                sys.stderr.write('Evaluating segmenter...\n')
+                stderr('Evaluating segmenter...\n')
 
             if segtype is None:
                 segtype = self.segtype
@@ -3541,7 +3543,7 @@ class AcousticEncoderDecoder(object):
                     self.set_predict_mode(True)
 
                     if verbose:
-                        sys.stderr.write('Extracting segmenter states...\n')
+                        stderr('Extracting segmenter states...\n')
                         pb = tf.contrib.keras.utils.Progbar(n_minibatch)
 
                     if self.streaming or whole_file:
@@ -3696,7 +3698,7 @@ class AcousticEncoderDecoder(object):
                         states = new_states
 
                     if verbose:
-                        sys.stderr.write('Computing segmentation tables...\n')
+                        stderr('Computing segmentation tables...\n')
 
                     if self.encoder_boundary_discretizer or self.segment_at_peaks \
                             or self.oracle_boundaries or self.boundary_prob_discretization_threshold:
@@ -3726,7 +3728,7 @@ class AcousticEncoderDecoder(object):
                     )
 
                     if verbose:
-                        sys.stderr.write('Evaluating segmentations...\n')
+                        stderr('Evaluating segmentations...\n')
 
                     summary += '\nSEGMENTATION EVAL:\n\n'
 
@@ -3772,7 +3774,7 @@ class AcousticEncoderDecoder(object):
                                 # summary += summary_cur
                                 scores['classification_scores'][l][s][g] = eval_dict_cur
 
-                    sys.stderr.write(summary)
+                    stderr(summary)
 
                     with open(self.outdir + '/initial_classifier_eval.txt', 'w') as f:
                         f.write(summary)
@@ -3818,7 +3820,7 @@ class AcousticEncoderDecoder(object):
 
         else:
             if verbose:
-                sys.stderr.write('The system is in classification mode and does not perform utterance segmentation. Skipping segmenter evaluation...\n')
+                stderr('The system is in classification mode and does not perform utterance segmentation. Skipping segmenter evaluation...\n')
             scores = {}
 
         return scores, summary
@@ -3874,7 +3876,7 @@ class AcousticEncoderDecoder(object):
             eval_dict = {}
 
         if verbose:
-            sys.stderr.write('\n')
+            stderr('\n')
 
         return eval_dict
 
@@ -3989,7 +3991,7 @@ class AcousticEncoderDecoder(object):
 
                     if save:
                         if verbose:
-                            sys.stderr.write('Saving model...\n')
+                            stderr('Saving model...\n')
 
                         self.save()
 
@@ -4103,12 +4105,12 @@ class AcousticEncoderDecoder(object):
                     if verbose:
                         t1 = time.time()
                         time_str = pretty_print_seconds(t1 - t0)
-                        sys.stderr.write('Checkpoint time: %s\n' % time_str)
+                        stderr('Checkpoint time: %s\n' % time_str)
 
                 except tf.errors.InvalidArgumentError as e:
-                    sys.stderr.write(str(e) + '\n')
+                    stderr(str(e) + '\n')
                     if verbose:
-                        sys.stderr.write('Numerics check failed. Aborting and reloading from previous checkpoint...\n')
+                        stderr('Numerics check failed. Aborting and reloading from previous checkpoint...\n')
                     self.load()
 
     def fit(
@@ -4122,14 +4124,14 @@ class AcousticEncoderDecoder(object):
     ):
         if self.step.eval(session=self.sess) == 0:
             if verbose:
-                sys.stderr.write('Saving initial weights...\n')
+                stderr('Saving initial weights...\n')
             self.save()
 
         if verbose:
             usingGPU = tf.test.is_gpu_available()
-            sys.stderr.write('Using GPU: %s\n' % usingGPU)
+            stderr('Using GPU: %s\n' % usingGPU)
 
-        sys.stderr.write('Extracting training and cross-validation data...\n')
+        stderr('Extracting training and cross-validation data...\n')
         t0 = time.time()
 
         if val_data is None:
@@ -4167,19 +4169,19 @@ class AcousticEncoderDecoder(object):
 
         t1 = time.time()
 
-        sys.stderr.write('Training and cross-validation data extracted in %ds\n\n' % (t1 - t0))
+        stderr('Training and cross-validation data extracted in %ds\n\n' % (t1 - t0))
         sys.stderr.flush()
 
         if n_iter is None:
             n_iter = self.n_iter
 
         if verbose:
-            sys.stderr.write('*' * 100 + '\n')
-            sys.stderr.write(self.report_settings())
-            sys.stderr.write('\n')
-            sys.stderr.write(self.report_n_params())
-            sys.stderr.write('\n')
-            sys.stderr.write('*' * 100 + '\n\n')
+            stderr('*' * 100 + '\n')
+            stderr(self.report_settings())
+            stderr('\n')
+            stderr(self.report_n_params())
+            stderr('\n')
+            stderr('*' * 100 + '\n\n')
 
         if self.n_correspondence and not self.correspondence_live_targets:
             segment_embeddings = None
@@ -4236,34 +4238,34 @@ class AcousticEncoderDecoder(object):
                 while self.global_step.eval(session=self.sess) < n_iter:
                     if verbose:
                         t0_iter = time.time()
-                        sys.stderr.write('-' * 50 + '\n')
-                        sys.stderr.write('Iteration %d\n' % int(self.global_step.eval(session=self.sess) + 1))
-                        sys.stderr.write('\n')
+                        stderr('-' * 50 + '\n')
+                        stderr('Iteration %d\n' % int(self.global_step.eval(session=self.sess) + 1))
+                        stderr('\n')
 
                     if verbose:
                         if self.streaming:
                             if n_pb > 1:
-                                sys.stderr.write('Running minibatches %d-%d (out of %d)...\n' % (1, n_pb, n_minibatch))
+                                stderr('Running minibatches %d-%d (out of %d)...\n' % (1, n_pb, n_minibatch))
                             else:
-                                sys.stderr.write('Running minibatch %d (out of %d)...\n' % (n_pb, n_minibatch))
+                                stderr('Running minibatch %d (out of %d)...\n' % (n_pb, n_minibatch))
                         else:
-                            sys.stderr.write('Running minibatch updates...\n')
+                            stderr('Running minibatch updates...\n')
 
                         self.set_update_mode(verbose=True)
 
                         if self.n_pretrain_steps and (self.step.eval(session=self.sess) <= self.n_pretrain_steps):
-                            sys.stderr.write('Pretraining decoder...\n')
+                            stderr('Pretraining decoder...\n')
 
                         if self.optim_name is not None and self.lr_decay_family is not None:
-                            sys.stderr.write('Learning rate: %s\n' % self.lr.eval(session=self.sess))
+                            stderr('Learning rate: %s\n' % self.lr.eval(session=self.sess))
 
                         if self.curriculum_t is not None:
                             if self.curriculum_type.lower() == 'hard':
-                                sys.stderr.write('Curriculum window length: %s\n' % self.curriculum_t.eval(session=self.sess))
+                                stderr('Curriculum window length: %s\n' % self.curriculum_t.eval(session=self.sess))
                             elif self.curriculum_type.lower() == 'exp':
-                                sys.stderr.write('Curriculum decay rate: %s\n' % (1. / self.curriculum_t.eval(session=self.sess)))
+                                stderr('Curriculum decay rate: %s\n' % (1. / self.curriculum_t.eval(session=self.sess)))
                             else:
-                                sys.stderr.write('Curriculum window soft bound location: %s\n' % self.curriculum_t.eval(session=self.sess))
+                                stderr('Curriculum window soft bound location: %s\n' % self.curriculum_t.eval(session=self.sess))
 
                         if self.boundary_slope_annealing_rate:
                             sys.stderr.write('Boundary slope annealing coefficient: %s\n' % self.boundary_slope_coef.eval(session=self.sess))
@@ -5610,94 +5612,96 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
             return_encoding_entropy=False,
             return_segmentation_probs=False
     ):
-        out_dict = {}
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                out_dict = {}
 
-        if return_loss or return_reconstructions or return_labels or return_label_probs:
-            if self.update_mode == 'all':
-                train_op = self.train_op_all
-            elif self.update_mode == 'boundary':
-                train_op = self.train_op_boundary
-            elif self.update_mode == 'state':
-                train_op = self.train_op_state
-            else:
-                raise ValueError('Unrecognized train op type "%s".' % train_op)
+                if return_loss or return_reconstructions or return_labels or return_label_probs:
+                    if self.update_mode == 'all':
+                        train_op = self.train_op_all
+                    elif self.update_mode == 'boundary':
+                        train_op = self.train_op_boundary
+                    elif self.update_mode == 'state':
+                        train_op = self.train_op_state
+                    else:
+                        raise ValueError('Unrecognized train op type "%s".' % train_op)
 
-            to_run = [train_op]
-            to_run_names = []
-            if return_loss:
-                to_run.append(self.loss)
-                to_run_names.append('loss')
-                if self.streaming:
-                    if self.predict_backward:
-                        to_run.append(self.loss_reconstruction)
-                        to_run_names.append('reconstruction_loss')
-                    if self.predict_forward:
-                        to_run.append(self.loss_prediction)
-                        to_run_names.append('prediction_loss')
-                else:
-                    to_run.append(self.loss_reconstruction)
-                    to_run_names.append('reconstruction_loss')
-                if self.correspondence_loss_scale:
-                    for l in range(self.n_layers_encoder - 1):
-                        to_run.append(self.correspondence_losses[l])
-                        to_run_names.append('correspondence_loss_l%d' % l)
-                if self.lm_loss_scale:
-                    for l in range(self.n_layers_encoder):
-                        to_run.append(self.lm_losses[l])
-                        to_run_names.append('encoder_lm_loss_l%d' % l)
-                if self.speaker_adversarial_loss_scale:
-                    for l in range(self.n_layers_encoder):
-                        to_run.append(self.encoder_speaker_adversarial_losses[l])
-                        to_run_names.append('encoder_speaker_adversarial_loss_l%d' % l)
-                if self.speaker_adversarial_loss_scale:
-                    for l in range(self.n_layers_encoder):
-                        to_run.append(self.encoder_speaker_adversarial_losses[l])
-                        to_run_names.append('encoder_speaker_adversarial_loss_l%d' % l)
-                if self.passthru_adversarial_loss_scale:
-                    for l in range(self.n_layers_encoder):
-                        to_run.append(self.encoder_passthru_adversarial_losses[l])
-                        to_run_names.append('encoder_passthru_adversarial_loss_l%d' % l)
-            if return_regularizer_loss:
-                to_run.append(self.regularizer_loss_total)
-                to_run_names.append('regularizer_loss')
-            if return_reconstructions:
-                to_run.append(self.reconstructions)
-                to_run_names.append('reconst')
-            if return_labels:
-                to_run.append(self.labels)
-                to_run_names.append('labels')
-            if return_label_probs:
-                to_run.append(self.label_probs)
-                to_run_names.append('label_probs')
-            if return_encoding_entropy:
-                to_run.append(self.encoding_entropy_mean)
-                to_run_names.append('encoding_entropy')
-            if self.encoder_type.lower() in ['cnn_hmlstm', 'hmlstm'] and return_segmentation_probs:
-                to_run.append(self.segmentation_probs)
-                to_run_names.append('segmentation_probs')
-            if self.task == 'streaming_autoencoder':
-                to_run.append(self.encoder_states)
-                to_run.append(self.segmentation_probs)
-                to_run.append(self.out_left)
-                to_run.append(self.out_right)
-                to_run_names.append('encoder_states')
-                to_run_names.append('segmentation_probs')
-                to_run_names.append('out_left')
-                to_run_names.append('out_right')
-            if self.n_correspondence and not self.correspondence_live_targets: # Collect correspondence targets
-                [to_run.append(seg_states) for seg_states in self.correspondence_hidden_states]
-                [to_run.append(seg_feats) for seg_feats in self.correspondence_feats]
-                [to_run.append(seg_feats_mask) for seg_feats_mask in self.correspondence_mask]
-                [to_run_names.append('correspondence_seg_states_l%d' %i) for i in range(len(self.correspondence_hidden_states))]
-                [to_run_names.append('correspondence_seg_feats_l%d' %i) for i in range(len(self.correspondence_feats))]
-                [to_run_names.append('correspondence_seg_feats_mask_l%d' %i) for i in range(len(self.correspondence_mask))]
+                    to_run = [train_op]
+                    to_run_names = []
+                    if return_loss:
+                        to_run.append(self.loss)
+                        to_run_names.append('loss')
+                        if self.streaming:
+                            if self.predict_backward:
+                                to_run.append(self.loss_reconstruction)
+                                to_run_names.append('reconstruction_loss')
+                            if self.predict_forward:
+                                to_run.append(self.loss_prediction)
+                                to_run_names.append('prediction_loss')
+                        else:
+                            to_run.append(self.loss_reconstruction)
+                            to_run_names.append('reconstruction_loss')
+                        if self.correspondence_loss_scale:
+                            for l in range(self.n_layers_encoder - 1):
+                                to_run.append(self.correspondence_losses[l])
+                                to_run_names.append('correspondence_loss_l%d' % l)
+                        if self.lm_loss_scale:
+                            for l in range(self.n_layers_encoder):
+                                to_run.append(self.lm_losses[l])
+                                to_run_names.append('encoder_lm_loss_l%d' % l)
+                        if self.speaker_adversarial_loss_scale:
+                            for l in range(self.n_layers_encoder):
+                                to_run.append(self.encoder_speaker_adversarial_losses[l])
+                                to_run_names.append('encoder_speaker_adversarial_loss_l%d' % l)
+                        if self.speaker_adversarial_loss_scale:
+                            for l in range(self.n_layers_encoder):
+                                to_run.append(self.encoder_speaker_adversarial_losses[l])
+                                to_run_names.append('encoder_speaker_adversarial_loss_l%d' % l)
+                        if self.passthru_adversarial_loss_scale:
+                            for l in range(self.n_layers_encoder):
+                                to_run.append(self.encoder_passthru_adversarial_losses[l])
+                                to_run_names.append('encoder_passthru_adversarial_loss_l%d' % l)
+                    if return_regularizer_loss:
+                        to_run.append(self.regularizer_loss_total)
+                        to_run_names.append('regularizer_loss')
+                    if return_reconstructions:
+                        to_run.append(self.reconstructions)
+                        to_run_names.append('reconst')
+                    if return_labels:
+                        to_run.append(self.labels)
+                        to_run_names.append('labels')
+                    if return_label_probs:
+                        to_run.append(self.label_probs)
+                        to_run_names.append('label_probs')
+                    if return_encoding_entropy:
+                        to_run.append(self.encoding_entropy_mean)
+                        to_run_names.append('encoding_entropy')
+                    if self.encoder_type.lower() in ['cnn_hmlstm', 'hmlstm'] and return_segmentation_probs:
+                        to_run.append(self.segmentation_probs)
+                        to_run_names.append('segmentation_probs')
+                    if self.task == 'streaming_autoencoder':
+                        to_run.append(self.encoder_states)
+                        to_run.append(self.segmentation_probs)
+                        to_run.append(self.out_left)
+                        to_run.append(self.out_right)
+                        to_run_names.append('encoder_states')
+                        to_run_names.append('segmentation_probs')
+                        to_run_names.append('out_left')
+                        to_run_names.append('out_right')
+                    if self.n_correspondence and not self.correspondence_live_targets: # Collect correspondence targets
+                        [to_run.append(seg_states) for seg_states in self.correspondence_hidden_states]
+                        [to_run.append(seg_feats) for seg_feats in self.correspondence_feats]
+                        [to_run.append(seg_feats_mask) for seg_feats_mask in self.correspondence_mask]
+                        [to_run_names.append('correspondence_seg_states_l%d' %i) for i in range(len(self.correspondence_hidden_states))]
+                        [to_run_names.append('correspondence_seg_feats_l%d' %i) for i in range(len(self.correspondence_feats))]
+                        [to_run_names.append('correspondence_seg_feats_mask_l%d' %i) for i in range(len(self.correspondence_mask))]
 
-            output = self.sess.run(to_run, feed_dict=feed_dict)
+                    output = self.sess.run(to_run, feed_dict=feed_dict)
 
-            for i, x in enumerate(output[1:]):
-                out_dict[to_run_names[i]] = x
+                    for i, x in enumerate(output[1:]):
+                        out_dict[to_run_names[i]] = x
 
-        return out_dict
+                return out_dict
 
     def report_settings(self, indent=0):
         out = super(AcousticEncoderDecoderMLE, self).report_settings(indent=indent)

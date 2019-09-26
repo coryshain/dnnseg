@@ -6,7 +6,7 @@ import pandas as pd
 import argparse
 
 from dnnseg.config import Config
-from dnnseg.util import load_dnnseg
+from dnnseg.util import load_dnnseg, stderr
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser('''
@@ -31,7 +31,7 @@ if __name__ == '__main__':
         data_path += '_root'
     data_path += '.obj'
 
-    sys.stderr.write('Loading saved training data...\n')
+    stderr('Loading saved training data...\n')
     sys.stderr.flush()
 
     data_map = {

@@ -2,6 +2,12 @@ import sys
 import os
 import pickle
 
+
+def stderr(s):
+    sys.stderr.write(s)
+    sys.stderr.flush()
+
+
 def f_measure(tp, fp, fn, beta=1):
     p = r = f = 0
     if sum([tp, fp]) > 0:

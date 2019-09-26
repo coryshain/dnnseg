@@ -10,6 +10,8 @@ from scipy.interpolate import Rbf
 from sklearn.manifold import LocallyLinearEmbedding, MDS, SpectralEmbedding, TSNE
 from sklearn.decomposition import PCA
 
+from .util import stderr
+
 
 def binary_to_integer_np(b, int_type='int32'):
     np_int_type = getattr(np, int_type)
@@ -560,7 +562,7 @@ def extract_segment_embeddings(segs):
     embedding_columns = [c for c in segs.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
     embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
     if len(embedding_columns) < 1:
-        sys.stderr.write('No embeddings in prediction dataframe. Skipping segment extraction...\n')
+        stderr('No embeddings in prediction dataframe. Skipping segment extraction...\n')
         sys.stderr.flush()
         return segs
 
@@ -575,7 +577,7 @@ def extract_predicted_segment_embeddings_with_true_labels(true, pred):
     embedding_columns = [c for c in pred.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
     embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
     if len(embedding_columns) < 1:
-        sys.stderr.write('No embeddings in prediction dataframe. Skipping segment extraction...\n')
+        stderr('No embeddings in prediction dataframe. Skipping segment extraction...\n')
         sys.stderr.flush()
         return pred
 
@@ -612,7 +614,7 @@ def extract_matching_segment_embeddings(true, pred, tol=0.02):
     embedding_columns = [c for c in pred.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
     embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
     if len(embedding_columns) < 1:
-        sys.stderr.write('No embeddings in prediction dataframe. Skipping segment extraction...\n')
+        stderr('No embeddings in prediction dataframe. Skipping segment extraction...\n')
         sys.stderr.flush()
         return pred
     _true = np.array(true[['start', 'end']])
@@ -704,7 +706,7 @@ def project_matching_segments(df, method='tsne'):
     embedding_columns = [c for c in df.columns if c.startswith('d') and re.match('[0-9]+', c[1:])]
     embedding_columns = ['d%d' % i for i in range(len(embedding_columns))]
     if len(embedding_columns) < 1:
-        sys.stderr.write('No embeddings in prediction dataframe. Skipping projection...\n')
+        stderr('No embeddings in prediction dataframe. Skipping projection...\n')
         sys.stderr.flush()
         return df
 
@@ -852,10 +854,10 @@ def score_text_boundaries(true, pred):
 
         if cat1 != cat2:
             if not warned:
-                sys.stderr.write("Warning: surface string mismatch: %s | %s\n", cat1, cat2)
+                stderr("Warning: surface string mismatch: %s | %s\n", cat1, cat2)
                 warned = 1
             elif warned == 1:
-                sys.stderr.write("Warning: more mismatches\n")
+                stderr("Warning: more mismatches\n")
                 warned += 1
 
         boundaries_true = set(get_text_boundaries(w_true))
@@ -1157,7 +1159,7 @@ class Dataset(object):
             if self.filter_type.lower() == 'mfcc':
                 from .mfcc import wav_to_mfcc as featurizer
             elif self.filter_type.lower() == 'cochleagram':
-                sys.stderr.write('IGNORE ANY IMMEDIATELY FOLLOWING ERRORS. These are spuriously thrown by the pycochleagram module.\n')
+                stderr('IGNORE ANY IMMEDIATELY FOLLOWING ERRORS. These are spuriously thrown by the pycochleagram module.\n')
                 from .cochleagram import wav_to_cochleagram as featurizer
             else:
                 raise ValueError('Unrecognized filter type "%s".' % self.filter_type)
@@ -1196,7 +1198,7 @@ class Dataset(object):
                         else:
                             time_str = '%ds' % s
                     out_str += '|    ETA - %s     ' % time_str
-                sys.stderr.write(out_str)
+                stderr(out_str)
 
             new_data = datafile(
                 f,
@@ -1211,7 +1213,7 @@ class Dataset(object):
             eta = (n - i + 1) * mean_time
 
         if verbose:
-            sys.stderr.write('\n')
+            stderr('\n')
 
         self.fileIDs = sorted(list(self.data.keys()))
 
@@ -1953,7 +1955,7 @@ class Dataset(object):
             for f in self.fileIDs:
                 out += self.data[f].as_text()
         else:
-            sys.stderr.write('Converting to text not supported for acoustic-type data. Skipping...\n')
+            stderr('Converting to text not supported for acoustic-type data. Skipping...\n')
             out = None
 
         return out
@@ -2451,7 +2453,7 @@ class Dataset(object):
                 out += self.data[f].segmentations_to_string(segments, parent_segments=parent_segments)
 
         else:
-            sys.stderr.write('Converting data to string not supported for acoustic-type datasets. Skipping...\n')
+            stderr('Converting data to string not supported for acoustic-type datasets. Skipping...\n')
             out = None
 
         return out
@@ -2472,7 +2474,7 @@ class Dataset(object):
                     segments=segments_cur
                 )
         else:
-            sys.stderr.write('Dumping to textgrid not supported for text-type datasets. Skipping...\n')
+            stderr('Dumping to textgrid not supported for text-type datasets. Skipping...\n')
 
     def dump_segmentations_to_textfile(self, outdir=None, suffix='', segments=None, parent_segments=None):
         if self.datatype == 'text':
@@ -2495,7 +2497,7 @@ class Dataset(object):
                     parent_segments=parent_segments_cur
                 )
         else:
-            sys.stderr.write('Dumping to text file not supported for acoustic-type datasets. Skipping...\n')
+            stderr('Dumping to text file not supported for acoustic-type datasets. Skipping...\n')
 
     def summary(self, indent=0, summarize_components=False):
         out = ' ' * indent + 'DATASET SUMMARY:\n\n'
