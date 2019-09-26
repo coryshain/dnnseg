@@ -686,6 +686,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['slope_annealing_rate']
     ),
     Kwarg(
+        'nested_boundaries',
+        False,
+        bool,
+        "Whether to mask boundaries using the boundaries from the layer below."
+    ),
+    Kwarg(
         'encoder_state_discretizer',
         None,
         [str, None],

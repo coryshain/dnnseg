@@ -741,12 +741,6 @@ class AcousticEncoderDecoder(object):
                     else:
                         boundaries = None
 
-                    if self.encoder_boundary_discretizer:
-                        nested_boundaries = True
-                    else:
-                        nested_boundaries = False
-                    nested_boundaries = False
-
                     if self.lm_loss_type.lower() == 'srn' and self.lm_loss_scale is not None:
                         return_lm_predictions = True
                         if self.speaker_adversarial_loss_scale:
@@ -805,7 +799,7 @@ class AcousticEncoderDecoder(object):
                         state_discretizer=self.encoder_state_discretizer,
                         discretize_state_at_boundary=self.encoder_discretize_state_at_boundary,
                         discretize_final=self.encoder_discretize_final,
-                        nested_boundaries=nested_boundaries,
+                        nested_boundaries=self.nested_boundaries,
                         state_noise_sd=self.encoder_state_noise_sd,
                         bottomup_noise_sd=self.encoder_bottomup_noise_sd,
                         recurrent_noise_sd=self.encoder_recurrent_noise_sd,

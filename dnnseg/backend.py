@@ -1209,12 +1209,15 @@ class HMLSTMCell(LayerRNNCell):
                             if self._implementation == 1 and not self._layer_normalization and self._use_bias:
                                 bias_boundary = bias[:, -1:]
                                 self._bias_boundary.append(bias_boundary)
-
                             elif self._implementation == 2:
+                                boundary_in_dim = self._num_units[l] * 2
+                                if l == 0 and self._n_passthru_neurons:
+                                    boundary_in_dim += self._n_passthru_neurons * 4
+
                                 self._kernel_boundary.append(
                                     self.initialize_kernel(
                                         l,
-                                        self._num_units[l],
+                                        boundary_in_dim,
                                         1,
                                         self._boundary_initializer,
                                         prefinal_mode='in',
@@ -1643,9 +1646,11 @@ class HMLSTMCell(LayerRNNCell):
                                 z_prob_oracle = z_prob
                                 if self._implementation == 2:
                                     # In implementation 2, boundary is computed by linear transform of h
-                                    z_in = h
+                                    z_in = [h, c]
                                     if self._refeed_boundary:
-                                        z_in = tf.concat([z_behind, z_in], axis=1)
+                                        z_in.append(z_behind)
+
+                                    z_in = tf.concat(z_in, axis=1)
                                     z_in = self._boundary_dropout(z_in)
                                     # In implementation 2, boundary is a function of the hidden state
                                     z_logit = self._kernel_boundary[l](z_in)
