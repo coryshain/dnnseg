@@ -1050,6 +1050,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Type of LM loss. One of ``['neighbors', 'masked_neighbors', 'srn']``."
     ),
     Kwarg(
+        'lm_drop_masked',
+        True,
+        bool,
+        "Whether to drop (vs. multiplicatively mask) non-boundary input timesteps in LM loss. Ignored unless **lm_loss_type** is ``masked_neighbors``."
+    ),
+    Kwarg(
         'lm_use_upper',
         False,
         bool,

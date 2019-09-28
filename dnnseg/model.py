@@ -327,7 +327,7 @@ class AcousticEncoderDecoder(object):
                     else:
                         mask = None
                     with tf.variable_scope('decoder_bwd'):
-                        self.decoder_bwd, self.temporal_encoding_bwd = self._initialize_decoder(
+                        self.decoder_bwd, self.pe_bwd = self._initialize_decoder(
                             self.decoder_in,
                             self.n_timesteps_output_bwd,
                             mask=mask,
@@ -340,7 +340,7 @@ class AcousticEncoderDecoder(object):
                     else:
                         mask = None
                     with tf.variable_scope('decoder_fwd'):
-                        self.decoder_fwd, self.temporal_encoding_fwd = self._initialize_decoder(
+                        self.decoder_fwd, self.pe_fwd = self._initialize_decoder(
                             self.decoder_in,
                             self.n_timesteps_output_fwd,
                             mask=mask,
@@ -352,7 +352,7 @@ class AcousticEncoderDecoder(object):
                 else:
                     mask = None
                 with tf.variable_scope('decoder_bwd'):
-                    self.decoder_bwd, self.temporal_encoding_bwd = self._initialize_decoder(
+                    self.decoder_bwd, self.pe_bwd = self._initialize_decoder(
                         self.decoder_in,
                         self.n_timesteps_output_bwd,
                         mask=mask,
@@ -1234,28 +1234,28 @@ class AcousticEncoderDecoder(object):
                 self.lm_plot_preds_fwd = encoder_lm_preds_fwd
                 self.lm_plot_preds_bwd = encoder_lm_preds_bwd
 
-    def _initialize_lm_masked_neighbors(self, initialize_decoder=True):
+    def _initialize_lm_masked_neighbors(self, initialize_decoder=True, predict_at_boundaries=True, use_attn=False, backprop_into_weights=False):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if not initialize_decoder:
-                    lm_logits_bwd_src, lm_logits_fwd_src = self._postprocess_decoder_logits()
+                    logits_bwd_src, logits_fwd_src = self._postprocess_decoder_logits()
 
-                lm_targets_bwd = []
-                lm_targets_fwd = []
-                lm_logits_bwd = []
-                lm_logits_fwd = []
-                lm_norm_bwd = []
-                lm_norm_fwd = []
-                lm_targets_unnormalized_bwd = []
-                lm_targets_unnormalized_fwd = []
-                lm_logits_unnormalized_bwd = []
-                lm_logits_unnormalized_fwd = []
-                lm_weights_bwd = []
-                lm_weights_fwd = []
-                lm_plot_targs_bwd = []
-                lm_plot_targs_fwd = []
-                lm_plot_preds_bwd = []
-                lm_plot_preds_fwd = []
+                targets_bwd = []
+                targets_fwd = []
+                logits_bwd = []
+                logits_fwd = []
+                norm_bwd = []
+                norm_fwd = []
+                targets_unnormalized_bwd = []
+                targets_unnormalized_fwd = []
+                logits_unnormalized_bwd = []
+                logits_unnormalized_fwd = []
+                weights_bwd = []
+                weights_fwd = []
+                plot_targs_bwd = []
+                plot_targs_fwd = []
+                plot_preds_bwd = []
+                plot_preds_fwd = []
 
                 # 0 is closest in time to input, -1 is furthest in time
                 ppx_bwd = self.ppx_bwd
@@ -1276,33 +1276,99 @@ class AcousticEncoderDecoder(object):
 
                 for l in range(self.n_layers_encoder):
                     if l == 0:
-                        lm_mask_cur = self.X_mask
-                        lm_targets_cur = self.X
+                        mask_cur = self.X_mask
+                        weights_cur = mask_cur
+                        weights_bool_cur = weights_cur
+                        targets_cur = self.X
                     else:
-                        lm_mask_cur = self.encoder_segmentations[l - 1]
-                        lm_targets_cur = self.encoder_hidden_states[l - 1]
-                        if not self.backprop_into_targets:
-                            # lm_mask_cur = tf.stop_gradient(lm_mask_cur)
-                            lm_targets_cur = tf.stop_gradient(lm_targets_cur)
+                        if self.lm_drop_masked:
+                            mask_cur = self.encoder_segmentations[l - 1]
+                            weights_cur = mask_cur
+                        else:
+                            mask_cur = self.X_mask
+                            weights_cur = self.encoder_segmentations[l - 1]
+                        weights_bool_cur = weights_cur > 0.5
 
-                    k = int(lm_targets_cur.shape[-1])
+                        targets_cur = self.encoder_hidden_states[l - 1]
+                        if not self.backprop_into_targets:
+                            targets_cur = tf.stop_gradient(targets_cur)
+
+                    k = int(targets_cur.shape[-1])
 
                     if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
-                        lm_targets_cur = tf.round(lm_targets_cur)
+                        targets_cur = tf.round(targets_cur)
 
-                    lm_mask_bool_cur = tf.cast(lm_mask_cur > 0.5, self.FLOAT_TF)
+                    if not backprop_into_weights:
+                        weights_cur = tf.stop_gradient(weights_cur)
 
-                    lm_targets_bwd_cur, lm_weights_bwd_cur, lm_targets_fwd_cur, lm_weights_fwd_cur = mask_and_lag(
-                        lm_targets_cur,
-                        lm_mask_bool_cur,
+                    targets_bwd_cur, weights_bwd_cur, targets_fwd_cur, weights_fwd_cur = mask_and_lag(
+                        targets_cur,
+                        mask=mask_cur,
+                        weights=weights_cur,
                         n_forward=self.lm_order_fwd,
                         n_backward=self.lm_order_bwd,
                         session=self.sess
                     )
+                    # targets_bwd_cur_2, weights_bwd_cur_2, targets_fwd_cur_2, weights_fwd_cur_2 = mask_and_lag_old(
+                    #     targets_cur,
+                    #     mask=mask_cur,
+                    #     n_forward=self.lm_order_fwd,
+                    #     n_backward=self.lm_order_bwd,
+                    #     session=self.sess
+                    # )
+                    #
+                    # targets_bwd_cur = tf.Print(
+                    #     targets_bwd_cur,
+                    #     [
+                    #         'targets_bwd',
+                    #         tf.reduce_mean(tf.cast(tf.equal(targets_bwd_cur, targets_bwd_cur_2), dtype=self.FLOAT_TF)),
+                    #         'targets_fwd',
+                    #         tf.reduce_mean(tf.cast(tf.equal(targets_fwd_cur, targets_fwd_cur_2), dtype=self.FLOAT_TF)),
+                    #         'weights_bwd',
+                    #         tf.reduce_mean(tf.cast(tf.equal(weights_bwd_cur, weights_bwd_cur_2), dtype=self.FLOAT_TF)),
+                    #         'weights_fwd',
+                    #         tf.reduce_mean(tf.cast(tf.equal(weights_fwd_cur, weights_fwd_cur_2), dtype=self.FLOAT_TF))
+                    #     ]
+                    # )
+
+                    if predict_at_boundaries and not self.lm_drop_masked:
+                        mask_cur = weights_bool_cur
+                        weights_bool_masked_cur = tf.boolean_mask(weights_bool_cur, mask_cur)
+                        targets_bwd_cur = tf.boolean_mask(targets_bwd_cur, weights_bool_masked_cur)
+                        targets_fwd_cur = tf.boolean_mask(targets_fwd_cur, weights_bool_masked_cur)
+                        weights_bwd_cur = tf.boolean_mask(weights_bwd_cur, weights_bool_masked_cur)
+                        weights_fwd_cur = tf.boolean_mask(weights_fwd_cur, weights_bool_masked_cur)
 
                     if initialize_decoder:
                         if self.lm_use_upper and l < self.n_layers_encoder - 1:
-                            decoder_in = tf.concat(self.encoder_hidden_states[l:], axis=-1)
+                            if use_attn:
+                                # Only works if all layers are same size.
+                                # Decode using an attention-weighted sum of encoder layers.
+                                # Attention is given to the lowest layer without a boundary.
+                                segs = list(self.encoder_segmentations)
+                                segs = segs[l:]
+                                attn = []
+                                attn_mask = None
+                                for i in range(len(segs) + 1):
+                                    if i < len(segs):
+                                        attn_i = (1 - segs[i])
+                                    else:
+                                        attn_i = tf.ones(tf.shape(self.encoder_hidden_states[-1])[:-1])
+                                    if attn_mask is None:
+                                        attn_mask = 1 - attn_i
+                                    else:
+                                        attn_i *= attn_mask
+                                        attn_mask *= 1 - attn_i
+                                    attn.append(attn_i)
+                                attn = tf.stack(attn, axis=-1)
+                                decoder_in = tf.stack(self.encoder_hidden_states[l:], axis=-1)
+                                while len(attn.shape) < len(decoder_in.shape):
+                                    attn = tf.expand_dims(attn, -2)
+                                # if l == 0:
+                                #     attn = tf.Print(attn, ['attn_%d' % l, attn, 'segs_%d' %l, tf.stack(self.encoder_segmentations[l:], axis=-1), 'max_seg', tf.reduce_sum(tf.stack(self.encoder_segmentations[l:], axis=-1), axis=-1), 'argmax_attn', tf.argmax(attn, axis=-1), 'attn sum', tf.reduce_mean(tf.reduce_sum(attn, axis=-1))], summarize=99)
+                                decoder_in = tf.reduce_sum(decoder_in * attn, axis=-1)
+                            else:
+                                decoder_in = tf.concat(self.encoder_hidden_states[l:], axis=-1)
                         else:
                             decoder_in = self.encoder_hidden_states[l]
 
@@ -1320,154 +1386,181 @@ class AcousticEncoderDecoder(object):
                                 decoder_in = tf.concat(decoder_in, axis=-1)
                             else:
                                 decoder_in = decoder_in[0]
-                        decoder_in = tf.boolean_mask(decoder_in, lm_mask_bool_cur)
+                        decoder_in = tf.boolean_mask(decoder_in, mask_cur)
 
                         if self.lm_order_bwd:
-                            lm_logits_bwd_cur, temporal_encoding_bwd = self._initialize_decoder(
+                            if self.lm_drop_masked:
+                                decoder_mask_bwd = None
+                            else:
+                                decoder_mask_bwd = weights_bwd_cur
+
+                            logits_bwd_cur, pe_bwd = self._initialize_decoder(
                                 decoder_in,
                                 self.lm_order_bwd,
                                 frame_dim=k,
+                                mask=decoder_mask_bwd,
                                 name='decoder_LM_bwd_L%d' % l
                             )
                             if l == 0:
-                                self.temporal_encoding_bwd = temporal_encoding_bwd
+                                self.pe_bwd = pe_bwd
                         else:
-                            lm_logits_bwd_cur = None
+                            logits_bwd_cur = None
 
                         if self.lm_order_fwd:
-                            lm_logits_fwd_cur, temporal_encoding_fwd = self._initialize_decoder(
+                            if self.lm_drop_masked:
+                                decoder_mask_fwd = None
+                            else:
+                                decoder_mask_fwd = weights_fwd_cur
+
+                            logits_fwd_cur, pe_fwd = self._initialize_decoder(
                                 decoder_in,
                                 self.lm_order_fwd,
                                 frame_dim=k,
+                                mask=decoder_mask_fwd,
                                 name='decoder_LM_fwd_L%d' % l
                             )
                             if l == 0:
-                                self.temporal_encoding_fwd = temporal_encoding_fwd
+                                self.pe_fwd = pe_fwd
                         else:
-                            lm_logits_fwd_cur = None
+                            logits_fwd_cur = None
 
                     else:
-                        lm_logits_bwd_cur = tf.boolean_mask(lm_logits_bwd_src[l], lm_mask_bool_cur)
-                        lm_logits_fwd_cur = tf.boolean_mask(lm_logits_fwd_src[l], lm_mask_bool_cur)
+                        logits_bwd_cur = tf.boolean_mask(logits_bwd_src[l], mask_cur)
+                        logits_fwd_cur = tf.boolean_mask(logits_fwd_src[l], mask_cur)
 
-                    lm_targets_unnormalized_bwd_cur = lm_targets_bwd_cur
-                    lm_targets_unnormalized_fwd_cur = lm_targets_fwd_cur
+                    targets_unnormalized_bwd_cur = targets_bwd_cur
+                    targets_unnormalized_fwd_cur = targets_fwd_cur
                     if self.l2_normalize_targets and self._lm_distance_func(l) in ['mse', 'cosine', 'arc']:
-                        lm_logits_bwd_cur = tf.nn.l2_normalize(lm_logits_bwd_cur, axis=-1, epsilon=self.epsilon)
-                        lm_norm_bwd_cur = tf.norm(lm_targets_bwd_cur, axis=-1, keepdims=True)
-                        lm_targets_bwd_cur = tf.nn.l2_normalize(lm_targets_bwd_cur, axis=-1, epsilon=self.epsilon)
-                        lm_logits_unnormalized_bwd_cur = lm_logits_bwd_cur * lm_norm_bwd_cur
+                        if self.lm_order_bwd:
+                            logits_bwd_cur = tf.nn.l2_normalize(logits_bwd_cur, axis=-1, epsilon=self.epsilon)
+                            norm_bwd_cur = tf.norm(targets_bwd_cur, axis=-1, keepdims=True)
+                            targets_bwd_cur = tf.nn.l2_normalize(targets_bwd_cur, axis=-1, epsilon=self.epsilon)
+                            logits_unnormalized_bwd_cur = logits_bwd_cur * norm_bwd_cur
+                        else:
+                            norm_bwd_cur = None
+                            logits_unnormalized_bwd_cur = None
 
-                        lm_logits_fwd_cur = tf.nn.l2_normalize(lm_logits_fwd_cur, axis=-1, epsilon=self.epsilon)
-                        lm_norm_fwd_cur = tf.norm(lm_targets_fwd_cur, axis=-1, keepdims=True)
-                        lm_targets_fwd_cur = tf.nn.l2_normalize(lm_targets_fwd_cur, axis=-1, epsilon=self.epsilon)
-                        lm_logits_unnormalized_fwd_cur = lm_logits_fwd_cur * lm_norm_fwd_cur
+                        if self.lm_order_fwd:
+                            logits_fwd_cur = tf.nn.l2_normalize(logits_fwd_cur, axis=-1, epsilon=self.epsilon)
+                            norm_fwd_cur = tf.norm(targets_fwd_cur, axis=-1, keepdims=True)
+                            targets_fwd_cur = tf.nn.l2_normalize(targets_fwd_cur, axis=-1, epsilon=self.epsilon)
+                            logits_unnormalized_fwd_cur = logits_fwd_cur * norm_fwd_cur
+                        else:
+                            norm_fwd_cur = None
+                            logits_unnormalized_fwd_cur = None
                     else:
-                        lm_norm_bwd_cur = None
-                        lm_norm_fwd_cur = None
-                        lm_logits_unnormalized_bwd_cur = lm_logits_bwd_cur
-                        lm_logits_unnormalized_fwd_cur = lm_logits_fwd_cur
+                        norm_bwd_cur = None
+                        norm_fwd_cur = None
+                        logits_unnormalized_bwd_cur = logits_bwd_cur
+                        logits_unnormalized_fwd_cur = logits_fwd_cur
 
                     # Construct plotting tensors
-                    lm_mask_plot = lm_mask_bool_cur
-                    scatter_ix = tf.cast(tf.where(lm_mask_plot), dtype=self.INT_TF)
+                    mask_plot = mask_cur
+                    scatter_ix = tf.cast(tf.where(mask_plot), dtype=self.INT_TF)
 
-                    lm_plot_targs_bwd_cur = lm_targets_bwd_cur
-                    lm_plot_targs_fwd_cur = lm_targets_fwd_cur
-                    lm_plot_preds_bwd_cur = lm_logits_bwd_cur
-                    lm_plot_preds_fwd_cur = lm_logits_fwd_cur
+                    plot_targs_bwd_cur = targets_bwd_cur
+                    plot_targs_fwd_cur = targets_fwd_cur
+                    plot_preds_bwd_cur = logits_bwd_cur
+                    plot_preds_fwd_cur = logits_fwd_cur
 
-                    if l == 0 and self.data_type.lower():
-                        if lm_plot_preds_fwd_cur is not None:
-                            lm_plot_preds_fwd_cur = tf.nn.softmax(lm_plot_preds_fwd_cur)
-                        if lm_plot_preds_bwd_cur is not None:
-                            lm_plot_preds_bwd_cur = tf.nn.softmax(lm_plot_preds_bwd_cur)
+                    if l == 0 and self.data_type.lower() == 'text':
+                        if plot_preds_fwd_cur is not None:
+                            plot_preds_fwd_cur = tf.nn.softmax(plot_preds_fwd_cur)
+                        if plot_preds_bwd_cur is not None:
+                            plot_preds_bwd_cur = tf.nn.softmax(plot_preds_bwd_cur)
                     elif l > 0 and self.encoder_state_discretizer:
-                        if lm_plot_preds_fwd_cur is not None:
-                            lm_plot_preds_fwd_cur = tf.sigmoid(lm_plot_preds_fwd_cur)
-                        if lm_plot_preds_bwd_cur is not None:
-                            lm_plot_preds_bwd_cur = tf.sigmoid(lm_plot_preds_bwd_cur)
+                        if plot_preds_fwd_cur is not None:
+                            plot_preds_fwd_cur = tf.sigmoid(plot_preds_fwd_cur)
+                        if plot_preds_bwd_cur is not None:
+                            plot_preds_bwd_cur = tf.sigmoid(plot_preds_bwd_cur)
 
-                    lm_plot_weights_bwd_cur = lm_weights_bwd_cur[..., None]
-                    lm_plot_weights_fwd_cur = lm_weights_fwd_cur[..., None]
-                    lm_plot_targs_bwd_cur *= lm_plot_weights_bwd_cur
-                    lm_plot_targs_fwd_cur *= lm_plot_weights_fwd_cur
-                    lm_plot_preds_bwd_cur *= lm_plot_weights_bwd_cur
-                    lm_plot_preds_fwd_cur *= lm_plot_weights_fwd_cur
+                    if self.lm_order_bwd:
+                        plot_weights_bwd_cur = weights_bwd_cur[..., None]
+                        plot_targs_bwd_cur *= plot_weights_bwd_cur
+                        plot_preds_bwd_cur *= plot_weights_bwd_cur
+
+                    if self.lm_order_fwd:
+                        plot_weights_fwd_cur = weights_fwd_cur[..., None]
+                        plot_targs_fwd_cur *= plot_weights_fwd_cur
+                        plot_preds_fwd_cur *= plot_weights_fwd_cur
 
                     if initialize_decoder:
-                        if self.lm_order_bwd > 0:
-                            lm_plot_preds_bwd_cur = tf.scatter_nd(
+                        if self.lm_order_bwd:
+                            plot_preds_bwd_cur = tf.scatter_nd(
                                 scatter_ix,
-                                lm_plot_preds_bwd_cur,
+                                plot_preds_bwd_cur,
                                 [tf.shape(self.inputs)[0], tf.shape(self.inputs)[1], self.lm_order_bwd,
-                                 tf.shape(lm_plot_preds_bwd_cur)[2]]
+                                 tf.shape(plot_preds_bwd_cur)[2]]
                             )
-                            lm_plot_targs_bwd_cur = tf.scatter_nd(
+                            plot_targs_bwd_cur = tf.scatter_nd(
                                 scatter_ix,
-                                lm_plot_targs_bwd_cur,
+                                plot_targs_bwd_cur,
                                 [tf.shape(self.inputs)[0], tf.shape(self.inputs)[1], self.lm_order_bwd,
-                                 tf.shape(lm_plot_targs_bwd_cur)[2]]
+                                 tf.shape(plot_targs_bwd_cur)[2]]
                             )
 
-                        if self.lm_order_fwd > 0:
-                            lm_plot_preds_fwd_cur = tf.scatter_nd(
+                        if self.lm_order_fwd:
+                            plot_preds_fwd_cur = tf.scatter_nd(
                                 scatter_ix,
-                                lm_plot_preds_fwd_cur,
+                                plot_preds_fwd_cur,
                                 [tf.shape(self.inputs)[0], tf.shape(self.inputs)[1], self.lm_order_fwd,
-                                 tf.shape(lm_plot_preds_fwd_cur)[2]]
+                                 tf.shape(plot_preds_fwd_cur)[2]]
                             )
-                            lm_plot_targs_fwd_cur = tf.scatter_nd(
+                            plot_targs_fwd_cur = tf.scatter_nd(
                                 scatter_ix,
-                                lm_plot_targs_fwd_cur,
+                                plot_targs_fwd_cur,
                                 [tf.shape(self.inputs)[0], tf.shape(self.inputs)[1], self.lm_order_fwd,
-                                 tf.shape(lm_plot_targs_fwd_cur)[2]]
+                                 tf.shape(plot_targs_fwd_cur)[2]]
                             )
 
                     if self.plot_position_anchor.lower() == 'input':
-                        lm_plot_preds_bwd_cur = lm_plot_preds_bwd_cur[:, ppx_bwd, ...]
-                        lm_plot_targs_bwd_cur = lm_plot_targs_bwd_cur[:, ppx_bwd, ...]
-                        lm_plot_preds_fwd_cur = lm_plot_preds_fwd_cur[:, ppx_fwd, ...]
-                        lm_plot_targs_fwd_cur = lm_plot_targs_fwd_cur[:, ppx_fwd, ...]
+                        if self.lm_order_bwd:
+                            plot_preds_bwd_cur = plot_preds_bwd_cur[:, ppx_bwd, ...]
+                            plot_targs_bwd_cur = plot_targs_bwd_cur[:, ppx_bwd, ...]
+                        if self.lm_order_bwd:
+                            plot_preds_fwd_cur = plot_preds_fwd_cur[:, ppx_fwd, ...]
+                            plot_targs_fwd_cur = plot_targs_fwd_cur[:, ppx_fwd, ...]
                     else:  # self.plot_position_anchor.lower() == 'output'
-                        lm_plot_preds_bwd_cur = lm_plot_preds_bwd_cur[..., ppx_bwd, :]
-                        lm_plot_targs_bwd_cur = lm_plot_targs_bwd_cur[..., ppx_bwd, :]
-                        lm_plot_preds_fwd_cur = lm_plot_preds_fwd_cur[..., ppx_fwd, :]
-                        lm_plot_targs_fwd_cur = lm_plot_targs_fwd_cur[..., ppx_fwd, :]
+                        if self.lm_order_bwd:
+                            plot_preds_bwd_cur = plot_preds_bwd_cur[..., ppx_bwd, :]
+                            plot_targs_bwd_cur = plot_targs_bwd_cur[..., ppx_bwd, :]
+                        if self.lm_order_fwd:
+                            plot_preds_fwd_cur = plot_preds_fwd_cur[..., ppx_fwd, :]
+                            plot_targs_fwd_cur = plot_targs_fwd_cur[..., ppx_fwd, :]
 
-                    lm_targets_bwd.append(lm_targets_bwd_cur)
-                    lm_targets_fwd.append(lm_targets_fwd_cur)
-                    lm_logits_bwd.append(lm_logits_bwd_cur)
-                    lm_logits_fwd.append(lm_logits_fwd_cur)
-                    lm_norm_bwd.append(lm_norm_bwd_cur)
-                    lm_norm_fwd.append(lm_norm_fwd_cur)
-                    lm_targets_unnormalized_bwd.append(lm_targets_unnormalized_bwd_cur)
-                    lm_targets_unnormalized_fwd.append(lm_targets_unnormalized_fwd_cur)
-                    lm_logits_unnormalized_bwd.append(lm_logits_unnormalized_bwd_cur)
-                    lm_logits_unnormalized_fwd.append(lm_logits_unnormalized_fwd_cur)
-                    lm_weights_bwd.append(lm_weights_bwd_cur)
-                    lm_weights_fwd.append(lm_weights_fwd_cur)
-                    lm_plot_preds_bwd.append(lm_plot_preds_bwd_cur)
-                    lm_plot_preds_fwd.append(lm_plot_preds_fwd_cur)
-                    lm_plot_targs_bwd.append(lm_plot_targs_bwd_cur)
-                    lm_plot_targs_fwd.append(lm_plot_targs_fwd_cur)
+                    targets_bwd.append(targets_bwd_cur)
+                    targets_fwd.append(targets_fwd_cur)
+                    logits_bwd.append(logits_bwd_cur)
+                    logits_fwd.append(logits_fwd_cur)
+                    norm_bwd.append(norm_bwd_cur)
+                    norm_fwd.append(norm_fwd_cur)
+                    targets_unnormalized_bwd.append(targets_unnormalized_bwd_cur)
+                    targets_unnormalized_fwd.append(targets_unnormalized_fwd_cur)
+                    logits_unnormalized_bwd.append(logits_unnormalized_bwd_cur)
+                    logits_unnormalized_fwd.append(logits_unnormalized_fwd_cur)
+                    weights_bwd.append(weights_bwd_cur)
+                    weights_fwd.append(weights_fwd_cur)
+                    plot_preds_bwd.append(plot_preds_bwd_cur)
+                    plot_preds_fwd.append(plot_preds_fwd_cur)
+                    plot_targs_bwd.append(plot_targs_bwd_cur)
+                    plot_targs_fwd.append(plot_targs_fwd_cur)
 
-                self.lm_logits_bwd = lm_logits_bwd
-                self.lm_logits_fwd = lm_logits_fwd
-                self.lm_targets_bwd = lm_targets_bwd
-                self.lm_targets_fwd = lm_targets_fwd
-                self.lm_norm_bwd = lm_norm_bwd
-                self.lm_norm_fwd = lm_norm_fwd
-                self.lm_targets_unnormalized_bwd = lm_targets_unnormalized_bwd
-                self.lm_targets_unnormalized_fwd = lm_targets_unnormalized_fwd
-                self.lm_logits_unnormalized_bwd = lm_logits_unnormalized_bwd
-                self.lm_logits_unnormalized_fwd = lm_logits_unnormalized_fwd
-                self.lm_weights_bwd = lm_weights_bwd
-                self.lm_weights_fwd = lm_weights_fwd
-                self.lm_plot_preds_bwd = lm_plot_preds_bwd
-                self.lm_plot_preds_fwd = lm_plot_preds_fwd
-                self.lm_plot_targs_bwd = lm_plot_targs_bwd
-                self.lm_plot_targs_fwd = lm_plot_targs_fwd
+                self.lm_logits_bwd = logits_bwd
+                self.lm_logits_fwd = logits_fwd
+                self.lm_targets_bwd = targets_bwd
+                self.lm_targets_fwd = targets_fwd
+                self.lm_norm_bwd = norm_bwd
+                self.lm_norm_fwd = norm_fwd
+                self.lm_targets_unnormalized_bwd = targets_unnormalized_bwd
+                self.lm_targets_unnormalized_fwd = targets_unnormalized_fwd
+                self.lm_logits_unnormalized_bwd = logits_unnormalized_bwd
+                self.lm_logits_unnormalized_fwd = logits_unnormalized_fwd
+                self.lm_weights_bwd = weights_bwd
+                self.lm_weights_fwd = weights_fwd
+                self.lm_plot_preds_bwd = plot_preds_bwd
+                self.lm_plot_preds_fwd = plot_preds_fwd
+                self.lm_plot_targs_bwd = plot_targs_bwd
+                self.lm_plot_targs_fwd = plot_targs_fwd
 
     def _initialize_lm_masked_neighbors_old(self):
         with self.sess.as_default():
@@ -1697,6 +1790,7 @@ class AcousticEncoderDecoder(object):
 
                     if i > 0 and self.decoder_resnet_n_layers_inner:
                         if self.decoder_type.lower() == 'rnn':
+                            # Possible to-do: implement this using a MaskedLSTMCell
                             decoder = RNNResidualLayer(
                                 training=self.training,
                                 units=units_cur,
@@ -1749,7 +1843,9 @@ class AcousticEncoderDecoder(object):
 
                     else:
                         if self.decoder_type.lower() == 'rnn':
-                            decoder = RNNLayer(
+                            # RNN = MaskedLSTMLayer
+                            RNN = RNNLayer
+                            decoder = RNN(
                                 training=self.training,
                                 units=units_cur,
                                 activation=self.decoder_inner_activation,
@@ -4668,33 +4764,33 @@ class AcousticEncoderDecoder(object):
                 if not self.streaming or self.predict_backward:
                     to_run.append(self.reconstructions)
                     to_run_names.append('preds_bwd')
-                    if plot_temporal_encodings and self.temporal_encoding_bwd is not None:
-                        to_run.append(self.temporal_encoding_bwd)
+                    if plot_temporal_encodings and self.pe_bwd is not None:
+                        to_run.append(self.pe_bwd)
                         to_run_names.append('pe_bwd')
                 if self.streaming and self.predict_forward:
                     to_run.append(self.extrapolations)
                     to_run_names.append('preds_fwd')
-                    if plot_temporal_encodings and self.temporal_encoding_fwd is not None:
-                        to_run.append(self.temporal_encoding_fwd)
+                    if plot_temporal_encodings and self.pe_fwd is not None:
+                        to_run.append(self.pe_fwd)
                         to_run_names.append('pe_fwd')
                 if self.streaming and not self.predict_backward and not self.predict_forward and self.lm_loss_scale:
-                    if self.lm_plot_preds_bwd is not None:
+                    if self.lm_order_bwd:
                         to_run.append(self.lm_plot_preds_bwd)
                         to_run_names.append('preds_bwd')
                         to_run.append(self.lm_plot_targs_bwd)
                         to_run_names.append('targs_bwd')
                         targs_bwd = None
-                        if plot_temporal_encodings and self.temporal_encoding_bwd is not None:
-                            to_run.append(self.temporal_encoding_bwd)
+                        if plot_temporal_encodings and self.pe_bwd is not None:
+                            to_run.append(self.pe_bwd)
                             to_run_names.append('pe_bwd')
-                    if self.lm_plot_preds_fwd is not None:
+                    if self.lm_order_fwd:
                         to_run.append(self.lm_plot_preds_fwd)
                         to_run_names.append('preds_fwd')
                         to_run.append(self.lm_plot_targs_fwd)
                         to_run_names.append('targs_fwd')
                         targs_fwd = None
-                        if plot_temporal_encodings and self.temporal_encoding_fwd is not None:
-                            to_run.append(self.temporal_encoding_fwd)
+                        if plot_temporal_encodings and self.pe_fwd is not None:
+                            to_run.append(self.pe_fwd)
                             to_run_names.append('pe_fwd')
 
                 if seg:
@@ -5468,7 +5564,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                         for l in range(self.n_layers_encoder - 1, -1, -1):
                             lm_losses = 0
 
-                            if self.lm_targets_bwd[l] is not None:
+                            if self.lm_targets_bwd[l] is not None and self.lm_order_bwd:
                                 lm_losses += self._get_loss(
                                     self.lm_targets_bwd[l],
                                     self.lm_logits_bwd[l],
@@ -5479,7 +5575,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                     name='lm_bwd_loss_L%d' % l
                                 ) * self.lm_loss_scale[l]
 
-                            if self.lm_targets_fwd[l] is not None:
+                            if self.lm_targets_fwd[l] is not None and self.lm_order_fwd:
                                 lm_losses += self._get_loss(
                                     self.lm_targets_fwd[l],
                                     self.lm_logits_fwd[l],
