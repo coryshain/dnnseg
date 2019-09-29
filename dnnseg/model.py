@@ -1234,7 +1234,7 @@ class AcousticEncoderDecoder(object):
                 self.lm_plot_preds_fwd = encoder_lm_preds_fwd
                 self.lm_plot_preds_bwd = encoder_lm_preds_bwd
 
-    def _initialize_lm_masked_neighbors(self, initialize_decoder=True, predict_at_boundaries=True, use_attn=False, backprop_into_weights=False):
+    def _initialize_lm_masked_neighbors(self, initialize_decoder=True, predict_at_boundaries=True, use_attn=False):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if not initialize_decoder:
@@ -1276,17 +1276,17 @@ class AcousticEncoderDecoder(object):
 
                 for l in range(self.n_layers_encoder):
                     if l == 0:
-                        mask_cur = self.X_mask
-                        weights_cur = mask_cur
+                        weights_cur = self.X_mask
+                        mask_cur = weights_cur
                         weights_bool_cur = weights_cur
                         targets_cur = self.X
                     else:
                         if self.lm_drop_masked:
-                            mask_cur = self.encoder_segmentations[l - 1]
-                            weights_cur = mask_cur
-                        else:
-                            mask_cur = self.X_mask
                             weights_cur = self.encoder_segmentations[l - 1]
+                            mask_cur = tf.cast(weights_cur > 0.5, dtype=self.FLOAT_TF)
+                        else:
+                            weights_cur = self.encoder_segmentations[l - 1]
+                            mask_cur = self.X_mask
                         weights_bool_cur = weights_cur > 0.5
 
                         targets_cur = self.encoder_hidden_states[l - 1]
@@ -1298,7 +1298,7 @@ class AcousticEncoderDecoder(object):
                     if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
                         targets_cur = tf.round(targets_cur)
 
-                    if not backprop_into_weights:
+                    if not self.backprop_into_loss_weights:
                         weights_cur = tf.stop_gradient(weights_cur)
 
                     targets_bwd_cur, weights_bwd_cur, targets_fwd_cur, weights_fwd_cur = mask_and_lag(
@@ -1843,8 +1843,10 @@ class AcousticEncoderDecoder(object):
 
                     else:
                         if self.decoder_type.lower() == 'rnn':
-                            # RNN = MaskedLSTMLayer
-                            RNN = RNNLayer
+                            if self.lm_drop_masked:
+                                RNN = RNNLayer
+                            else:
+                                RNN = MaskedLSTMLayer
                             decoder = RNN(
                                 training=self.training,
                                 units=units_cur,

@@ -1069,9 +1069,15 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'backprop_into_targets',
-        True,
+        False,
         bool,
         "Whether to backprop into prediction targets."
+    ),
+    Kwarg(
+        'backprop_into_loss_weights',
+        False,
+        bool,
+        "Whether to backprop into weight mask on losses (matters in ``masked_neighbor`` setting for LM loss)."
     ),
     Kwarg(
         'xent_state_predictions',
