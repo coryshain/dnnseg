@@ -94,6 +94,9 @@ if __name__ == '__main__':
     argparser.add_argument('-O', '--results_outdir', default='../results/dnnseg', help='Path to directory in which to save models.')
 
     args = argparser.parse_args()
+    
+    os.makedirs(args.ini_outdir)
+    os.makedirs(args.results_outdir)
 
     with open(args.search_params_path, 'r') as f:
         yml = yaml.load(f)

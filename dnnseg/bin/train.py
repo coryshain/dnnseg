@@ -159,7 +159,6 @@ if __name__ == '__main__':
             kwargs[kwarg.key] = p[kwarg.key]
 
         dnnseg_model = AcousticEncoderDecoderMLE(
-            p['k'],
             train_data,
             **kwargs
         )

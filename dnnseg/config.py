@@ -60,7 +60,6 @@ class Config(object):
         out['network_type'] = settings.get('network_type', 'bayes')
 
         # Parent class initialization keyword arguments
-        out['k'] = settings.getint('k', 128)
         out['outdir'] = self.outdir
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
             out[kwarg.key] = kwarg.kwarg_from_config(settings)

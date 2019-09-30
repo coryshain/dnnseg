@@ -1460,6 +1460,13 @@ class HMLSTMCell(LayerRNNCell):
                     if self._revnet_n_layers:
                         h_below = self._revnet[l].forward(h_below)
 
+                    if self._bottomup_noise_sd:
+                        h_below = tf.cond(
+                            self._training,
+                            lambda: h_below + tf.random_normal(shape=tf.shape(h_below), stddev=self._bottomup_noise_sd),
+                            lambda: h_below
+                        )
+
                     # z_behind: Previous boundary probability at current layer (implicitly 1 if final layer)
                     if l < self._num_layers - 1:
                         z_behind = layer.z
@@ -1503,6 +1510,12 @@ class HMLSTMCell(LayerRNNCell):
                     h_behind = layer.h
                     if not self._bptt:
                         h_behind = tf.stop_gradient(h_behind)
+                    if self._recurrent_noise_sd:
+                        h_behind = tf.cond(
+                            self._training,
+                            lambda: h_behind + tf.random_normal(shape=tf.shape(h_behind), stddev=self._recurrent_noise_sd),
+                            lambda: h_behind
+                        )
                     h_behind = self._recurrent_dropout(h_behind)
 
                     # h_above: Hidden state of layer above at previous timestep (implicitly 0 if final layer)
@@ -1510,6 +1523,12 @@ class HMLSTMCell(LayerRNNCell):
                         h_above = state[l + 1].h
                         if not self._bptt:
                             h_above = tf.stop_gradient(h_above)
+                        if self._topdown_noise_sd:
+                            h_above = tf.cond(
+                                self._training,
+                                lambda: h_above + tf.random_normal(shape=tf.shape(h_above), stddev=self._topdown_noise_sd),
+                                lambda: h_above
+                            )
                         h_above = self._topdown_dropout(h_above)
                     else:
                         h_above = None
@@ -1551,12 +1570,6 @@ class HMLSTMCell(LayerRNNCell):
                     h_below = self._bottomup_dropout(h_below)
 
                     s_bottomup = self._kernel_bottomup[l](h_below)
-                    if self._bottomup_noise_sd:
-                        s_bottomup = tf.cond(
-                            self._training,
-                            lambda: s_bottomup + tf.random_normal(shape=tf.shape(s_bottomup), stddev=self._bottomup_noise_sd),
-                            lambda: s_bottomup
-                        )
                     if l > 0:
                         s_bottomup *= z_below
 
@@ -1579,12 +1592,6 @@ class HMLSTMCell(LayerRNNCell):
 
                     # Recurrent features
                     s_recurrent = self._kernel_recurrent[l](h_behind)
-                    if self._recurrent_noise_sd:
-                        s_recurrent = tf.cond(
-                            self._training,
-                            lambda: s_recurrent + tf.random_normal(shape=tf.shape(s_recurrent), stddev=self._recurrent_noise_sd),
-                            lambda: s_recurrent
-                        )
                     normalizer += 1.
 
                     # Sum bottom-up and recurrent features
@@ -1594,12 +1601,6 @@ class HMLSTMCell(LayerRNNCell):
                     if l < self._num_layers - 1:
                         # Compute top-down features
                         s_topdown = self._kernel_topdown[l](h_above) * z_behind
-                        if self._topdown_noise_sd:
-                            s_topdown = tf.cond(
-                                self._training,
-                                lambda: s_topdown + tf.random_normal(shape=tf.shape(s_topdown), stddev=self._topdown_noise_sd),
-                                lambda: s_topdown
-                            )
                         normalizer += z_behind
                         # Add in top-down features
                         s = s + s_topdown

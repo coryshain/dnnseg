@@ -55,9 +55,8 @@ class AcousticEncoderDecoder(object):
             raise TypeError("UnsupervisedWordClassifier is an abstract class and may not be instantiated")
         return object.__new__(cls)
 
-    def __init__(self, k, train_data, **kwargs):
+    def __init__(self, train_data, **kwargs):
 
-        self.k = k
         for kwarg in AcousticEncoderDecoder._INITIALIZATION_KWARGS:
             setattr(self, kwarg.key, kwargs.pop(kwarg.key, kwarg.default_value))
         if self.speaker_emb_dim:
@@ -96,25 +95,32 @@ class AcousticEncoderDecoder(object):
         self.use_dtw = self.dtw_gamma is not None
         self.regularizer_map = {}
 
-        if self.n_units_encoder is None:
-            self.units_encoder = [self.k] * (self.n_layers_encoder - 1)
-        elif isinstance(self.n_units_encoder, str):
+        if self.n_layers_encoder is None:
+            if isinstance(self.n_units_encoder, list):
+                self.layers_encoder = len(self.n_units_encoder)
+            else:
+                self.layers_encoder
+        else:
+            self.layers_encoder = self.n_layers_encoder
+
+        assert not self.n_units_encoder is None, 'You must provide a value for **n_units_encoder** when initializing a DNNSeg model.'
+        if isinstance(self.n_units_encoder, str):
             self.units_encoder = [int(x) for x in self.n_units_encoder.split()]
             if len(self.units_encoder) == 1:
-                self.units_encoder = [self.units_encoder[0]] * (self.n_layers_encoder - 1)
+                self.units_encoder = [self.units_encoder[0]] * (self.layers_encoder - 1)
         elif isinstance(self.n_units_encoder, int):
-            self.units_encoder = [self.n_units_encoder] * (self.n_layers_encoder - 1)
+            self.units_encoder = [self.n_units_encoder] * (self.layers_encoder - 1)
         else:
             self.units_encoder = self.n_units_encoder
-        assert len(self.units_encoder) == (self.n_layers_encoder - 1), 'Misalignment in number of layers between n_layers_encoder and n_units_encoder.'
+        assert len(self.units_encoder) == (self.layers_encoder - 1), 'Misalignment in number of layers between n_layers_encoder and n_units_encoder.'
 
         if self.decoder_concatenate_hidden_states:
-            self.encoding_n_dims = sum(self.units_encoder) + self.k
+            self.encoding_n_dims = sum(self.units_encoder) + self.units_encoder[-1]
         else:
-            self.encoding_n_dims = self.k
+            self.encoding_n_dims = self.units_encoder[-1]
 
         if self.n_units_decoder is None:
-            self.units_decoder = [self.k] * self.n_layers_decoder
+            self.units_decoder = [self.units_encoder[-1]] * self.n_layers_decoder
         elif isinstance(self.n_units_decoder, str):
             self.units_decoder = [int(x) for x in self.n_units_decoder.split()]
             if len(self.units_decoder) == 1:
@@ -127,7 +133,7 @@ class AcousticEncoderDecoder(object):
 
         if self.segment_encoding_correspondence_regularizer_scale and \
                 self.encoder_type.lower() in ['cnn_hmlstm' ,'hmlstm'] and \
-                self.n_layers_encoder == self.n_layers_decoder and \
+                self.layers_encoder == self.n_layers_decoder and \
                 self.units_encoder == self.units_decoder[::-1]:
             self.regularize_correspondences = True
         else:
@@ -195,12 +201,12 @@ class AcousticEncoderDecoder(object):
             if isinstance(self.lm_loss_scale, str):
                 self.lm_loss_scale = [float(x) for x in self.lm_loss_scale.split()]
                 if len(self.lm_loss_scale) == 1:
-                    self.lm_loss_scale = [self.lm_loss_scale[0]] * self.n_layers_encoder
+                    self.lm_loss_scale = [self.lm_loss_scale[0]] * self.layers_encoder
             elif isinstance(self.lm_loss_scale, float):
-                self.lm_loss_scale = [self.lm_loss_scale] * self.n_layers_encoder
+                self.lm_loss_scale = [self.lm_loss_scale] * self.layers_encoder
             else:
                 self.lm_loss_scale = self.lm_loss_scale
-        assert len(self.lm_loss_scale) == self.n_layers_encoder, 'Misalignment in number of layers between lm_loss_scale and n_units_encoder.'
+        assert len(self.lm_loss_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_loss_scale and n_units_encoder.'
 
         self.update_mode = 'all'
 
@@ -269,7 +275,6 @@ class AcousticEncoderDecoder(object):
         else:
             n_train = None
         md = {
-            'k': self.k,
             'speaker_list': self.speaker_list,
             'n_train': n_train
         }
@@ -278,7 +283,6 @@ class AcousticEncoderDecoder(object):
         return md
 
     def _unpack_metadata(self, md):
-        self.k = md.pop('k')
         self.speaker_list = md.pop('speaker_list', [])
         self.n_train = md.pop('n_train', None)
         for kwarg in AcousticEncoderDecoder._INITIALIZATION_KWARGS:
@@ -478,7 +482,7 @@ class AcousticEncoderDecoder(object):
                 if self.oracle_boundaries:
                     self.oracle_boundaries_placeholder = tf.placeholder(
                         self.FLOAT_TF,
-                        shape=(None, self.n_timesteps_input, self.n_layers_encoder - 1),
+                        shape=(None, self.n_timesteps_input, self.layers_encoder - 1),
                         name='oracle_boundaries'
                     )
 
@@ -520,19 +524,19 @@ class AcousticEncoderDecoder(object):
                     self.loss_prediction_summary = tf.placeholder(tf.float32, name='loss_prediction_summary_placeholder')
                 if self.lm_loss_scale:
                     self.encoder_lm_loss_summary = []
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
                         self.encoder_lm_loss_summary.append(
                             tf.placeholder(tf.float32, name='encoder_lm_loss_%d_summary_placeholder' % (l+1))
                         )
                 if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
                     self.encoder_speaker_adversarial_loss_summary = []
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
                         self.encoder_speaker_adversarial_loss_summary.append(
                             tf.placeholder(tf.float32, name='encoder_speaker_adversarial_loss_%d_summary_placeholder' % (l + 1))
                         )
                 if self.passthru_adversarial_loss_scale and self.n_passthru_neurons:
                     self.encoder_passthru_adversarial_loss_summary = []
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
                         self.encoder_passthru_adversarial_loss_summary.append(
                             tf.placeholder(tf.float32, name='encoder_passthru_adversarial_loss_%d_summary_placeholder' % (l + 1))
                         )
@@ -542,7 +546,7 @@ class AcousticEncoderDecoder(object):
                 if self.task.lower() == 'classifier':
                     n_layers = 1
                 else:
-                    n_layers = self.n_layers_encoder - 1
+                    n_layers = self.layers_encoder - 1
                 for l in range(n_layers):
                     self.classification_scores.append(
                         {
@@ -581,7 +585,7 @@ class AcousticEncoderDecoder(object):
 
                 if 'hmlstm' in self.encoder_type.lower():
                     self.segmentation_scores = []
-                    for l in range(self.n_layers_encoder - 1):
+                    for l in range(self.layers_encoder - 1):
                         self.segmentation_scores.append({'phn': {}, 'wrd': {}})
                         for s in ['phn', 'wrd']:
                             self.segmentation_scores[-1][s] = {
@@ -608,7 +612,7 @@ class AcousticEncoderDecoder(object):
                             self.correspondence_speaker_placeholders = []
                             self.correspondence_speaker_embeddings = []
 
-                    for l in range(self.n_layers_encoder - 1):
+                    for l in range(self.layers_encoder - 1):
                         self.correspondence_loss_summary.append(
                             tf.placeholder(tf.float32, name='correspondence_loss_%d_summary_placeholder' % (l + 1))
                         )
@@ -690,7 +694,7 @@ class AcousticEncoderDecoder(object):
                         training=self.training
                     )
 
-                units_utt = self.k
+                units_utt = self.units_encoder[-1]
                 if self.emb_dim:
                     units_utt += self.emb_dim
 
@@ -739,7 +743,7 @@ class AcousticEncoderDecoder(object):
                         boundaries = self.oracle_boundaries_placeholder
                     elif self.encoder_force_vad_boundaries:
                         boundaries = self.fixed_boundaries_placeholder[..., None]
-                        boundaries = tf.tile(boundaries, [1,1,self.n_layers_encoder-1])
+                        boundaries = tf.tile(boundaries, [1,1,self.layers_encoder-1])
                     else:
                         boundaries = None
 
@@ -758,7 +762,7 @@ class AcousticEncoderDecoder(object):
 
                     self.segmenter = HMLSTMSegmenter(
                         self.units_encoder + [units_utt],
-                        self.n_layers_encoder,
+                        self.layers_encoder,
                         training=self.training,
                         kernel_depth=self.hmlstm_kernel_depth,
                         prefinal_mode=self.hmlstm_prefinal_mode,
@@ -887,7 +891,7 @@ class AcousticEncoderDecoder(object):
                         encoder_hidden_states = []
                         for l in range(len(self.encoder_hidden_states)):
                             encoder_hidden_states_cur = self.encoder_hidden_states[l]
-                            if l < self.n_layers_encoder - 1 or self.encoder_discretize_final:
+                            if l < self.layers_encoder - 1 or self.encoder_discretize_final:
                                 encoder_hidden_states_cur = (encoder_hidden_states_cur + 1) / 2
                                 encoder_hidden_states_cur *= self.X_mask[..., None]
                             encoder_hidden_states.append(encoder_hidden_states_cur)
@@ -897,7 +901,7 @@ class AcousticEncoderDecoder(object):
                     self.encoder_cell_states = self.segmenter_output.cell(mask=self.X_mask)
                     self.encoder_cell_proposals = self.segmenter_output.cell_proposals(mask=self.X_mask)
 
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
                         self._add_regularization(self.encoder_hidden_states[l], self.encoder_state_regularizer)
                         self._add_regularization(self.encoder_cell_proposals[l], self.encoder_cell_proposal_regularizer)
 
@@ -978,7 +982,7 @@ class AcousticEncoderDecoder(object):
                     encoder = MultiRNNLayer(
                         training=self.training,
                         units=self.units_encoder + [units_utt],
-                        layers=self.n_layers_encoder,
+                        layers=self.layers_encoder,
                         activation=self.encoder_inner_activation,
                         inner_activation=self.encoder_inner_activation,
                         recurrent_activation=self.encoder_recurrent_activation,
@@ -1007,7 +1011,7 @@ class AcousticEncoderDecoder(object):
                         )
 
                 elif self.encoder_type.lower() == 'cnn':
-                    for i in range(self.n_layers_encoder - 1):
+                    for i in range(self.layers_encoder - 1):
                         if i > 0 and self.encoder_resnet_n_layers_inner:
                             encoder = Conv1DResidualLayer(
                                 self.conv_kernel_size,
@@ -1045,7 +1049,7 @@ class AcousticEncoderDecoder(object):
                 elif self.encoder_type.lower() == 'dense':
                     encoder = tf.layers.Flatten()(encoder)
 
-                    for i in range(self.n_layers_encoder - 1):
+                    for i in range(self.layers_encoder - 1):
                         if i > 0 and self.encoder_resnet_n_layers_inner:
                             encoder = DenseResidualLayer(
                                 training=self.training,
@@ -1073,7 +1077,7 @@ class AcousticEncoderDecoder(object):
                         activation=self.encoder_activation,
                         batch_normalization_decay=encoding_batch_normalization_decay,
                         session=self.sess,
-                        name='DenseEncoder_l%d' % self.n_layers_encoder
+                        name='DenseEncoder_l%d' % self.layers_encoder
                     )(encoder)
 
                 else:
@@ -1111,7 +1115,7 @@ class AcousticEncoderDecoder(object):
                 lm_logits_bwd = []
                 lm_logits_fwd = []
 
-                for l in range(self.n_layers_encoder):
+                for l in range(self.layers_encoder):
                     lm_logits_cur = lm_logits[l]
 
                     if l == 0:
@@ -1147,7 +1151,7 @@ class AcousticEncoderDecoder(object):
                 lm_targets_fwd = []
                 lm_weights_bwd = []
                 lm_weights_fwd = []
-                for l in range(self.n_layers_encoder):
+                for l in range(self.layers_encoder):
                     distance_func = self._lm_distance_func(l)
 
                     if l == 0:
@@ -1274,20 +1278,22 @@ class AcousticEncoderDecoder(object):
                 if isinstance(ppx_fwd, str) and ppx_fwd.lower() == 'mid':
                     ppx_fwd = n_fwd // 2
 
-                for l in range(self.n_layers_encoder):
+                for l in range(self.layers_encoder):
                     if l == 0:
                         weights_cur = self.X_mask
                         mask_cur = weights_cur
                         weights_bool_cur = weights_cur
                         targets_cur = self.X
                     else:
-                        if self.lm_drop_masked:
-                            weights_cur = self.encoder_segmentations[l - 1]
-                            mask_cur = tf.cast(weights_cur > 0.5, dtype=self.FLOAT_TF)
+                        weights_cur = self.encoder_segmentations[l - 1]
+                        if self.backprop_into_loss_weights:
+                            weights_cur = round_straight_through(weights_cur, self.sess)
                         else:
-                            weights_cur = self.encoder_segmentations[l - 1]
+                            weights_cur = tf.cast(weights_cur > 0.5, dtype=self.FLOAT_TF)
+                        if self.lm_drop_masked:
+                            mask_cur = weights_cur
+                        else:
                             mask_cur = self.X_mask
-                        weights_bool_cur = weights_cur > 0.5
 
                         targets_cur = self.encoder_hidden_states[l - 1]
                         if not self.backprop_into_targets:
@@ -1297,9 +1303,6 @@ class AcousticEncoderDecoder(object):
 
                     if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
                         targets_cur = tf.round(targets_cur)
-
-                    if not self.backprop_into_loss_weights:
-                        weights_cur = tf.stop_gradient(weights_cur)
 
                     targets_bwd_cur, weights_bwd_cur, targets_fwd_cur, weights_fwd_cur = mask_and_lag(
                         targets_cur,
@@ -1332,15 +1335,15 @@ class AcousticEncoderDecoder(object):
                     # )
 
                     if predict_at_boundaries and not self.lm_drop_masked:
-                        mask_cur = weights_bool_cur
-                        weights_bool_masked_cur = tf.boolean_mask(weights_bool_cur, mask_cur)
-                        targets_bwd_cur = tf.boolean_mask(targets_bwd_cur, weights_bool_masked_cur)
-                        targets_fwd_cur = tf.boolean_mask(targets_fwd_cur, weights_bool_masked_cur)
-                        weights_bwd_cur = tf.boolean_mask(weights_bwd_cur, weights_bool_masked_cur)
-                        weights_fwd_cur = tf.boolean_mask(weights_fwd_cur, weights_bool_masked_cur)
+                        mask_cur = weights_cur
+                        weights_masked_cur = tf.boolean_mask(weights_cur, mask_cur)
+                        targets_bwd_cur = tf.boolean_mask(targets_bwd_cur, weights_masked_cur)
+                        targets_fwd_cur = tf.boolean_mask(targets_fwd_cur, weights_masked_cur)
+                        weights_bwd_cur = tf.boolean_mask(weights_bwd_cur, weights_masked_cur)
+                        weights_fwd_cur = tf.boolean_mask(weights_fwd_cur, weights_masked_cur)
 
                     if initialize_decoder:
-                        if self.lm_use_upper and l < self.n_layers_encoder - 1:
+                        if self.lm_use_upper and l < self.layers_encoder - 1:
                             if use_attn:
                                 # Only works if all layers are same size.
                                 # Decode using an attention-weighted sum of encoder layers.
@@ -1586,7 +1589,7 @@ class AcousticEncoderDecoder(object):
                 lm_targets_fwd = []
                 lm_weights_bwd = []
                 lm_weights_fwd = []
-                for l in range(self.n_layers_encoder):
+                for l in range(self.layers_encoder):
                     distance_func = self._lm_distance_func(l)
 
                     lm_logits_cur = lm_logits[l]
@@ -1847,6 +1850,7 @@ class AcousticEncoderDecoder(object):
                                 RNN = RNNLayer
                             else:
                                 RNN = MaskedLSTMLayer
+
                             decoder = RNN(
                                 training=self.training,
                                 units=units_cur,
@@ -1993,22 +1997,22 @@ class AcousticEncoderDecoder(object):
                 if self.streaming and self.predict_forward:
                     tf.summary.scalar('objective/prediction_loss', self.loss_prediction_summary, collections=['objective'])
                 if self.correspondence_loss_scale:
-                    for l in range(self.n_layers_encoder - 1):
+                    for l in range(self.layers_encoder - 1):
                         tf.summary.scalar('objective/correspondence_loss_l%d' % (l+1), self.correspondence_loss_summary[l], collections=['objective'])
                 if self.lm_loss_scale:
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
                         tf.summary.scalar('objective/encoder_lm_loss_l%d' % (l+1), self.encoder_lm_loss_summary[l], collections=['objective'])
                 if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
                         tf.summary.scalar('objective/encoder_speaker_adversarial_loss_l%d' % (l+1), self.encoder_speaker_adversarial_loss_summary[l], collections=['objective'])
                 if self.passthru_adversarial_loss_scale and self.n_passthru_neurons:
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
                         tf.summary.scalar('objective/encoder_passthru_adversarial_loss_l%d' % (l+1), self.encoder_passthru_adversarial_loss_summary[l], collections=['objective'])
 
                 if self.task.lower() == 'classifier':
                     n_layers = 1
                 else:
-                    n_layers = self.n_layers_encoder - 1
+                    n_layers = self.layers_encoder - 1
                 if self.task.lower() == 'classifier':
                     segtypes = [self.segtype]
                 elif self.data_type.lower() == 'acoustic':
@@ -2025,7 +2029,7 @@ class AcousticEncoderDecoder(object):
                                 tf.summary.scalar('classification_l%d_%s_%s_%s/fmi' % (l+1, s, g, t), self.classification_scores[l][s][g][t]['fmi'], collections=['classification'])
 
                 if 'hmlstm' in self.encoder_type.lower():
-                    for l in range(self.n_layers_encoder - 1):
+                    for l in range(self.layers_encoder - 1):
                         if self.data_type.lower() == 'acoustic':
                             for s in ['phn', 'wrd']:
                                 tf.summary.scalar('segmentation_l%d_%s/b_p' %(l+1, s), self.segmentation_scores[l][s]['b_p'], collections=['segmentation'])
@@ -2457,7 +2461,7 @@ class AcousticEncoderDecoder(object):
                 else:
                     encoding_batch_normalization_decay = None
 
-                units_utt = self.k
+                units_utt = self.units_encoder[-1]
                 if self.emb_dim:
                     units_utt += self.emb_dim
 
@@ -2917,7 +2921,7 @@ class AcousticEncoderDecoder(object):
             with self.sess.graph.as_default():
                 correspondence_ae_losses = []
 
-                for l in range(self.n_layers_encoder - 1):
+                for l in range(self.layers_encoder - 1):
                     def create_correspondence_ae_loss_fn(implementation=3, n_timesteps=None, alpha=1):
                         def compute_loss_cur():
                             if self.correspondence_live_targets:
@@ -3248,7 +3252,7 @@ class AcousticEncoderDecoder(object):
             eval_dict.update(classifier_scores)
 
             if binary:
-                out_data = pd.DataFrame(encoding, columns=['d%d' % (i+1) for i in range(self.k)])
+                out_data = pd.DataFrame(encoding, columns=['d%d' % (i+1) for i in range(self.units_encoder[-1])])
                 out_data = pd.concat([segments, out_data], axis=1)
             else:
                 out_data = None
@@ -3354,10 +3358,10 @@ class AcousticEncoderDecoder(object):
                         encoding = np.concatenate(encoding, axis=0)
                         encoding_entropy = np.concatenate(encoding_entropy, axis=0).mean()
 
-                    if not self.k:
+                    if not self.units_encoder[-1]:
                         k = 2 ** self.emb_dim
                     else:
-                        k = 2 ** self.k
+                        k = 2 ** self.units_encoder[-1]
 
                     summary, eval_dict = self._evaluate_classifier_inner(
                         labels,
@@ -3906,7 +3910,7 @@ class AcousticEncoderDecoder(object):
                             padding=padding
                         )
 
-                        for l in range(self.n_layers_encoder - 1):
+                        for l in range(self.layers_encoder - 1):
                             pred_seg_embeddings = data.extract_segment_embeddings(pred_tables[l])
                             pred_seg_embeddings.to_csv(self.outdir + '/embeddings_pred_segs_l%d.csv' % l, sep=' ', index=False)
                             true_seg_embeddings = data.extract_segment_embeddings(true_tables[l])
@@ -4124,19 +4128,19 @@ class AcousticEncoderDecoder(object):
                             fd_summary[self.loss_prediction_summary] = prediction_loss
 
                         if correspondence_loss is not None:
-                            for l in range(self.n_layers_encoder - 1):
+                            for l in range(self.layers_encoder - 1):
                                 fd_summary[self.correspondence_loss_summary[l]] = correspondence_loss[l]
 
                         if encoder_lm_losses is not None:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 fd_summary[self.encoder_lm_loss_summary[l]] = encoder_lm_losses[l]
 
                         if encoder_speaker_adversarial_losses is not None:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 fd_summary[self.encoder_speaker_adversarial_loss_summary[l]] = encoder_speaker_adversarial_losses[l]
 
                         if encoder_passthru_adversarial_losses is not None:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 fd_summary[self.encoder_passthru_adversarial_loss_summary[l]] = encoder_passthru_adversarial_losses[l]
 
                         if len(fd_summary) > 0:
@@ -4150,7 +4154,7 @@ class AcousticEncoderDecoder(object):
                             if self.task.lower() == 'classifier':
                                 n_layers = 1
                             else:
-                                n_layers = self.n_layers_encoder - 1
+                                n_layers = self.layers_encoder - 1
                             if self.task.lower() == 'classifier':
                                 segtypes = [self.segtype]
                             elif self.data_type.lower() == 'acoustic':
@@ -4173,7 +4177,7 @@ class AcousticEncoderDecoder(object):
 
                         if 'segmentation_scores' in eval_dict:
                             segmentation_scores = eval_dict['segmentation_scores']
-                            for i in range(self.n_layers_encoder - 1):
+                            for i in range(self.layers_encoder - 1):
                                 if self.data_type.lower() == 'acoustic':
                                     for s in ['phn', 'wrd']:
                                         src = segmentation_scores[i][s]
@@ -4380,13 +4384,13 @@ class AcousticEncoderDecoder(object):
                     if self.streaming and self.predict_forward:
                         prediction_loss_total = 0.
                     if self.correspondence_loss_scale:
-                        correspondence_loss_total = [0.] * (self.n_layers_encoder - 1)
+                        correspondence_loss_total = [0.] * (self.layers_encoder - 1)
                     if self.lm_loss_scale:
-                        encoder_lm_loss_total = [0.] * self.n_layers_encoder
+                        encoder_lm_loss_total = [0.] * self.layers_encoder
                     if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
-                        encoder_speaker_adversarial_loss_total = [0.] * self.n_layers_encoder
+                        encoder_speaker_adversarial_loss_total = [0.] * self.layers_encoder
                     if self.passthru_adversarial_loss_scale and self.n_passthru_neurons:
-                        encoder_passthru_adversarial_loss_total = [0.] * self.n_layers_encoder
+                        encoder_passthru_adversarial_loss_total = [0.] * self.layers_encoder
 
                     # Collect correspondence targets if necessary
                     if self.static_correspondence_targets() and (segment_embeddings is None or segment_spans is None):
@@ -4470,13 +4474,13 @@ class AcousticEncoderDecoder(object):
                         if self.streaming and self.predict_forward:
                             prediction_loss_cur = info_dict['prediction_loss']
                         if self.correspondence_loss_scale:
-                            correspondence_loss_cur = [info_dict['correspondence_loss_l%d' % l] for l in range(self.n_layers_encoder - 1)]
+                            correspondence_loss_cur = [info_dict['correspondence_loss_l%d' % l] for l in range(self.layers_encoder - 1)]
                         if self.lm_loss_scale:
-                            encoder_lm_loss_cur = [info_dict['encoder_lm_loss_l%d' % l] for l in range(self.n_layers_encoder)]
+                            encoder_lm_loss_cur = [info_dict['encoder_lm_loss_l%d' % l] for l in range(self.layers_encoder)]
                         if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
-                            encoder_speaker_adversarial_loss_cur = [info_dict['encoder_speaker_adversarial_loss_l%d' % l] for l in range(self.n_layers_encoder)]
+                            encoder_speaker_adversarial_loss_cur = [info_dict['encoder_speaker_adversarial_loss_l%d' % l] for l in range(self.layers_encoder)]
                         if self.passthru_adversarial_loss_scale and self.n_passthru_neurons:
-                            encoder_passthru_adversarial_loss_cur = [info_dict['encoder_passthru_adversarial_loss_l%d' % l] for l in range(self.n_layers_encoder)]
+                            encoder_passthru_adversarial_loss_cur = [info_dict['encoder_passthru_adversarial_loss_l%d' % l] for l in range(self.layers_encoder)]
 
                         # Collect correspondence targets if necessary
                         if self.static_correspondence_targets():
@@ -4493,16 +4497,16 @@ class AcousticEncoderDecoder(object):
                         if self.streaming and self.predict_forward:
                             prediction_loss_total += prediction_loss_cur
                         if self.correspondence_loss_scale:
-                            for l in range(self.n_layers_encoder - 1):
+                            for l in range(self.layers_encoder - 1):
                                 correspondence_loss_total[l] = correspondence_loss_total[l] + correspondence_loss_cur[l]
                         if self.lm_loss_scale:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 encoder_lm_loss_total[l] = encoder_lm_loss_total[l] + encoder_lm_loss_cur[l]
                         if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] + encoder_speaker_adversarial_loss_cur[l]
                         if self.passthru_adversarial_loss_scale and self.n_passthru_neurons:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] + encoder_passthru_adversarial_loss_cur[l]
 
                         if verbose:
@@ -4605,13 +4609,13 @@ class AcousticEncoderDecoder(object):
                                 if self.streaming and self.predict_forward:
                                     prediction_loss_total = 0.
                                 if self.correspondence_loss_scale:
-                                    correspondence_loss_total = [0.] * (self.n_layers_encoder - 1)
+                                    correspondence_loss_total = [0.] * (self.layers_encoder - 1)
                                 if self.lm_loss_scale:
-                                    encoder_lm_loss_total = [0.] * self.n_layers_encoder
+                                    encoder_lm_loss_total = [0.] * self.layers_encoder
                                 if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
-                                    encoder_speaker_adversarial_loss_total = [0.] * self.n_layers_encoder
+                                    encoder_speaker_adversarial_loss_total = [0.] * self.layers_encoder
                                 if self.passthru_adversarial_loss_scale and self.n_passthru_neurons:
-                                    encoder_passthru_adversarial_loss_total = [0.] * self.n_layers_encoder
+                                    encoder_passthru_adversarial_loss_total = [0.] * self.layers_encoder
                                 i_pb_base = i+1
 
                     loss_total /= n_pb
@@ -4621,16 +4625,16 @@ class AcousticEncoderDecoder(object):
                     if self.streaming and self.predict_forward:
                         prediction_loss_total /= n_pb
                     if self.correspondence_loss_scale:
-                        for l in range(self.n_layers_encoder - 1):
+                        for l in range(self.layers_encoder - 1):
                             correspondence_loss_total[l] = correspondence_loss_total[l] / n_pb
                     if self.lm_loss_scale:
-                        for l in range(self.n_layers_encoder):
+                        for l in range(self.layers_encoder):
                             encoder_lm_loss_total[l] = encoder_lm_loss_total[l] / n_pb
                     if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
-                        for l in range(self.n_layers_encoder):
+                        for l in range(self.layers_encoder):
                             encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] / n_pb
                     if self.passthru_adversarial_loss_scale and self.n_passthru_neurons:
-                        for l in range(self.n_layers_encoder):
+                        for l in range(self.layers_encoder):
                             encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] / n_pb
 
                     self.sess.run(self.incr_global_step)
@@ -4996,8 +5000,8 @@ class AcousticEncoderDecoder(object):
                     else:
                         pe.update(pe_fwd)
 
-                plot_keys = ['L%d (Backward)' % (l + 1) for l in range(self.n_layers_encoder)]
-                plot_keys += ['L%d (Forward)' % (l + 1) for l in range(self.n_layers_encoder)]
+                plot_keys = ['L%d (Backward)' % (l + 1) for l in range(self.layers_encoder)]
+                plot_keys += ['L%d (Forward)' % (l + 1) for l in range(self.layers_encoder)]
 
                 plot_acoustic_features(
                     X_plot if self.data_type.lower() == 'text' else X_plot[..., :data.n_coef],
@@ -5045,13 +5049,7 @@ class AcousticEncoderDecoder(object):
         if dir is None:
             dir = self.outdir
 
-        if self.binary_classifier or not self.k:
-            if not self.k:
-                bins = 2 ** self.emb_dim
-            else:
-                bins = 2 ** self.k
-        else:
-            bins = self.k
+        bins = self.units_encoder[-1]
 
         if bins < 1000:
             plot_label_histogram(labels_pred, dir=dir, bins=bins)
@@ -5161,7 +5159,6 @@ class AcousticEncoderDecoder(object):
 
     def report_settings(self, indent=0):
         out = ' ' * indent + 'MODEL SETTINGS:\n'
-        out += ' ' * (indent + 2) + 'k: %s\n' %self.k
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
             val = getattr(self, kwarg.key)
             out += ' ' * (indent + 2) + '%s: %s\n' %(kwarg.key, "\"%s\"" %val if isinstance(val, str) else val)
@@ -5207,9 +5204,8 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                                      for x in _INITIALIZATION_KWARGS])
     __doc__ = _doc_header + _doc_args + _doc_kwargs
 
-    def __init__(self, k, train_data, **kwargs):
+    def __init__(self, train_data, **kwargs):
         super(AcousticEncoderDecoderMLE, self).__init__(
-            k,
             train_data,
             **kwargs
         )
@@ -5314,7 +5310,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
 
                     # if self.n_correspondence:
                     #     self.correspondence_autoencoders = []
-                    #     for l in range(self.n_layers_encoder - 1):
+                    #     for l in range(self.layers_encoder - 1):
                     #         correspondence_autoencoder = self._initialize_decoder(self.encoder_hidden_states[l], self.resample_correspondence)
                     #         self.correspondence_autoencoders.append(correspondence_autoencoder)
 
@@ -5370,8 +5366,8 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                 elif binary_state:
                     distance_func = 'binary_xent'
                 elif self.l2_normalize_targets:
-                    distance_func = 'arc'
-                    # distance_func = 'cosine'
+                    # distance_func = 'arc'
+                    distance_func = 'cosine'
                 else:
                     distance_func = 'mse'
 
@@ -5396,13 +5392,13 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                     distance_func = 'l2norm'
 
                 if self.task == 'streaming_autoencoder':
-                    units_utt = self.k
+                    units_utt = self.units_encoder[-1]
                     if self.emb_dim:
                         units_utt += self.emb_dim
 
                     self.encoder_cell = HMLSTMCell(
                         self.units_encoder + [units_utt],
-                        self.n_layers_encoder,
+                        self.layers_encoder,
                         training=self.training,
                         one_hot_inputs=self.data_type.lower() == 'text' and not self.embed_inputs,
                         activation=self.encoder_inner_activation,
@@ -5563,7 +5559,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                         assert not self.residual_targets, 'residual_targets is currently broken. Do not use.'
 
                         self.lm_losses = []
-                        for l in range(self.n_layers_encoder - 1, -1, -1):
+                        for l in range(self.layers_encoder - 1, -1, -1):
                             lm_losses = 0
 
                             if self.lm_targets_bwd[l] is not None and self.lm_order_bwd:
@@ -5594,7 +5590,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                 if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
                     speaker_adversarial_loss = 0.
                     self.encoder_speaker_adversarial_losses = []
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
 
                         L = self.speaker_adversarial_loss_scale
                         speaker_pred = self.encoder_hidden_states[l]
@@ -5603,10 +5599,10 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                             lambda x: -(x * L)
                         )(speaker_pred)
 
-                        if l < self.n_layers_encoder - 1:
+                        if l < self.layers_encoder - 1:
                             units = self.units_encoder[l]
                         else:
-                            units = self.k
+                            units = self.units_encoder[-1]
 
                         speaker_pred = RNNLayer(
                             units=units,
@@ -5638,7 +5634,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
 
                     passthru_targets = tf.stop_gradient(self.passthru_neurons)
 
-                    for l in range(self.n_layers_encoder):
+                    for l in range(self.layers_encoder):
                         L = self.passthru_adversarial_loss_scale
                         passthru_preds = self.encoder_hidden_states[l]
                         passthru_preds = replace_gradient(
@@ -5740,23 +5736,23 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                             to_run.append(self.loss_reconstruction)
                             to_run_names.append('reconstruction_loss')
                         if self.correspondence_loss_scale:
-                            for l in range(self.n_layers_encoder - 1):
+                            for l in range(self.layers_encoder - 1):
                                 to_run.append(self.correspondence_losses[l])
                                 to_run_names.append('correspondence_loss_l%d' % l)
                         if self.lm_loss_scale:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 to_run.append(self.lm_losses[l])
                                 to_run_names.append('encoder_lm_loss_l%d' % l)
                         if self.speaker_adversarial_loss_scale:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 to_run.append(self.encoder_speaker_adversarial_losses[l])
                                 to_run_names.append('encoder_speaker_adversarial_loss_l%d' % l)
                         if self.speaker_adversarial_loss_scale:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 to_run.append(self.encoder_speaker_adversarial_losses[l])
                                 to_run_names.append('encoder_speaker_adversarial_loss_l%d' % l)
                         if self.passthru_adversarial_loss_scale:
-                            for l in range(self.n_layers_encoder):
+                            for l in range(self.layers_encoder):
                                 to_run.append(self.encoder_passthru_adversarial_losses[l])
                                 to_run_names.append('encoder_passthru_adversarial_loss_l%d' % l)
                     if return_regularizer_loss:

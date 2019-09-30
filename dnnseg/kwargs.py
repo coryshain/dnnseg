@@ -549,15 +549,15 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'n_layers_encoder',
-        2,
-        int,
-        "Number of layers to use for encoder. Ignored if **encoder_type** is not ``dense``."
+        None,
+        [int, None],
+        "Number of layers to use for encoder. If ``None``, inferred from length of **n_units_encoder**."
     ),
     Kwarg(
         'n_units_encoder',
         None,
         [int, str, None],
-        "Number of units to use in non-final encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top, or ``None``, in which case the units will be equal to **k**."
+        "Number of units to use in non-final encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
     ),
     Kwarg(
         'encoder_activation',
