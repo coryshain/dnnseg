@@ -98,8 +98,6 @@ class AcousticEncoderDecoder(object):
         assert not self.n_units_encoder is None, 'You must provide a value for **n_units_encoder** when initializing a DNNSeg model.'
         if isinstance(self.n_units_encoder, str):
             self.units_encoder = [int(x) for x in self.n_units_encoder.split()]
-            if len(self.units_encoder) == 1:
-                self.units_encoder = [self.units_encoder[0]] * self.layers_encoder
         elif isinstance(self.n_units_encoder, int):
             if self.n_layers_encoder is None:
                 self.units_encoder = [self.n_units_encoder]
@@ -112,6 +110,8 @@ class AcousticEncoderDecoder(object):
             self.layers_encoder = len(self.units_encoder)
         else:
             self.layers_encoder = self.n_layers_encoder
+        if len(self.units_encoder) == 1:
+            self.units_encoder = [self.units_encoder[0]] * self.layers_encoder
 
         assert len(self.units_encoder) == self.layers_encoder, 'Misalignment in number of layers between n_layers_encoder and n_units_encoder.'
 
@@ -762,7 +762,7 @@ class AcousticEncoderDecoder(object):
                         return_lm_predictions=True
 
                     self.segmenter = HMLSTMSegmenter(
-                        self.units_encoder + [units_utt],
+                        self.units_encoder[:-1] + [units_utt],
                         self.layers_encoder,
                         training=self.training,
                         kernel_depth=self.hmlstm_kernel_depth,
@@ -982,7 +982,7 @@ class AcousticEncoderDecoder(object):
 
                     encoder = MultiRNNLayer(
                         training=self.training,
-                        units=self.units_encoder + [units_utt],
+                        units=self.units_encoder[:-1] + [units_utt],
                         layers=self.layers_encoder,
                         activation=self.encoder_inner_activation,
                         inner_activation=self.encoder_inner_activation,
@@ -5398,7 +5398,7 @@ class AcousticEncoderDecoderMLE(AcousticEncoderDecoder):
                         units_utt += self.emb_dim
 
                     self.encoder_cell = HMLSTMCell(
-                        self.units_encoder + [units_utt],
+                        self.units_encoder[:-1] + [units_utt],
                         self.layers_encoder,
                         training=self.training,
                         one_hot_inputs=self.data_type.lower() == 'text' and not self.embed_inputs,
