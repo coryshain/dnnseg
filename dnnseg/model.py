@@ -109,7 +109,7 @@ class AcousticEncoderDecoder(object):
             self.units_encoder = self.n_units_encoder
 
         if self.n_layers_encoder is None:
-            self.layers_encoder = len(self.n_units_encoder)
+            self.layers_encoder = len(self.units_encoder)
         else:
             self.layers_encoder = self.n_layers_encoder
 
