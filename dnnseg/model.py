@@ -99,12 +99,12 @@ class AcousticEncoderDecoder(object):
         if isinstance(self.n_units_encoder, str):
             self.units_encoder = [int(x) for x in self.n_units_encoder.split()]
             if len(self.units_encoder) == 1:
-                self.units_encoder = [self.units_encoder[0]] * (self.layers_encoder - 1)
+                self.units_encoder = [self.units_encoder[0]] * self.layers_encoder
         elif isinstance(self.n_units_encoder, int):
             if self.n_layers_encoder is None:
                 self.units_encoder = [self.n_units_encoder]
             else:
-                self.units_encoder = [self.n_units_encoder] * (self.n_layers_encoder - 1)
+                self.units_encoder = [self.n_units_encoder] * self.n_layers_encoder
         else:
             self.units_encoder = self.n_units_encoder
 
@@ -113,7 +113,7 @@ class AcousticEncoderDecoder(object):
         else:
             self.layers_encoder = self.n_layers_encoder
 
-        assert len(self.units_encoder) == (self.layers_encoder - 1), 'Misalignment in number of layers between n_layers_encoder and n_units_encoder.'
+        assert len(self.units_encoder) == self.layers_encoder, 'Misalignment in number of layers between n_layers_encoder and n_units_encoder.'
 
         if self.decoder_concatenate_hidden_states:
             self.encoding_n_dims = sum(self.units_encoder) + self.units_encoder[-1]
