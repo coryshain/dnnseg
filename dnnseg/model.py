@@ -95,23 +95,24 @@ class AcousticEncoderDecoder(object):
         self.use_dtw = self.dtw_gamma is not None
         self.regularizer_map = {}
 
-        if self.n_layers_encoder is None:
-            if isinstance(self.n_units_encoder, list):
-                self.layers_encoder = len(self.n_units_encoder)
-            else:
-                self.layers_encoder
-        else:
-            self.layers_encoder = self.n_layers_encoder
-
         assert not self.n_units_encoder is None, 'You must provide a value for **n_units_encoder** when initializing a DNNSeg model.'
         if isinstance(self.n_units_encoder, str):
             self.units_encoder = [int(x) for x in self.n_units_encoder.split()]
             if len(self.units_encoder) == 1:
                 self.units_encoder = [self.units_encoder[0]] * (self.layers_encoder - 1)
         elif isinstance(self.n_units_encoder, int):
-            self.units_encoder = [self.n_units_encoder] * (self.layers_encoder - 1)
+            if self.n_layers_encoder is None:
+                self.units_encoder = [self.n_units_encoder]
+            else:
+                self.units_encoder = [self.n_units_encoder] * (self.n_layers_encoder - 1)
         else:
             self.units_encoder = self.n_units_encoder
+
+        if self.n_layers_encoder is None:
+            self.layers_encoder = len(self.n_units_encoder)
+        else:
+            self.layers_encoder = self.n_layers_encoder
+
         assert len(self.units_encoder) == (self.layers_encoder - 1), 'Misalignment in number of layers between n_layers_encoder and n_units_encoder.'
 
         if self.decoder_concatenate_hidden_states:
