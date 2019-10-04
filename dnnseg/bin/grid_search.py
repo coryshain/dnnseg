@@ -1,4 +1,5 @@
 import os
+import shutil
 import yaml
 import itertools
 import argparse
@@ -8,6 +9,7 @@ def compute_hypercube(yml):
     params = {}
     for name in yml:
         v = yml[name]
+        name = str(name)
         if isinstance(v, list):
             out_cur = {name: v}
         elif isinstance(v, dict):
@@ -94,9 +96,12 @@ if __name__ == '__main__':
     argparser.add_argument('-O', '--results_outdir', default='../results/dnnseg', help='Path to directory in which to save models.')
 
     args = argparser.parse_args()
-    
-    os.makedirs(args.ini_outdir)
-    os.makedirs(args.results_outdir)
+   
+    if not os.path.exists(args.ini_outdir): 
+        os.makedirs(args.ini_outdir)
+    if not os.path.exists(args.results_outdir):
+        os.makedirs(args.results_outdir)
+    shutil.copy2(args.search_params_path, args.results_outdir + '/search.yml')
 
     with open(args.search_params_path, 'r') as f:
         yml = yaml.load(f)
