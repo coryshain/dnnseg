@@ -120,16 +120,24 @@ class AcousticEncoderDecoder(object):
         else:
             self.encoding_n_dims = self.units_encoder[-1]
 
-        if self.n_units_decoder is None:
-            self.units_decoder = [self.units_encoder[-1]] * self.n_layers_decoder
-        elif isinstance(self.n_units_decoder, str):
+        assert not self.n_units_decoder is None, 'You must provide a value for **n_units_decoder** when initializing a DNNSeg model.'
+        if isinstance(self.n_units_decoder, str):
             self.units_decoder = [int(x) for x in self.n_units_decoder.split()]
-            if len(self.units_decoder) == 1:
-                self.units_decoder = [self.units_decoder[0]] * self.n_layers_decoder
         elif isinstance(self.n_units_decoder, int):
-            self.units_decoder = [self.n_units_decoder] * self.n_layers_decoder
+            if self.n_layers_decoder is None:
+                self.units_decoder = [self.n_units_decoder]
+            else:
+                self.units_decoder = [self.n_units_decoder] * self.n_layers_decoder
         else:
             self.units_decoder = self.n_units_decoder
+
+        if self.n_layers_decoder is None:
+            self.layers_decoder = len(self.units_decoder)
+        else:
+            self.layers_decoder = self.n_layers_decoder
+        if len(self.units_decoder) == 1:
+            self.units_decoder = [self.units_decoder[0]] * self.layers_decoder
+
         assert len(self.units_decoder) == self.n_layers_decoder, 'Misalignment in number of layers between n_layers_decoder and n_units_decoder.'
 
         if self.segment_encoding_correspondence_regularizer_scale and \
@@ -1249,6 +1257,8 @@ class AcousticEncoderDecoder(object):
                 targets_fwd = []
                 logits_bwd = []
                 logits_fwd = []
+                pe_bwd = []
+                pe_fwd = []
                 norm_bwd = []
                 norm_fwd = []
                 targets_unnormalized_bwd = []
@@ -1283,7 +1293,6 @@ class AcousticEncoderDecoder(object):
                     if l == 0:
                         weights_cur = self.X_mask
                         mask_cur = weights_cur
-                        weights_bool_cur = weights_cur
                         targets_cur = self.X
                     else:
                         weights_cur = self.encoder_segmentations[l - 1]
@@ -1313,26 +1322,12 @@ class AcousticEncoderDecoder(object):
                         n_backward=self.lm_order_bwd,
                         session=self.sess
                     )
-                    # targets_bwd_cur_2, weights_bwd_cur_2, targets_fwd_cur_2, weights_fwd_cur_2 = mask_and_lag_old(
+                    # targets_bwd_cur, weights_bwd_cur, targets_fwd_cur, weights_fwd_cur = mask_and_lag_bugged(
                     #     targets_cur,
                     #     mask=mask_cur,
                     #     n_forward=self.lm_order_fwd,
                     #     n_backward=self.lm_order_bwd,
                     #     session=self.sess
-                    # )
-                    #
-                    # targets_bwd_cur = tf.Print(
-                    #     targets_bwd_cur,
-                    #     [
-                    #         'targets_bwd',
-                    #         tf.reduce_mean(tf.cast(tf.equal(targets_bwd_cur, targets_bwd_cur_2), dtype=self.FLOAT_TF)),
-                    #         'targets_fwd',
-                    #         tf.reduce_mean(tf.cast(tf.equal(targets_fwd_cur, targets_fwd_cur_2), dtype=self.FLOAT_TF)),
-                    #         'weights_bwd',
-                    #         tf.reduce_mean(tf.cast(tf.equal(weights_bwd_cur, weights_bwd_cur_2), dtype=self.FLOAT_TF)),
-                    #         'weights_fwd',
-                    #         tf.reduce_mean(tf.cast(tf.equal(weights_fwd_cur, weights_fwd_cur_2), dtype=self.FLOAT_TF))
-                    #     ]
                     # )
 
                     if predict_at_boundaries and not self.lm_drop_masked:
@@ -1398,17 +1393,16 @@ class AcousticEncoderDecoder(object):
                             else:
                                 decoder_mask_bwd = weights_bwd_cur
 
-                            logits_bwd_cur, pe_bwd = self._initialize_decoder(
+                            logits_bwd_cur, pe_bwd_cur = self._initialize_decoder(
                                 decoder_in,
                                 self.lm_order_bwd,
                                 frame_dim=k,
                                 mask=decoder_mask_bwd,
                                 name='decoder_LM_bwd_L%d' % l
                             )
-                            if l == 0:
-                                self.pe_bwd = pe_bwd
                         else:
                             logits_bwd_cur = None
+                            pe_bwd_cur = None
 
                         if self.lm_order_fwd:
                             if self.lm_drop_masked:
@@ -1416,17 +1410,16 @@ class AcousticEncoderDecoder(object):
                             else:
                                 decoder_mask_fwd = weights_fwd_cur
 
-                            logits_fwd_cur, pe_fwd = self._initialize_decoder(
+                            logits_fwd_cur, pe_fwd_cur = self._initialize_decoder(
                                 decoder_in,
                                 self.lm_order_fwd,
                                 frame_dim=k,
                                 mask=decoder_mask_fwd,
                                 name='decoder_LM_fwd_L%d' % l
                             )
-                            if l == 0:
-                                self.pe_fwd = pe_fwd
                         else:
                             logits_fwd_cur = None
+                            pe_fwd_cur = None
 
                     else:
                         logits_bwd_cur = tf.boolean_mask(logits_bwd_src[l], mask_cur)
@@ -1536,6 +1529,8 @@ class AcousticEncoderDecoder(object):
                     targets_fwd.append(targets_fwd_cur)
                     logits_bwd.append(logits_bwd_cur)
                     logits_fwd.append(logits_fwd_cur)
+                    pe_bwd.append(pe_bwd_cur)
+                    pe_fwd.append(pe_fwd_cur)
                     norm_bwd.append(norm_bwd_cur)
                     norm_fwd.append(norm_fwd_cur)
                     targets_unnormalized_bwd.append(targets_unnormalized_bwd_cur)
@@ -1549,10 +1544,12 @@ class AcousticEncoderDecoder(object):
                     plot_targs_bwd.append(plot_targs_bwd_cur)
                     plot_targs_fwd.append(plot_targs_fwd_cur)
 
-                self.lm_logits_bwd = logits_bwd
-                self.lm_logits_fwd = logits_fwd
                 self.lm_targets_bwd = targets_bwd
                 self.lm_targets_fwd = targets_fwd
+                self.lm_logits_bwd = logits_bwd
+                self.lm_logits_fwd = logits_fwd
+                self.lm_pe_bwd = pe_bwd
+                self.lm_pe_fwd = pe_fwd
                 self.lm_norm_bwd = norm_bwd
                 self.lm_norm_fwd = norm_fwd
                 self.lm_targets_unnormalized_bwd = targets_unnormalized_bwd
@@ -1751,18 +1748,18 @@ class AcousticEncoderDecoder(object):
                 if frame_dim is None:
                     frame_dim = self.frame_dim
 
-                decoder, temporal_encoding, flatten_batch, final_shape, final_shape_temporal_encoding = preprocess_decoder_inputs(
+                decoder, positional_encoding, flatten_batch, final_shape, final_shape_positional_encoding = preprocess_decoder_inputs(
                     decoder_in,
                     n_timesteps,
                     self.units_decoder,
                     training=self.training,
                     decoder_hidden_state_expansion_type=self.decoder_hidden_state_expansion_type,
-                    decoder_temporal_encoding_type=self.decoder_temporal_encoding_type,
-                    decoder_temporal_encoding_as_mask=self.decoder_temporal_encoding_as_mask,
-                    decoder_temporal_encoding_units=self.decoder_temporal_encoding_units,
-                    decoder_temporal_encoding_transform=self.decoder_temporal_encoding_transform,
+                    decoder_positional_encoding_type=self.decoder_positional_encoding_type,
+                    decoder_positional_encoding_as_mask=self.decoder_positional_encoding_as_mask,
+                    decoder_positional_encoding_units=self.decoder_positional_encoding_units,
+                    decoder_positional_encoding_transform=self.decoder_positional_encoding_transform,
                     decoder_inner_activation=self.decoder_inner_activation,
-                    decoder_temporal_encoding_activation=self.decoder_temporal_encoding_activation,
+                    decoder_positional_encoding_activation=self.decoder_positional_encoding_activation,
                     decoder_batch_normalization_decay=self.decoder_batch_normalization_decay,
                     decoder_conv_kernel_size=self.decoder_conv_kernel_size,
                     frame_dim=frame_dim,
@@ -1914,13 +1911,13 @@ class AcousticEncoderDecoder(object):
                 # If batch dims were flattened, reshape outputs into expected shape
                 if flatten_batch:
                     decoder = tf.reshape(decoder, final_shape)
-                    if self.decoder_temporal_encoding_type:
-                        temporal_encoding = tf.reshape(temporal_encoding, final_shape_temporal_encoding)
+                    if self.decoder_positional_encoding_type:
+                        positional_encoding = tf.reshape(positional_encoding, final_shape_positional_encoding)
 
                 if self.speaker_revnet_n_layers:
                     decoder = self.speaker_revnet.backward(decoder, weights=self.speaker_embeddings)
 
-                return decoder, temporal_encoding
+                return decoder, positional_encoding
 
     def _initialize_output_model(self):
         self.out_bwd = None
@@ -2248,9 +2245,12 @@ class AcousticEncoderDecoder(object):
                 # Move time dimensions back to end to match input shape
                 perm = list(range(len(D.shape)))
                 perm = perm[2:] + perm[:2]
-                R = tf.transpose(R, perm=perm)
+                # R = tf.transpose(R, perm=perm)
+                #
+                # out = R[..., end, end]
 
-                out = R[..., end, end]
+                out = R[end]
+                out = out[end]
 
                 return out
 
@@ -3074,6 +3074,8 @@ class AcousticEncoderDecoder(object):
                         scaling_factor = tf.cast(n_cells_losses / n_cells_weights, dtype=self.FLOAT_TF)
                         while len(weights.shape) < target_len:
                             weights = weights[..., None]
+                        while len(weights.shape) > target_len:
+                            weights = tf.squeeze(weights, axis=-1)
 
                     loss = self._soft_dtw(
                         targets,
@@ -4256,6 +4258,7 @@ class AcousticEncoderDecoder(object):
                     segtype=self.segtype,
                     data_normalization=self.data_normalization,
                     reduction_axis=self.reduction_axis,
+                    use_normalization_mask=self.use_normalization_mask,
                     predict_deltas=self.predict_deltas,
                     input_padding=self.input_padding,
                     target_padding=self.target_padding,
@@ -4321,8 +4324,8 @@ class AcousticEncoderDecoder(object):
                     n_pb = n_minibatch
 
                 # if not self.initial_evaluation_complete.eval(session=self.sess):
-                # if True:
-                if False:
+                if True:
+                # if False:
                     if self.task != 'streaming_autoencoder':
                         self.run_checkpoint(
                             val_data,
@@ -4697,7 +4700,7 @@ class AcousticEncoderDecoder(object):
             n_plot=10,
             ix2label=None,
             training=False,
-            plot_temporal_encodings=False,
+            plot_positional_encodings=False,
             segtype=None,
             invert_spectrograms=True,
             verbose=True
@@ -4729,7 +4732,7 @@ class AcousticEncoderDecoder(object):
             if self.min_len:
                 minibatch_num = self.global_batch_step.eval(self.sess)
                 n_steps = X_plot.shape[1]
-                start_ix = max(0, n_steps - (self.min_len + int(math.floor(minibatch_num / 100))))
+                start_ix = max(0, n_steps - (self.min_len + int(math.floor(minibatch_num / self.curriculum_steps))))
 
                 X_plot = X_plot[:, start_ix:]
                 X_mask_plot = X_mask_plot[:, start_ix:]
@@ -4771,13 +4774,13 @@ class AcousticEncoderDecoder(object):
                 if not self.streaming or self.predict_backward:
                     to_run.append(self.reconstructions)
                     to_run_names.append('preds_bwd')
-                    if plot_temporal_encodings and self.pe_bwd is not None:
+                    if plot_positional_encodings and self.pe_bwd is not None:
                         to_run.append(self.pe_bwd)
                         to_run_names.append('pe_bwd')
                 if self.streaming and self.predict_forward:
                     to_run.append(self.extrapolations)
                     to_run_names.append('preds_fwd')
-                    if plot_temporal_encodings and self.pe_fwd is not None:
+                    if plot_positional_encodings and self.pe_fwd is not None:
                         to_run.append(self.pe_fwd)
                         to_run_names.append('pe_fwd')
                 if self.streaming and not self.predict_backward and not self.predict_forward and self.lm_loss_scale:
@@ -4787,8 +4790,8 @@ class AcousticEncoderDecoder(object):
                         to_run.append(self.lm_plot_targs_bwd)
                         to_run_names.append('targs_bwd')
                         targs_bwd = None
-                        if plot_temporal_encodings and self.pe_bwd is not None:
-                            to_run.append(self.pe_bwd)
+                        if plot_positional_encodings and self.lm_pe_bwd is not None:
+                            to_run.append(self.lm_pe_bwd)
                             to_run_names.append('pe_bwd')
                     if self.lm_order_fwd:
                         to_run.append(self.lm_plot_preds_fwd)
@@ -4796,8 +4799,8 @@ class AcousticEncoderDecoder(object):
                         to_run.append(self.lm_plot_targs_fwd)
                         to_run_names.append('targs_fwd')
                         targs_fwd = None
-                        if plot_temporal_encodings and self.pe_fwd is not None:
-                            to_run.append(self.pe_fwd)
+                        if plot_positional_encodings and self.lm_pe_fwd is not None:
+                            to_run.append(self.lm_pe_fwd)
                             to_run_names.append('pe_fwd')
 
                 if seg:
@@ -4986,6 +4989,9 @@ class AcousticEncoderDecoder(object):
                 if pe_bwd is not None:
                     if not isinstance(pe_bwd, list):
                         pe_bwd = [pe_bwd]
+                    if len(pe_bwd) == 1:
+                        pe_bwd = {'(Backward)': pe_bwd[0]}
+                    else:
                         pe_bwd = {'L%d (Backward)' % (l + 1): y for l, y in enumerate(pe_bwd)}
                     if pe is None:
                         pe = pe_bwd
@@ -4995,7 +5001,10 @@ class AcousticEncoderDecoder(object):
                 if pe_fwd is not None:
                     if not isinstance(pe_fwd, list):
                         pe_fwd = [pe_fwd]
-                    pe_fwd = {'L%d (Forward)' % (l + 1): y for l, y in enumerate(pe_fwd)}
+                    if len(pe_fwd) == 1:
+                        pe_fwd = {'(Forward)': pe_fwd[0]}
+                    else:
+                        pe_fwd = {'L%d (Forward)' % (l + 1): y for l, y in enumerate(pe_fwd)}
                     if pe is None:
                         pe = pe_fwd
                     else:

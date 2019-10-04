@@ -196,6 +196,56 @@ def mask_and_lag_old(X, mask, n_forward=0, n_backward=0, session=None):
             return _X_bwd, _X_mask_bwd, _X_fwd, _X_mask_fwd
 
 
+def mask_and_lag_bugged(X, mask, n_forward=0, n_backward=0, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            X_src = tf.boolean_mask(X, mask)
+            pad_base = [(0,0) for _ in range(len(X_src.shape)-2)]
+
+            time_ix = tf.range(tf.shape(X)[-2])
+            tile_ix = [1]
+            for i in range(len(mask.shape) - len(time_ix.shape) - 1, -1, -1):
+                tile_ix.insert(0, tf.shape(mask)[i])
+                time_ix = time_ix[None,...]
+            time_ix = tf.tile(time_ix, tile_ix)
+
+            n_mask = tf.cast(tf.reduce_sum(mask, axis=-1, keepdims=True), dtype=tf.int32)
+            time_mask = time_ix < n_mask
+
+            _X_bwd = []
+            _X_fwd = []
+            _X_mask_bwd = []
+            _X_mask_fwd = []
+
+            for i in range(1, n_backward+1):
+                _pad_left = tf.minimum(i, tf.shape(X_src)[-2])
+                _X_cur = tf.pad(X_src[...,:-i,:], pad_base + [(_pad_left,0), (0,0)])
+                _X_bwd.append(_X_cur)
+
+                _X_mask_cur = tf.cast(time_ix >= i, dtype=mask.dtype)
+                _X_mask_cur = tf.boolean_mask(_X_mask_cur, time_mask)
+                _X_mask_bwd.append(_X_mask_cur)
+
+            for i in range(1, n_forward+1):
+                _pad_right = tf.minimum(i, tf.shape(X_src)[-2])
+                _X_cur = tf.pad(X_src[...,i:,:], pad_base + [(0,_pad_right), (0,0)])
+                _X_fwd.append(_X_cur)
+
+                _X_mask_cur = tf.cast(time_ix < (n_mask - i), dtype=mask.dtype)
+                _X_mask_cur = tf.boolean_mask(_X_mask_cur, time_mask)
+                _X_mask_fwd.append(_X_mask_cur)
+
+            if n_backward:
+                _X_bwd = tf.stack(_X_bwd, axis=-2)
+                _X_mask_bwd = tf.stack(_X_mask_bwd, axis=-1)
+            if n_forward:
+                _X_fwd = tf.stack(_X_fwd, axis=-2)
+                _X_mask_fwd = tf.stack(_X_mask_fwd, axis=-1)
+
+            return _X_bwd, _X_mask_bwd, _X_fwd, _X_mask_fwd
+
+
 # Debugged reduce_logsumexp to allow -inf
 # Stolen from meijun on Github <https://github.com/tensorflow/tensorflow/issues/11692>
 def tf_reduce_logsumexp(input_tensor,
@@ -826,10 +876,10 @@ class HMLSTMCell(LayerRNNCell):
             prefinal_activation='tanh',
             boundary_noise_sd=None,
             boundary_discretizer=None,
-            bottomup_initializer='he_normal_initializer',
-            recurrent_initializer='he_normal_initializer',
-            topdown_initializer='he_normal_initializer',
-            boundary_initializer='he_normal_initializer',
+            bottomup_initializer='glorot_uniform_initializer',
+            recurrent_initializer='orthogonal_initializer',
+            topdown_initializer='glorot_uniform_initializer',
+            boundary_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
             bottomup_regularizer=None,
             recurrent_regularizer=None,
@@ -1113,7 +1163,7 @@ class HMLSTMCell(LayerRNNCell):
                 if prefinal_mode is None:
                     prefinal_mode = self._prefinal_mode
 
-                resnet_kernel_initializer = 'he_normal_initializer'
+                resnet_kernel_initializer = 'glorot_uniform_initializer'
 
                 if prefinal_mode.lower() == 'max':
                     if out_dim > in_dim:
@@ -1405,7 +1455,7 @@ class HMLSTMCell(LayerRNNCell):
                             training=self._training,
                             layers=self._revnet_n_layers,
                             layers_inner=self._revnet_n_layers_inner,
-                            kernel_initializer='he_normal_initializer',
+                            kernel_initializer='glorot_uniform_initializer',
                             activation=self._revnet_activation,
                             use_bias=self._use_bias,
                             batch_normalization_decay=self._revnet_batch_normalization_decay,
@@ -1657,15 +1707,10 @@ class HMLSTMCell(LayerRNNCell):
 
                     # Merge cell operations. If boundaries are hard, selects between update, copy, and flush.
                     # If boundaries are soft, sums update copy and flush proportionally to their probs.
-                    c_noncopy = update_prob * c_update + flush_prob * c_flush
-                    c_copy = copy_prob * c_copy
-                    c = c_noncopy + c_copy
+                    c = update_prob * c_update + flush_prob * c_flush + copy_prob * c_copy
 
                     # Compute the gated output of non-copy cell state
-                    h = c_noncopy
-                    # Renormalize so that weights on c_noncopy sum to 1
-                    h /= tf.maximum(1 - copy_prob, self._epsilon)
-                    # h = c
+                    h = c
                     if self._state_discretizer and self._state_slope_annealing_rate and self._global_step is not None:
                         h *= self.state_slope_coef
                     h = activation(h) * o
@@ -2042,10 +2087,10 @@ class HMLSTMSegmenter(object):
             prefinal_activation='tanh',
             boundary_discretizer=None,
             boundary_noise_sd=None,
-            bottomup_initializer='he_normal_initializer',
-            recurrent_initializer='he_normal_initializer',
-            topdown_initializer='he_normal_initializer',
-            boundary_initializer='he_normal_initializer',
+            bottomup_initializer='glorot_uniform_initializer',
+            recurrent_initializer='orthogonal_initializer',
+            topdown_initializer='glorot_uniform_initializer',
+            boundary_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
             bottomup_regularizer=None,
             recurrent_regularizer=None,
@@ -2671,7 +2716,7 @@ class MaskedLSTMCell(LayerRNNCell):
                 if prefinal_mode is None:
                     prefinal_mode = self._prefinal_mode
 
-                resnet_kernel_initializer = 'he_normal_initializer'
+                resnet_kernel_initializer = 'glorot_uniform_initializer'
 
                 if prefinal_mode.lower() == 'max':
                     if out_dim > in_dim:
@@ -2845,7 +2890,7 @@ class MultiLSTMCell(LayerRNNCell):
             activation=None,
             inner_activation='tanh',
             recurrent_activation='sigmoid',
-            kernel_initializer='he_normal_initializer',
+            kernel_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             reuse=None,
@@ -3004,13 +3049,12 @@ class MultiLSTMCell(LayerRNNCell):
 
 
 class DenseLayer(object):
-
     def __init__(
             self,
             training=True,
             units=None,
             use_bias=True,
-            kernel_initializer='he_normal_initializer',
+            kernel_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
             kernel_regularizer=None,
             bias_regularizer=None,
@@ -3107,7 +3151,7 @@ class DenseResidualLayer(object):
             training=True,
             units=None,
             use_bias=True,
-            kernel_initializer='he_normal_initializer',
+            kernel_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
             kernel_regularizer=None,
             bias_regularizer=None,
@@ -3510,7 +3554,6 @@ class Conv1DResidualLayer(object):
 
 
 class RNNLayer(object):
-
     def __init__(
             self,
             training=True,
@@ -3591,7 +3634,6 @@ class RNNLayer(object):
 
 
 class RNNResidualLayer(object):
-
     def __init__(
             self,
             training=True,
@@ -3728,7 +3770,6 @@ class RNNResidualLayer(object):
 
 
 class MultiRNNLayer(object):
-
     def __init__(
             self,
             training=True,
@@ -3737,7 +3778,7 @@ class MultiRNNLayer(object):
             activation=None,
             inner_activation='tanh',
             recurrent_activation='sigmoid',
-            kernel_initializer='he_normal_initializer',
+            kernel_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             return_sequences=True,
@@ -3967,7 +4008,7 @@ class RevNetBlock(object):
             training=True,
             layers_inner=1,
             use_bias=True,
-            kernel_initializer='he_normal_initializer',
+            kernel_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
             kernel_regularizer=None,
             bias_regularizer=None,
@@ -4148,7 +4189,7 @@ class RevNet(object):
             layers=1,
             layers_inner=1,
             use_bias=True,
-            kernel_initializer='he_normal_initializer',
+            kernel_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
             kernel_regularizer=None,
             bias_regularizer=None,
@@ -4493,12 +4534,12 @@ def preprocess_decoder_inputs(
         units_decoder,
         training=True,
         decoder_hidden_state_expansion_type='tile',
-        decoder_temporal_encoding_type='periodic',
-        decoder_temporal_encoding_as_mask=False,
-        decoder_temporal_encoding_units=32,
-        decoder_temporal_encoding_transform=None,
+        decoder_positional_encoding_type='periodic',
+        decoder_positional_encoding_as_mask=False,
+        decoder_positional_encoding_units=32,
+        decoder_positional_encoding_transform=None,
+        decoder_positional_encoding_activation=None,
         decoder_inner_activation=None,
-        decoder_temporal_encoding_activation=None,
         decoder_batch_normalization_decay=None,
         decoder_conv_kernel_size=3,
         frame_dim=None,
@@ -4549,16 +4590,16 @@ def preprocess_decoder_inputs(
                     [[tf.reduce_prod(batch_leading_dims)], tf.shape(out)[-2:]],
                     axis=0
                 )
-                if decoder_temporal_encoding_type:
-                    if decoder_temporal_encoding_as_mask:
+                if decoder_positional_encoding_type:
+                    if decoder_positional_encoding_as_mask:
                         units = out.shape[-1]
                     else:
-                        units = decoder_temporal_encoding_units
-                    final_shape_temporal_encoding = tf.concat([batch_leading_dims, [n_timesteps, units]], axis=0)
+                        units = decoder_positional_encoding_units
+                    final_shape_positional_encoding = tf.concat([batch_leading_dims, [n_timesteps, units]], axis=0)
                 out = tf.reshape(out, flattened_batch_shape)
             else:
                 final_shape = None
-                final_shape_temporal_encoding = None
+                final_shape_positional_encoding = None
                 flatten_batch = False
 
             # Expand out encoder hidden state into time series, either through tiling or reshaped dense transformation
@@ -4595,41 +4636,49 @@ def preprocess_decoder_inputs(
                 out *= mask[..., None]
 
             # Create a representation of time to supply to decoder
-            if decoder_temporal_encoding_type:
-                if decoder_temporal_encoding_transform or not decoder_temporal_encoding_as_mask:
-                    temporal_encoding_units = decoder_temporal_encoding_units
+            if decoder_positional_encoding_type:
+                if decoder_positional_encoding_transform or not decoder_positional_encoding_as_mask:
+                    positional_encoding_units = decoder_positional_encoding_units
                 else:
-                    temporal_encoding_units = out.shape[-1]
+                    positional_encoding_units = out.shape[-1]
 
                 # Create a trainable matrix of weights by timestep
-                if decoder_temporal_encoding_type.lower() == 'weights':
-                    temporal_encoding = tf.get_variable(
-                        'decoder_time_encoding_src_%s' % name,
-                        shape=[1, n_timesteps, temporal_encoding_units],
+                if decoder_positional_encoding_type.lower() == 'weights':
+                    positional_encoding = tf.get_variable(
+                        'decoder_positional_encoding_src_%s' % name,
+                        shape=[1, n_timesteps, positional_encoding_units],
                         initializer=tf.initializers.random_normal,
                     )
-                    temporal_encoding = tf.tile(temporal_encoding, [tf.shape(decoder_in)[0], 1, 1])
+                    positional_encoding = tf.tile(positional_encoding, [tf.shape(decoder_in)[0], 1, 1])
 
                 # Create a set of periodic functions with trainable phase and frequency
-                elif decoder_temporal_encoding_type.lower() == 'periodic':
+                elif decoder_positional_encoding_type.lower() in ['periodic', 'transformer_pe']:
                     time = np.arange(1., n_timesteps + 1.)[None, ..., None]
-                    coef = np.exp(np.linspace(-2,2, temporal_encoding_units // 2))[None, None, ...]
+                    n = positional_encoding_units // 2
+
+                    if decoder_positional_encoding_type.lower() == 'periodic':
+                        coef = np.exp(np.linspace(-2,2, n))[None, None, ...]
+                    elif decoder_positional_encoding_type.lower() == 'transformer_pe':
+                        log_timescale_increment = np.log(10000) / (n - 1)
+                        coef = (np.exp(np.arange(n) * -log_timescale_increment))[None, None, ...]
+
                     sin = np.sin(time * coef)
                     cos = np.cos(time * coef)
-                    temporal_encoding = np.zeros([1, n_timesteps, temporal_encoding_units], dtype=FLOAT_NP)
-                    temporal_encoding[..., 0::2] = sin
-                    temporal_encoding[..., 1::2] = cos
+
+                    positional_encoding = np.zeros([1, n_timesteps, positional_encoding_units], dtype=FLOAT_NP)
+                    positional_encoding[..., 0::2] = sin
+                    positional_encoding[..., 1::2] = cos
 
                 else:
                     raise ValueError(
-                        'Unrecognized decoder temporal encoding type "%s".' % decoder_temporal_encoding_type)
+                        'Unrecognized decoder temporal encoding type "%s".' % decoder_positional_encoding_type)
 
                 # Transform the temporal encoding
-                if decoder_temporal_encoding_transform:
-                    if decoder_temporal_encoding_as_mask:
+                if decoder_positional_encoding_transform:
+                    if decoder_positional_encoding_as_mask:
                         units = out.shape[-1]
                     else:
-                        units = decoder_temporal_encoding_units
+                        units = decoder_positional_encoding_units
 
                     if name:
                         name_cur = name + '_temporal_encoding_transform'
@@ -4637,8 +4686,8 @@ def preprocess_decoder_inputs(
                         name_cur = name
 
                     # RNN transform
-                    if decoder_temporal_encoding_transform.lower() == 'rnn':
-                        temporal_encoding = RNNLayer(
+                    if decoder_positional_encoding_transform.lower() == 'rnn':
+                        positional_encoding = RNNLayer(
                             training=training,
                             units=units,
                             activation=tf.tanh,
@@ -4646,11 +4695,11 @@ def preprocess_decoder_inputs(
                             return_sequences=True,
                             name=name_cur,
                             session=session
-                        )(temporal_encoding)
+                        )(positional_encoding)
 
                     # CNN transform (1D)
-                    elif decoder_temporal_encoding_transform.lower() == 'cnn':
-                        temporal_encoding = Conv1DLayer(
+                    elif decoder_positional_encoding_transform.lower() == 'cnn':
+                        positional_encoding = Conv1DLayer(
                             decoder_conv_kernel_size,
                             training=training,
                             n_filters=units,
@@ -4659,41 +4708,41 @@ def preprocess_decoder_inputs(
                             batch_normalization_decay=decoder_batch_normalization_decay,
                             name=name_cur,
                             session=session
-                        )(temporal_encoding)
+                        )(positional_encoding)
 
                     # Dense transform
-                    elif decoder_temporal_encoding_transform.lower() == 'dense':
-                        temporal_encoding = DenseLayer(
+                    elif decoder_positional_encoding_transform.lower() == 'dense':
+                        positional_encoding = DenseLayer(
                             training=training,
                             units=units,
                             activation=decoder_inner_activation,
                             batch_normalization_decay=decoder_batch_normalization_decay,
                             name=name_cur,
                             session=session
-                        )(temporal_encoding)
+                        )(positional_encoding)
 
                     else:
                         raise ValueError(
-                            'Unrecognized decoder temporal encoding transform "%s".' % decoder_temporal_encoding_transform)
+                            'Unrecognized decoder temporal encoding transform "%s".' % decoder_positional_encoding_transform)
 
                 # Apply activation function
-                if decoder_temporal_encoding_activation:
+                if decoder_positional_encoding_activation:
                     activation = get_activation(
-                        decoder_temporal_encoding_activation,
+                        decoder_positional_encoding_activation,
                         session=session,
                         training=training
                     )
-                    temporal_encoding = activation(temporal_encoding)
+                    positional_encoding = activation(positional_encoding)
 
                 # Apply temporal encoding, either as mask or as extra features
-                if decoder_temporal_encoding_as_mask:
-                    temporal_encoding = tf.sigmoid(temporal_encoding)
-                    out = out * temporal_encoding
+                if decoder_positional_encoding_as_mask:
+                    positional_encoding = tf.sigmoid(positional_encoding)
+                    out = out * positional_encoding
                 else:
-                    temporal_encoding = tf.tile(temporal_encoding, [tf.shape(out)[0], 1, 1])
-                    out = tf.concat([out, temporal_encoding], axis=-1)
+                    positional_encoding = tf.tile(positional_encoding, [tf.shape(out)[0], 1, 1])
+                    out = tf.concat([out, positional_encoding], axis=-1)
             else:
-                temporal_encoding = None
-                final_shape_temporal_encoding = None
+                positional_encoding = None
+                final_shape_positional_encoding = None
 
-            return out, temporal_encoding, flatten_batch, final_shape, final_shape_temporal_encoding
+            return out, positional_encoding, flatten_batch, final_shape, final_shape_positional_encoding

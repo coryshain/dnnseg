@@ -296,6 +296,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Reduction axis to use for data normalization. One of ``['time', 'freq', 'both']``."
     ),
     Kwarg(
+        'use_normalization_mask',
+        False,
+        bool,
+        "Whether to normalize over entire file or just VAD regions."
+    ),
+    Kwarg(
         'pad_seqs',
         True,
         bool,
@@ -859,46 +865,46 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Technique for expanding the decoder inputs over time. One of [``tile``, ``dense``], where ``tile`` tiles the state over time while ``dense`` applies and reshapes a dense layer with ``n_feats * n_timesteps`` outputs."
     ),
     Kwarg(
-        'decoder_temporal_encoding_type',
+        'decoder_positional_encoding_type',
         None,
         [None, str],
-        "Technique for representing time to the decoder. One of [``periodic``, ``weights``], where ``periodic`` uses **decoder_temporal_encoding_units** sine waves with tunable frequency and phase, while ``weights`` uses trainable vectors of **decoder_temporal_encoding_units**, one for each timestep. If ``None``, no temporal encoding."
+        "Technique for representing time to the decoder. One of [``transformer_pe``, ``periodic``, ``weights``], where ``transformer_pe`` uses the Transformer positional encoding, ``periodic`` uses **decoder_positional_encoding_units** sin and cosine waves (with more high-frequency components than Transformer), and ``weights`` uses trainable vectors of **decoder_positional_encoding_units**, one for each timestep. If ``None``, no temporal encoding."
     ),
     Kwarg(
-        'decoder_temporal_encoding_units',
+        'decoder_positional_encoding_units',
         32,
         [int, None],
         "Number of dimensions per timestep to use for the temporal input to the decoder."
     ),
     Kwarg(
-        'decoder_temporal_encoding_transform',
+        'decoder_positional_encoding_transform',
         None,
         [str, None],
         "Technique for transforming the base temporal input to the decoder. One of [``None``, ``dense``, ``rnn``, ``cnn``]. If ``None``, no transform."
     ),
     Kwarg(
-        'decoder_temporal_encoding_activation',
+        'decoder_positional_encoding_activation',
         None,
         [str, None],
         "Activation function for temporal encoding, or linear activation if ``None``."
     ),
     Kwarg(
-        'decoder_temporal_encoding_as_mask',
+        'decoder_positional_encoding_as_mask',
         False,
         bool,
-        "Whether to use the temporal encoding as a mask. If ``True``, temporal encoding will be conformable to input encoder state and sigmoid activated, serving as soft attention over the expanded hidden state. If ``False``, the temporal encoding is dimensionality **decoder_temporal_encoding_units** and is concatenated to the expanded hidden state features."
+        "Whether to use the temporal encoding as a mask. If ``True``, temporal encoding will be conformable to input encoder state and sigmoid activated, serving as soft attention over the expanded hidden state. If ``False``, the temporal encoding is dimensionality **decoder_positional_encoding_units** and is concatenated to the expanded hidden state features."
+    ),
+    Kwarg(
+        'n_layers_decoder',
+        2,
+        [int, None],
+        "Number of layers to use for decoder. If ``None``, inferred from length of **n_units_decoder**."
     ),
     Kwarg(
         'n_units_decoder',
         None,
         [int, str, None],
-        "Number of units to use in non-final decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom, or ``None``, in which case the units will be equal to **k**."
-    ),
-    Kwarg(
-        'n_layers_decoder',
-        2,
-        int,
-        "Number of layers to use for decoder. Ignored if **decoder_type** is not ``dense``."
+        "Number of units to use in decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
     ),
     Kwarg(
         'decoder_activation',

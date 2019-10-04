@@ -1018,6 +1018,7 @@ def cache_data(
         segtype='vad',
         data_normalization=None,
         reduction_axis=None,
+        use_normalization_mask=False,
         predict_deltas=False,
         input_padding=None,
         target_padding=None,
@@ -1044,6 +1045,7 @@ def cache_data(
                     input_normalization=data_normalization,
                     target_normalization=data_normalization,
                     reduction_axis=reduction_axis,
+                    use_normalization_mask=use_normalization_mask,
                     predict_deltas=predict_deltas,
                     target_bwd_resampling=resample_targets_bwd,
                     target_fwd_resampling=resample_targets_fwd,
@@ -1057,6 +1059,7 @@ def cache_data(
                     input_normalization=data_normalization,
                     target_normalization=data_normalization,
                     reduction_axis=reduction_axis,
+                    use_normalization_mask=use_normalization_mask,
                     predict_deltas=predict_deltas,
                     input_padding=input_padding,
                     input_resampling=resample_inputs,
@@ -1078,6 +1081,7 @@ def cache_data(
                     input_normalization=data_normalization,
                     target_normalization=data_normalization,
                     reduction_axis=reduction_axis,
+                    use_normalization_mask=use_normalization_mask,
                     predict_deltas=predict_deltas,
                     target_bwd_resampling=resample_targets_bwd,
                     target_fwd_resampling=resample_targets_fwd,
@@ -1093,6 +1097,7 @@ def cache_data(
                     input_normalization=data_normalization,
                     target_normalization=data_normalization,
                     reduction_axis=reduction_axis,
+                    use_normalization_mask=use_normalization_mask,
                     predict_deltas=predict_deltas,
                     input_padding=input_padding,
                     input_resampling=resample_inputs,
@@ -1110,6 +1115,7 @@ def cache_data(
                 mask=segtype,
                 normalization=data_normalization,
                 reduction_axis=reduction_axis,
+                use_normalization_mask=use_normalization_mask,
                 oracle_boundaries=oracle_boundaries
             )
 
@@ -1255,6 +1261,7 @@ class Dataset(object):
             pad_left=None,
             pad_right=None,
             normalization=None,
+            use_normalization_mask=False,
             reduction_axis='time'
     ):
         out = []
@@ -1278,6 +1285,7 @@ class Dataset(object):
                     boundaries_as_features=boundaries_as_features,
                     normalization=normalization,
                     reduction_axis=reduction_axis,
+                    use_normalization_mask=use_normalization_mask,
                     padding=None
                 )
 
@@ -1338,6 +1346,7 @@ class Dataset(object):
             reverse=False,
             normalization=None,
             reduction_axis='time',
+            use_normalization_mask=False,
             with_deltas=True,
             resample=None
     ):
@@ -1365,6 +1374,7 @@ class Dataset(object):
                     reverse=reverse,
                     normalization=normalization,
                     reduction_axis=reduction_axis,
+                    use_normalization_mask=use_normalization_mask,
                     with_deltas=with_deltas,
                     resample=resample,
                 )
@@ -1404,6 +1414,7 @@ class Dataset(object):
             max_len=None,
             input_normalization=None,
             target_normalization=None,
+            use_normalization_mask=False,
             reduction_axis='time',
             input_padding='pre',
             input_resampling=None,
@@ -1419,6 +1430,7 @@ class Dataset(object):
             padding=input_padding,
             max_len=max_len,
             normalization=input_normalization,
+            use_normalization_mask=use_normalization_mask,
             reduction_axis=reduction_axis,
             resample=input_resampling
         )
@@ -1428,6 +1440,7 @@ class Dataset(object):
             max_len=max_len,
             reverse=reverse_targets,
             normalization=target_normalization,
+            use_normalization_mask=use_normalization_mask,
             reduction_axis=reduction_axis,
             with_deltas=predict_deltas,
             resample=target_resampling
@@ -1448,8 +1461,20 @@ class Dataset(object):
         shift = []
         scale = []
         for i, ix in enumerate(file_ix):
-            shift.append(self.data[self.fileIDs[ix]].normalization_shift(target_normalization, reduction_axis))
-            scale.append(self.data[self.fileIDs[ix]].normalization_scale(target_normalization, reduction_axis))
+            if use_normalization_mask:
+                norm_mask = segments
+            else:
+                norm_mask = None
+            shift.append(self.data[self.fileIDs[ix]].normalization_shift(
+                target_normalization,
+                reduction_axis,
+                mask=norm_mask
+            ))
+            scale.append(self.data[self.fileIDs[ix]].normalization_scale(
+                target_normalization,
+                reduction_axis,
+                mask=norm_mask
+            ))
         shift = np.stack(shift, axis=0)
         scale = np.stack(scale, axis=0)
         
@@ -1477,6 +1502,7 @@ class Dataset(object):
             window_len_fwd,
             input_normalization=None,
             target_normalization=None,
+            use_normalization_mask=False,
             reduction_axis='time',
             target_bwd_resampling=None,
             target_fwd_resampling = None,
@@ -1492,6 +1518,7 @@ class Dataset(object):
             pad_left=left_pad,
             pad_right=right_pad,
             normalization=input_normalization,
+            use_normalization_mask=use_normalization_mask,
             reduction_axis=reduction_axis
         )
         feats_inputs = []
@@ -1514,6 +1541,7 @@ class Dataset(object):
                 pad_left=left_pad,
                 pad_right=right_pad,
                 normalization=target_normalization,
+                use_normalization_mask=use_normalization_mask,
                 reduction_axis=reduction_axis,
             )
             feats_targets = []
@@ -1543,9 +1571,21 @@ class Dataset(object):
             shift = []
             scale = []
             for i, l in enumerate(file_lengths):
-                shift_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].normalization_shift(target_normalization, reduction_axis)[None, ...]
+                if use_normalization_mask:
+                    norm_mask = mask
+                else:
+                    norm_mask = None
+                shift_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].normalization_shift(
+                    target_normalization,
+                    reduction_axis,
+                    mask=norm_mask
+                )[None, ...]
                 shift.append(shift_cur)
-                scale_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].normalization_scale(target_normalization, reduction_axis)[None, ...]
+                scale_cur = np.ones((l, 1, 1)) * self.data[self.fileIDs[i]].normalization_scale(
+                    target_normalization,
+                    reduction_axis,
+                    mask=norm_mask
+                )[None, ...]
                 scale.append(scale_cur)
             shift = np.concatenate(shift, axis=0)
             scale = np.concatenate(scale, axis=0)
@@ -1553,19 +1593,33 @@ class Dataset(object):
             shift = {}
             scale = {}
             for f in self.fileIDs:
-                shift[f] = self.data[f].normalization_shift(target_normalization, reduction_axis)
-                scale[f] = self.data[f].normalization_scale(target_normalization, reduction_axis)
+                if use_normalization_mask:
+                    norm_mask = mask
+                else:
+                    norm_mask = None
+                shift[f] = self.data[f].normalization_shift(
+                    target_normalization,
+                    reduction_axis,
+                    mask=norm_mask
+                )
+                scale[f] = self.data[f].normalization_scale(
+                    target_normalization,
+                    reduction_axis,
+                    mask=norm_mask
+                )
             shift, _, _ = self.features(
                 features=shift,
                 mask=mask,
                 pad_left=left_pad,
-                pad_right=right_pad
+                pad_right=right_pad,
+                use_normalization_mask=use_normalization_mask
             )
             scale, _, _ = self.features(
                 features=scale,
                 mask=mask,
                 pad_left=left_pad,
-                pad_right=right_pad
+                pad_right=right_pad,
+                use_normalization_mask=use_normalization_mask
             )
             shift = pad_sequence([x[0] for x in shift], padding='post')
             scale = pad_sequence([x[0] for x in scale], padding='post')
@@ -1631,12 +1685,14 @@ class Dataset(object):
             mask,
             normalization=None,
             reduction_axis='time',
+            use_normalization_mask=False,
             oracle_boundaries=None
     ):
         feats, boundaries, _ = self.features(
             mask=mask,
             normalization=normalization,
-            reduction_axis=reduction_axis
+            reduction_axis=reduction_axis,
+            use_normalization_mask=use_normalization_mask
         )
 
         file_lengths = [len(x[0]) for x in feats]
@@ -1649,8 +1705,20 @@ class Dataset(object):
         for i, f in enumerate(self.fileIDs):
             speaker.append(self.data[f].speaker)
             file_ix.append(i)
-            shift.append(self.data[f].normalization_shift(normalization, reduction_axis))
-            scale.append(self.data[f].normalization_scale(normalization, reduction_axis))
+            if use_normalization_mask:
+                norm_mask = mask
+            else:
+                norm_mask = None
+            shift.append(self.data[f].normalization_shift(
+                normalization,
+                reduction_axis,
+                mask=norm_mask
+            ))
+            scale.append(self.data[f].normalization_scale(
+                normalization,
+                reduction_axis,
+                mask=norm_mask
+            ))
         speaker = np.array(speaker)
 
         if oracle_boundaries:
@@ -1968,6 +2036,7 @@ class Dataset(object):
             reverse=False,
             normalization=None,
             reduction_axis='time',
+            use_normalization_mask=False,
             resample=None
     ):
         return self.segment_and_stack(
@@ -1977,6 +2046,7 @@ class Dataset(object):
             reverse=reverse,
             normalization=normalization,
             reduction_axis=reduction_axis,
+            use_normalization_mask=use_normalization_mask,
             resample=resample
         )
 
@@ -1988,6 +2058,7 @@ class Dataset(object):
             reverse=True,
             normalization=None,
             reduction_axis='time',
+            use_normalization_mask=False,
             with_deltas=False,
             resample=None
     ):
@@ -1998,6 +2069,7 @@ class Dataset(object):
             reverse=reverse,
             normalization=normalization,
             reduction_axis=reduction_axis,
+            use_normalization_mask=use_normalization_mask,
             with_deltas=with_deltas,
             resample=resample
         )
@@ -2576,6 +2648,8 @@ class Datafile(object):
         raise NotImplementedError
 
     def min(self, reduction_axis, mask=None):
+        if isinstance(mask, str):
+            mask = self.segments_to_mask(self.segments(mask))
         data = self.data()
         if mask is not None:
             data = data[mask]
@@ -2588,6 +2662,8 @@ class Datafile(object):
         return data.min(axis=reduction_axis, keepdims=True)
 
     def sum(self, reduction_axis, mask=None):
+        if isinstance(mask, str):
+            mask = self.segments_to_mask(self.segments(mask))
         data = self.data()
         if mask is not None:
             data = data[mask]
@@ -2600,6 +2676,8 @@ class Datafile(object):
         return data.sum(axis=reduction_axis, keepdims=True)
 
     def mean(self, reduction_axis, mask=None):
+        if isinstance(mask, str):
+            mask = self.segments_to_mask(self.segments(mask))
         data = self.data()
         if mask is not None:
             data = data[mask]
@@ -2612,6 +2690,8 @@ class Datafile(object):
         return data.mean(axis=reduction_axis, keepdims=True)
 
     def range(self, reduction_axis, mask=None):
+        if isinstance(mask, str):
+            mask = self.segments_to_mask(self.segments(mask))
         data = self.data()
         if mask is not None:
             data = data[mask]
@@ -2624,6 +2704,8 @@ class Datafile(object):
         return data.max(axis=reduction_axis, keepdims=True) - data.min(axis=reduction_axis, keepdims=True)
 
     def sd(self, reduction_axis, mask=None):
+        if isinstance(mask, str):
+            mask = self.segments_to_mask(self.segments(mask))
         data = self.data()
         if mask is not None:
             data = data[mask]
@@ -2636,6 +2718,8 @@ class Datafile(object):
         return data.std(axis=reduction_axis, keepdims=True)
 
     def norm(self, reduction_axis, order=None, mask=None):
+        if isinstance(mask, str):
+            mask = self.segments_to_mask(self.segments(mask))
         data = self.data()
         if mask is not None:
             data = data[mask]
@@ -2648,6 +2732,9 @@ class Datafile(object):
         return np.linalg.norm(data, ord=order, axis=reduction_axis, keepdims=True)
 
     def normalization_shift(self, normalization, reduction_axis, mask=None):
+        if isinstance(mask, str):
+            mask = self.segments_to_mask(self.segments(mask))
+        
         if reduction_axis.lower() == 'time':
             shape = (1, self.data().shape[1])
         elif reduction_axis.lower() == 'freq':
@@ -2666,6 +2753,9 @@ class Datafile(object):
         return out
 
     def normalization_scale(self, normalization, reduction_axis, mask=None, epsilon=1e-4, magnitude=1):
+        if isinstance(mask, str):
+            mask = self.segments_to_mask(self.segments(mask))
+        
         if reduction_axis.lower() == 'time':
             shape = (1, self.data().shape[1])
         elif reduction_axis.lower() == 'freq':
@@ -2762,13 +2852,17 @@ class Datafile(object):
             reverse=False,
             normalization=None,
             reduction_axis='time',
+            use_normalization_mask=False,
             with_deltas=True,
             resample=None
     ):
         if features is None:
             feats = self.data()
             if normalization is not None:
-                normalization_mask = self.segments_to_mask(self.segments(segments))
+                if use_normalization_mask:
+                    normalization_mask = segments
+                else:
+                    normalization_mask = None
                 shift = self.normalization_shift(normalization, reduction_axis, mask=normalization_mask)
                 scale = self.normalization_scale(normalization, reduction_axis, mask=normalization_mask)
                 feats = (feats - shift) / scale

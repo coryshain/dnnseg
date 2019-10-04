@@ -121,6 +121,7 @@ if __name__ == '__main__':
         segtype=p['segtype'],
         data_normalization=p['data_normalization'],
         reduction_axis=p['reduction_axis'],
+        use_normalization_mask=p['use_normalization_mask'],
         predict_deltas=p['predict_deltas'],
         input_padding=input_padding,
         target_padding=target_padding,
