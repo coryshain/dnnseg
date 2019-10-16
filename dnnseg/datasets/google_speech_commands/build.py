@@ -5,6 +5,8 @@ import pandas as pd
 from scipy.io import wavfile
 import argparse
 
+from dnnseg.util import stderr
+
 argparser = argparse.ArgumentParser('''
 Builds Google Speech Commands dataset into appropriate format for use with DNN-Seg.
 ''')

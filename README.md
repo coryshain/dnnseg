@@ -25,6 +25,46 @@ Thus, to reproduce results from NAACL19 (Shain & Elsner, 2019), for example, run
 Published results depend on both (1) datasets and (2) models as defined in experiment-specific configuration files.
 We do not distribute data with this repository.
 
+## Installation
+
+Install DNNSeg by cloning this repository. In addition, DNNSeg requires the Python libraries tensorflow, pandas,
+scpiy, scikit-learn, librosa, and seaborn, along with their dependencies. These can be installed using pip or conda.
+Furthermore, for models using cochleagram-based acoustic representations, you will need to install the pycochleagram
+library by running the following in the repository root:
+
+    git clone https://github.com/mcdermottLab/pycochleagram.git;
+    cd pycochleagram;
+    python setup.py install
+    
+
+## Data Setup
+
+Running DNNSeg on the Zerospeech 2015 challenge data requires four external resources:
+
+  - The [Zerospeech metadata](https://github.com/bootphon/Zerospeech2015)
+  - The [Zerospeech track 2 repository](https://github.com/bootphon/tde)
+  - The [Buckeye Speech Corpus](https://buckeyecorpus.osu.edu/)
+  - The Xitsonga portion of the [NCHLT corpus](https://repo.sadilar.org/handle/20.500.12185/277)
+  
+Once these have been acquired and downloaded, they should be preprocessed by running the following from the 
+DNNSeg repository root:
+
+    python -m dnnseg.datasets.zerospeech.build <PATH-TO-ZS-METADATA> <PATH-TO-ZS-TRACK2> -b <PATH-TO-BSC> -x <PATH-TO-NCHLT> -o <PATH-TO-OUTPUT-DIR>
+
+
+## Fitting Models
+
+Model data and hyperparameters are defined in `*.ini` config files. For an example config file, see `dnnseg_model.ini`
+in the repository root. For a full description of all settings that can be controlled with the config file,
+see the DNNSeg initialization params by running:
+
+    python3 -m dnnseg.bin.help
+    
+Once you have defined an `*.ini` config file, fit the model by running the following from the repository root:
+
+    python3 -m dnnseg.bin.train <PATH>.ini
+
+
 ## References
 * Baddeley, Alan; Gathercole, Susan; and Papagno, Costanza (1998). The phonological loop as a language learning device. _Psychological Review_.
 * Chung, Junyoung; Ahn, Sungjin; and Bengio, Yoshua. Hierarchical multiscale recurrent neural networks. _ICLR17_.

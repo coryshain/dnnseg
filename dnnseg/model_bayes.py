@@ -5,7 +5,7 @@ import edward as ed
 from edward.models import OneHotCategorical, RelaxedOneHotCategorical, Bernoulli, RelaxedBernoulli, Normal, MultivariateNormalTriL, TransformedDistribution
 
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
-from .model import DenseLayer, DenseResidualLayer, AcousticEncoderDecoder, get_session
+from .model import DenseLayer, DenseResidualLayer, DNNSeg, get_session
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -24,15 +24,15 @@ def bernoulli_rv(probs, inference_map, session=None):
             return (out, inference_map)
 
 
-class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
+class DNNSegBayes(DNNSeg):
     _INITIALIZATION_KWARGS = UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
 
     _doc_header = """
            Bayesian implementation of unsupervised word classifier.
 
        """
-    _doc_args = AcousticEncoderDecoder._doc_args
-    _doc_kwargs = AcousticEncoderDecoder._doc_kwargs
+    _doc_args = DNNSeg._doc_args
+    _doc_kwargs = DNNSeg._doc_kwargs
     _doc_kwargs += '\n' + '\n'.join([' ' * 8 + ':param %s' % x.key + ': ' + '; '.join(
         [x.dtypes_str(), x.descr]) + ' **Default**: ``%s``.' % (x.default_value if not isinstance(x.default_value,
                                                                                                   str) else "'%s'" % x.default_value)
@@ -40,16 +40,16 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
     __doc__ = _doc_header + _doc_args + _doc_kwargs
 
     def __init__(self, k, train_data, **kwargs):
-        super(AcousticEncoderDecoderBayes, self).__init__(
+        super(DNNSegBayes, self).__init__(
             k,
             train_data,
             **kwargs
         )
 
-        for kwarg in AcousticEncoderDecoderBayes._INITIALIZATION_KWARGS:
+        for kwarg in DNNSegBayes._INITIALIZATION_KWARGS:
             setattr(self, kwarg.key, kwargs.pop(kwarg.key, kwarg.default_value))
 
-        kwarg_keys = [x.key for x in AcousticEncoderDecoder._INITIALIZATION_KWARGS]
+        kwarg_keys = [x.key for x in DNNSeg._INITIALIZATION_KWARGS]
         for kwarg_key in kwargs:
             if kwarg_key not in kwarg_keys:
                 raise TypeError('__init__() got an unexpected keyword argument %s' % kwarg_key)
@@ -59,22 +59,22 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
         self._initialize_metadata()
 
     def _initialize_metadata(self):
-        super(AcousticEncoderDecoderBayes, self)._initialize_metadata()
+        super(DNNSegBayes, self)._initialize_metadata()
 
         self.inference_map = {}
 
     def _pack_metadata(self):
-        md = super(AcousticEncoderDecoderBayes, self)._pack_metadata()
+        md = super(DNNSegBayes, self)._pack_metadata()
 
-        for kwarg in AcousticEncoderDecoderBayes._INITIALIZATION_KWARGS:
+        for kwarg in DNNSegBayes._INITIALIZATION_KWARGS:
             md[kwarg.key] = getattr(self, kwarg.key)
 
         return md
 
     def _unpack_metadata(self, md):
-        super(AcousticEncoderDecoderBayes, self)._unpack_metadata(md)
+        super(DNNSegBayes, self)._unpack_metadata(md)
 
-        for kwarg in AcousticEncoderDecoderBayes._INITIALIZATION_KWARGS:
+        for kwarg in DNNSegBayes._INITIALIZATION_KWARGS:
             setattr(self, kwarg.key, md.pop(kwarg.key, kwarg.default_value))
 
         if len(md) > 0:
@@ -200,7 +200,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
 
     # Override this method to include scale params for output distribution
     def _initialize_decoder(self):
-        super(AcousticEncoderDecoderBayes, self)._initialize_decoder()
+        super(DNNSegBayes, self)._initialize_decoder()
         self._initialize_decoder_scale()
 
     def _initialize_output_model(self):
@@ -365,7 +365,7 @@ class AcousticEncoderDecoderBayes(AcousticEncoderDecoder):
         ]
 
     def report_settings(self, indent=0):
-        out = super(AcousticEncoderDecoderBayes, self).report_settings(indent=indent)
+        out = super(DNNSegBayes, self).report_settings(indent=indent)
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS:
             val = getattr(self, kwarg.key)
             out += ' ' * indent + '  %s: %s\n' %(kwarg.key, "\"%s\"" %val if isinstance(val, str) else val)

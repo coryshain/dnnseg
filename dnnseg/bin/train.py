@@ -139,7 +139,7 @@ if __name__ == '__main__':
     #     print(np.stack([batch['oracle_boundaries'][0,:,0],batch['oracle_labels'][0,:,0]], axis=1)[:100])
     #     input()
 
-    stderr('Initializing encoder-decoder...\n\n')
+    stderr('Initializing DNNSeg...\n\n')
 
     if args.restart and os.path.exists(p.outdir + '/tensorboard'):
         shutil.rmtree(p.outdir + '/tensorboard')
@@ -154,22 +154,22 @@ if __name__ == '__main__':
         kwargs['predict_deltas'] = False
 
     if p['network_type'] == 'mle':
-        from dnnseg.model import AcousticEncoderDecoderMLE
+        from dnnseg.model import DNNSegMLE
 
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS:
             kwargs[kwarg.key] = p[kwarg.key]
 
-        dnnseg_model = AcousticEncoderDecoderMLE(
+        dnnseg_model = DNNSegMLE(
             train_data,
             **kwargs
         )
     else:
-        from dnnseg.model_bayes import AcousticEncoderDecoderBayes
+        from dnnseg.model_bayes import DNNSegBayes
 
         for kwarg in UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS:
             kwargs[kwarg.key] = p[kwarg.key]
 
-        dnnseg_model = AcousticEncoderDecoderBayes(
+        dnnseg_model = DNNSegBayes(
             p['k'],
             train_data,
             **kwargs
@@ -177,7 +177,7 @@ if __name__ == '__main__':
 
     dnnseg_model.build(len(train_data.segments(segment_type=p['segtype'])), outdir=p.outdir, restore=not args.restart)
 
-    stderr('Fitting encoder-decoder...\n\n')
+    stderr('Fitting DNNSeg...\n\n')
 
     dnnseg_model.fit(
         train_data,

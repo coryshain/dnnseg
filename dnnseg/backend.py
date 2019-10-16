@@ -99,8 +99,17 @@ def mask_and_lag(X, mask=None, weights=None, n_forward=0, n_backward=0, session=
             batch_ix = tf.tile(batch_ix, tile_ix)
             batch_ids = tf.boolean_mask(batch_ix, mask)
 
+            item_shape = tf.shape(mask)[1:]
+            time_ix = tf.reshape(tf.range(tf.reduce_prod(item_shape)), item_shape)[None, ...]
+            tile_ix = [tf.shape(mask)[0]] + [1] * (len(mask.shape) - 1)
+            time_ix = tf.tile(time_ix, tile_ix)
+            time_ix = tf.cast(time_ix, dtype=X.dtype)
+            time_ids = tf.boolean_mask(time_ix, mask)
+
             X = tf.boolean_mask(X, mask)
             weights = tf.boolean_mask(weights, mask)
+            
+            X = tf.concat([X, time_ids[..., None]], axis=-1)
 
             tile_bwd = [n_backward, 1]
             X_tile_bwd = tile_bwd + [1]
@@ -116,6 +125,8 @@ def mask_and_lag(X, mask=None, weights=None, n_forward=0, n_backward=0, session=
             weights_bwd *= mask_bwd
             weights_bwd = tf.transpose(weights_bwd, [1, 0])
             X_bwd = tf.transpose(X_bwd, [1, 0, 2])
+            time_ids_bwd = tf.cast(X_bwd[..., -1], dtype=tf.int32)
+            X_bwd = X_bwd[..., :-1]
 
             tile_fwd = [n_forward, 1]
             X_tile_fwd = tile_fwd + [1]
@@ -131,119 +142,14 @@ def mask_and_lag(X, mask=None, weights=None, n_forward=0, n_backward=0, session=
             weights_fwd *= mask_fwd
             weights_fwd = tf.transpose(weights_fwd, [1, 0])
             X_fwd = tf.transpose(X_fwd, [1, 0, 2])
+            time_ids_fwd = tf.cast(X_fwd[..., -1], dtype=tf.int32)
+            X_fwd = X_fwd[..., :-1]
 
-            return X_bwd, weights_bwd, X_fwd, weights_fwd
+            time_ids_0 = time_ids_bwd[..., :1]
+            time_ids_bwd = tf.maximum(time_ids_0 - time_ids_bwd, 0)
+            time_ids_fwd = tf.maximum(time_ids_fwd - time_ids_0 - 1, 0)
 
-
-def mask_and_lag_old(X, mask, n_forward=0, n_backward=0, session=None):
-    session = get_session(session)
-    with session.as_default():
-        with session.graph.as_default():
-            X_src = tf.boolean_mask(X, mask)
-            pad_base = [(0,0) for _ in range(len(X_src.shape)-2)]
-
-            # Compute batch element IDs to prevent spillover across batch elements
-            batch_ix = tf.range(tf.shape(X)[0])
-            tile_ix = [1]
-            for i in range(1, len(mask.shape)):
-                tile_ix.append(tf.shape(mask)[i])
-                batch_ix = batch_ix[..., None]
-            batch_ix = tf.tile(batch_ix, tile_ix)
-            batch_ids = tf.boolean_mask(batch_ix, mask)
-
-            _X_bwd = []
-            _X_fwd = []
-            _X_mask_bwd = []
-            _X_mask_fwd = []
-
-            for i in range(n_backward):
-                if i == 0:
-                    _X_cur = X_src
-                    _batch_ids_cur = batch_ids
-                else:
-                    _pad_left = tf.minimum(i, tf.shape(X_src)[-2])
-                    _X_cur = tf.pad(X_src[...,:-i,:], pad_base + [(_pad_left,0), (0,0)])
-                    _batch_ids_cur = tf.pad(batch_ids[...,:-i], pad_base + [(_pad_left,0)], constant_values=-1)
-
-                _X_mask_cur = tf.cast(
-                    tf.equal(_batch_ids_cur, batch_ids),
-                    dtype=mask.dtype
-                )
-
-                _X_bwd.append(_X_cur)
-                _X_mask_bwd.append(_X_mask_cur)
-
-            for i in range(1, n_forward+1):
-                _pad_right = tf.minimum(i, tf.shape(X_src)[-2])
-                _X_cur = tf.pad(X_src[...,i:,:], pad_base + [(0,_pad_right), (0,0)])
-                _batch_ids_cur = tf.pad(batch_ids[...,i:], pad_base + [(0,_pad_right)], constant_values=-1)
-
-                _X_mask_cur = tf.cast(
-                    tf.equal(_batch_ids_cur, batch_ids),
-                    dtype=mask.dtype
-                )
-
-                _X_fwd.append(_X_cur)
-                _X_mask_fwd.append(_X_mask_cur)
-
-            if n_backward:
-                _X_bwd = tf.stack(_X_bwd, axis=-2)
-                _X_mask_bwd = tf.stack(_X_mask_bwd, axis=-1)
-            if n_forward:
-                _X_fwd = tf.stack(_X_fwd, axis=-2)
-                _X_mask_fwd = tf.stack(_X_mask_fwd, axis=-1)
-
-            return _X_bwd, _X_mask_bwd, _X_fwd, _X_mask_fwd
-
-
-def mask_and_lag_bugged(X, mask, n_forward=0, n_backward=0, session=None):
-    session = get_session(session)
-    with session.as_default():
-        with session.graph.as_default():
-            X_src = tf.boolean_mask(X, mask)
-            pad_base = [(0,0) for _ in range(len(X_src.shape)-2)]
-
-            time_ix = tf.range(tf.shape(X)[-2])
-            tile_ix = [1]
-            for i in range(len(mask.shape) - len(time_ix.shape) - 1, -1, -1):
-                tile_ix.insert(0, tf.shape(mask)[i])
-                time_ix = time_ix[None,...]
-            time_ix = tf.tile(time_ix, tile_ix)
-
-            n_mask = tf.cast(tf.reduce_sum(mask, axis=-1, keepdims=True), dtype=tf.int32)
-            time_mask = time_ix < n_mask
-
-            _X_bwd = []
-            _X_fwd = []
-            _X_mask_bwd = []
-            _X_mask_fwd = []
-
-            for i in range(1, n_backward+1):
-                _pad_left = tf.minimum(i, tf.shape(X_src)[-2])
-                _X_cur = tf.pad(X_src[...,:-i,:], pad_base + [(_pad_left,0), (0,0)])
-                _X_bwd.append(_X_cur)
-
-                _X_mask_cur = tf.cast(time_ix >= i, dtype=mask.dtype)
-                _X_mask_cur = tf.boolean_mask(_X_mask_cur, time_mask)
-                _X_mask_bwd.append(_X_mask_cur)
-
-            for i in range(1, n_forward+1):
-                _pad_right = tf.minimum(i, tf.shape(X_src)[-2])
-                _X_cur = tf.pad(X_src[...,i:,:], pad_base + [(0,_pad_right), (0,0)])
-                _X_fwd.append(_X_cur)
-
-                _X_mask_cur = tf.cast(time_ix < (n_mask - i), dtype=mask.dtype)
-                _X_mask_cur = tf.boolean_mask(_X_mask_cur, time_mask)
-                _X_mask_fwd.append(_X_mask_cur)
-
-            if n_backward:
-                _X_bwd = tf.stack(_X_bwd, axis=-2)
-                _X_mask_bwd = tf.stack(_X_mask_bwd, axis=-1)
-            if n_forward:
-                _X_fwd = tf.stack(_X_fwd, axis=-2)
-                _X_mask_fwd = tf.stack(_X_mask_fwd, axis=-1)
-
-            return _X_bwd, _X_mask_bwd, _X_fwd, _X_mask_fwd
+            return X_bwd, weights_bwd, time_ids_bwd, X_fwd, weights_fwd, time_ids_fwd
 
 
 # Debugged reduce_logsumexp to allow -inf
@@ -1504,8 +1410,8 @@ class HMLSTMCell(LayerRNNCell):
 
                 for l, layer in enumerate(state):
                     h_below_clean = h_below
-                    if not self._bptt:
-                        h_below = tf.stop_gradient(h_below)
+                    # if not self._bptt:
+                    #     h_below = tf.stop_gradient(h_below)
 
                     if self._revnet_n_layers:
                         h_below = self._revnet[l].forward(h_below)
@@ -1571,8 +1477,8 @@ class HMLSTMCell(LayerRNNCell):
                     # h_above: Hidden state of layer above at previous timestep (implicitly 0 if final layer)
                     if l < self._num_layers - 1:
                         h_above = state[l + 1].h
-                        if not self._bptt:
-                            h_above = tf.stop_gradient(h_above)
+                        # if not self._bptt:
+                        #     h_above = tf.stop_gradient(h_above)
                         if self._topdown_noise_sd:
                             h_above = tf.cond(
                                 self._training,
@@ -4528,12 +4434,127 @@ def dense_encoder(
             return out
 
 
+def construct_positional_encoding(
+        n_timesteps,
+        n_units=32,
+        n_batch=1,
+        positional_encoding_type='periodic',
+        positional_encoding_transform=None,
+        positional_encoding_activation=None,
+        inner_activation=None,
+        batch_normalization_decay=None,
+        conv_kernel_size=3,
+        training=True,
+        name=None,
+        session=None,
+        float_type='float32'
+):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            if isinstance(float_type, str):
+                FLOAT_TF = getattr(tf, float_type)
+            else:
+                FLOAT_TF = float_type
+
+            # Create a representation of time to supply to decoder
+            positional_encoding = None
+
+            if positional_encoding_type:
+                # Create a trainable matrix of weights by timestep
+                if positional_encoding_type.lower() == 'weights':
+                    positional_encoding = tf.get_variable(
+                        'decoder_positional_encoding_src_%s' % name,
+                        shape=[n_timesteps, n_units],
+                        initializer=tf.initializers.random_normal,
+                    )
+                    positional_encoding = tf.tile(positional_encoding, [n_batch, 1, 1])
+
+                # Create a set of periodic functions with trainable phase and frequency
+                elif positional_encoding_type.lower() in ['periodic', 'transformer_pe']:
+                    time = tf.cast(tf.range(1, n_timesteps + 1), dtype=FLOAT_TF)[..., None]
+                    n = n_units // 2
+
+                    if positional_encoding_type.lower() == 'periodic':
+                        coef = tf.exp(tf.linspace(-2., 2., n))[None, ...]
+                    elif positional_encoding_type.lower() == 'transformer_pe':
+                        log_timescale_increment = tf.log(10000) / (n - 1)
+                        coef = (tf.exp(np.arange(n) * -log_timescale_increment))[None, ...]
+
+                    sin = tf.sin(time * coef)
+                    cos = tf.cos(time * coef)
+
+                    positional_encoding = tf.concat([sin, cos], axis=-1)
+
+                else:
+                    raise ValueError('Unrecognized decoder positional encoding type "%s".' % positional_encoding_type)
+
+                # Transform the temporal encoding
+                if positional_encoding_transform:
+                    if name:
+                        name_cur = name + '_positional_encoding_transform'
+                    else:
+                        name_cur = name
+
+                    # RNN transform
+                    if positional_encoding_transform.lower() == 'rnn':
+                        positional_encoding = RNNLayer(
+                            training=training,
+                            units=n_units,
+                            activation=tf.tanh,
+                            recurrent_activation=tf.sigmoid,
+                            return_sequences=True,
+                            name=name_cur,
+                            session=session
+                        )(positional_encoding)
+
+                    # CNN transform (1D)
+                    elif positional_encoding_transform.lower() == 'cnn':
+                        positional_encoding = Conv1DLayer(
+                            conv_kernel_size,
+                            training=training,
+                            n_filters=n_units,
+                            padding='same',
+                            activation=inner_activation,
+                            batch_normalization_decay=batch_normalization_decay,
+                            name=name_cur,
+                            session=session
+                        )(positional_encoding)
+
+                    # Dense transform
+                    elif positional_encoding_transform.lower() == 'dense':
+                        positional_encoding = DenseLayer(
+                            training=training,
+                            units=n_units,
+                            activation=inner_activation,
+                            batch_normalization_decay=batch_normalization_decay,
+                            name=name_cur,
+                            session=session
+                        )(positional_encoding)
+
+                    else:
+                        raise ValueError(
+                            'Unrecognized decoder temporal encoding transform "%s".' % positional_encoding_transform)
+
+                # Apply activation function
+                if positional_encoding_activation:
+                    activation = get_activation(
+                        positional_encoding_activation,
+                        session=session,
+                        training=training
+                    )
+                    positional_encoding = activation(positional_encoding)
+
+            return positional_encoding
+
+
 def preprocess_decoder_inputs(
         decoder_in,
         n_timesteps,
         units_decoder,
         training=True,
         decoder_hidden_state_expansion_type='tile',
+        decoder_positional_encoding=None,
         decoder_positional_encoding_type='periodic',
         decoder_positional_encoding_as_mask=False,
         decoder_positional_encoding_units=32,
@@ -4636,113 +4657,37 @@ def preprocess_decoder_inputs(
                 out *= mask[..., None]
 
             # Create a representation of time to supply to decoder
-            if decoder_positional_encoding_type:
-                if decoder_positional_encoding_transform or not decoder_positional_encoding_as_mask:
-                    positional_encoding_units = decoder_positional_encoding_units
-                else:
-                    positional_encoding_units = out.shape[-1]
-
-                # Create a trainable matrix of weights by timestep
-                if decoder_positional_encoding_type.lower() == 'weights':
-                    positional_encoding = tf.get_variable(
-                        'decoder_positional_encoding_src_%s' % name,
-                        shape=[1, n_timesteps, positional_encoding_units],
-                        initializer=tf.initializers.random_normal,
-                    )
-                    positional_encoding = tf.tile(positional_encoding, [tf.shape(decoder_in)[0], 1, 1])
-
-                # Create a set of periodic functions with trainable phase and frequency
-                elif decoder_positional_encoding_type.lower() in ['periodic', 'transformer_pe']:
-                    time = np.arange(1., n_timesteps + 1.)[None, ..., None]
-                    n = positional_encoding_units // 2
-
-                    if decoder_positional_encoding_type.lower() == 'periodic':
-                        coef = np.exp(np.linspace(-2,2, n))[None, None, ...]
-                    elif decoder_positional_encoding_type.lower() == 'transformer_pe':
-                        log_timescale_increment = np.log(10000) / (n - 1)
-                        coef = (np.exp(np.arange(n) * -log_timescale_increment))[None, None, ...]
-
-                    sin = np.sin(time * coef)
-                    cos = np.cos(time * coef)
-
-                    positional_encoding = np.zeros([1, n_timesteps, positional_encoding_units], dtype=FLOAT_NP)
-                    positional_encoding[..., 0::2] = sin
-                    positional_encoding[..., 1::2] = cos
-
-                else:
-                    raise ValueError(
-                        'Unrecognized decoder temporal encoding type "%s".' % decoder_positional_encoding_type)
-
-                # Transform the temporal encoding
-                if decoder_positional_encoding_transform:
-                    if decoder_positional_encoding_as_mask:
-                        units = out.shape[-1]
+            if decoder_positional_encoding is not None or decoder_positional_encoding_type:
+                n_batch = tf.shape(decoder_in)[0]
+                if decoder_positional_encoding is None:
+                    if decoder_positional_encoding_transform or not decoder_positional_encoding_as_mask:
+                        positional_encoding_units = decoder_positional_encoding_units
                     else:
-                        units = decoder_positional_encoding_units
-
-                    if name:
-                        name_cur = name + '_temporal_encoding_transform'
-                    else:
-                        name_cur = name
-
-                    # RNN transform
-                    if decoder_positional_encoding_transform.lower() == 'rnn':
-                        positional_encoding = RNNLayer(
-                            training=training,
-                            units=units,
-                            activation=tf.tanh,
-                            recurrent_activation=tf.sigmoid,
-                            return_sequences=True,
-                            name=name_cur,
-                            session=session
-                        )(positional_encoding)
-
-                    # CNN transform (1D)
-                    elif decoder_positional_encoding_transform.lower() == 'cnn':
-                        positional_encoding = Conv1DLayer(
-                            decoder_conv_kernel_size,
-                            training=training,
-                            n_filters=units,
-                            padding='same',
-                            activation=decoder_inner_activation,
-                            batch_normalization_decay=decoder_batch_normalization_decay,
-                            name=name_cur,
-                            session=session
-                        )(positional_encoding)
-
-                    # Dense transform
-                    elif decoder_positional_encoding_transform.lower() == 'dense':
-                        positional_encoding = DenseLayer(
-                            training=training,
-                            units=units,
-                            activation=decoder_inner_activation,
-                            batch_normalization_decay=decoder_batch_normalization_decay,
-                            name=name_cur,
-                            session=session
-                        )(positional_encoding)
-
-                    else:
-                        raise ValueError(
-                            'Unrecognized decoder temporal encoding transform "%s".' % decoder_positional_encoding_transform)
-
-                # Apply activation function
-                if decoder_positional_encoding_activation:
-                    activation = get_activation(
-                        decoder_positional_encoding_activation,
+                        positional_encoding_units = out.shape[-1]
+                    decoder_positional_encoding = construct_positional_encoding(
+                        n_timesteps,
+                        positional_encoding_units,
+                        n_batch,
+                        positional_encoding_type=decoder_positional_encoding_type,
+                        positional_encoding_transform=decoder_positional_encoding_transform,
+                        positional_encoding_activation=decoder_positional_encoding_activation,
+                        inner_activation=decoder_inner_activation,
+                        batch_normalization_decay=decoder_batch_normalization_decay,
+                        conv_kernel_size=decoder_conv_kernel_size,
+                        training=training,
+                        name=name,
                         session=session,
-                        training=training
-                    )
-                    positional_encoding = activation(positional_encoding)
+                        float_type=float_type
+                    )[None, ...]
+                    decoder_positional_encoding = tf.tile(decoder_positional_encoding, [n_batch, 1, 1])
 
                 # Apply temporal encoding, either as mask or as extra features
                 if decoder_positional_encoding_as_mask:
-                    positional_encoding = tf.sigmoid(positional_encoding)
-                    out = out * positional_encoding
+                    decoder_positional_encoding = tf.sigmoid(decoder_positional_encoding)
+                    out = out * decoder_positional_encoding
                 else:
-                    positional_encoding = tf.tile(positional_encoding, [tf.shape(out)[0], 1, 1])
-                    out = tf.concat([out, positional_encoding], axis=-1)
+                    out = tf.concat([out, decoder_positional_encoding], axis=-1)
             else:
-                positional_encoding = None
                 final_shape_positional_encoding = None
 
-            return out, positional_encoding, flatten_batch, final_shape, final_shape_positional_encoding
+            return out, decoder_positional_encoding, flatten_batch, final_shape, final_shape_positional_encoding

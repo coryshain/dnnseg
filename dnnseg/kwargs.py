@@ -136,7 +136,7 @@ class Kwarg(object):
 
 UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
 
-    # Global hyperparams
+    # Global
     Kwarg(
         'outdir',
         './dnnseg_model/',
@@ -156,103 +156,19 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to train in streaming mode. If ``True``, past and/or future acoustic features are reconstructed from each frame in the input. If ``False``, VAD regions are pre-segmented and reconstructed from their final state. Ignored unless **task** is ``'segmenter'``."
     ),
     Kwarg(
-        'speaker_emb_dim',
-        None,
-        [int, None],
-        "Train a **speaker_emb_dim** dimensional embedding of the speaker ID to each acoustic frame and to the utterance embedding. If ``None`` or ``0``, no speaker embedding used."
-    ),
-    Kwarg(
-        'append_speaker_emb_to_inputs',
-        False,
-        bool,
-        "Concatenate speaker embedding to inputs to encoder. Ignored if **speaker_emb_dim** is ``None`` or ``0``."
-    ),
-    Kwarg(
-        'n_passthru_neurons',
-        None,
-        [int, None],
-        "Number of passthru neurons to apply at the first layer of the encoder. Passthru neurons are dimensions of the underlying hidden state that get passed directly to the decoder without discretization or other constraints, and are adversarially regressed out of the rest of the hidden state. If ``None`` or ``0``, no passthru used."
-    ),
-    Kwarg(
-        'speaker_adversarial_loss_scale',
-        None,
-        [float, None],
-        "Scale of adversarial loss for residualizing speaker information out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no speaker adversarial training.",
-        aliases=['adversarial_loss_scale']
-    ),
-    Kwarg(
-        'passthru_adversarial_loss_scale',
-        None,
-        [float, None],
-        "Scale of adversarial loss for residualizing contents of passthru neurons out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no passthru adversarial training.",
-        aliases=['adversarial_loss_scale']
-    ),
-    Kwarg(
-        'residual_targets',
-        False,
-        bool,
-        "Use the difference from one timestep to the next as the prediction target, rather than the raw data."
-    ),
-    Kwarg(
-        'speaker_revnet_n_layers',
-        None,
-        [int, None],
-        "Number of layers in RevNet projection of spectral features. If ``None``, no RevNet projection.",
-        aliases=['revnet_n_layers']
-    ),
-    Kwarg(
-        'speaker_revnet_n_layers_inner',
-        1,
-        int,
-        "Number of internal layers in each block of RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``.",
-        aliases=['revnet_n_layers_inner']
-    ),
-    Kwarg(
-        'speaker_revnet_activation',
-        'tanh',
+        'float_type',
+        'float32',
         str,
-        "Activation function to use in RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``.",
-        aliases=['revnet_activation']
+        "``float`` type to use throughout the network."
     ),
     Kwarg(
-        'speaker_revnet_batch_normalization_decay',
-        None,
-        [float, None],
-        "Decay rate to use for batch normalization in RevNet projection of spectral features. If ``None``, no batch normalization. Ignored if **revnet_n_layers** is ``None``.",
-        aliases=['batch_normalization_decay', 'revnet_batch_normalization_decay']
-    ),
-    Kwarg(
-        'input_batch_normalization_decay',
-        None,
-        [float, None],
-        "Decay rate to use for batch normalization of inputs. If ``None``, no batch normalization."
-    ),
-    Kwarg(
-        'utt_len_emb_dim',
-        None,
-        [int, None],
-        "Append **utt_len_emb_dim** embedding of utterance length (number of non-padding characters) to the classifier output for capturing temporal dilation. If ``None`` or ``0``, no additional embedding for utterance length."
-    ),
-    Kwarg(
-        'dtw_gamma',
-        None,
-        [float, None],
-        "Smoothing parameter to use for soft-DTW objective. If ``Nonw``, do not use soft-DTW."
-    ),
-    Kwarg(
-        'binary_classifier',
-        True,
-        bool,
-        "Implement the classifier as a binary code in which categories can share bits. If ``False``, implements the classifier using independent categories."
-    ),
-    Kwarg(
-        'emb_dim',
-        None,
-        [int, None],
-        "Append **emb_dim** ELU-activated pass-through channels to the encoder output for capturing category-internal variation. If ``None`` or ``0``, no additional embedding dimensions."
+        'int_type',
+        'int32',
+        str,
+        "``int`` type to use throughout the network (used for tensor slicing)."
     ),
 
-    # Data hyperparams
+    # Data
     Kwarg(
         'data_type',
         'acoustic',
@@ -302,6 +218,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to normalize over entire file or just VAD regions."
     ),
     Kwarg(
+        'constrain_output',
+        False,
+        bool,
+        "Use an output model constrained to :math:`[0, 1]` (sigmoid with cross-entropy loss if MLE and LogitNormal if Bayesian). Otherwise, use linear/normal output. Ignored unless **normalize_data* is ``True``."
+    ),
+    Kwarg(
         'pad_seqs',
         True,
         bool,
@@ -326,28 +248,16 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Maximum sequence length. If ``None``, no maximum length imposed."
     ),
     Kwarg(
-        'predict_backward',
-        True,
-        bool,
-        "Whether to predict backward (reconstruct previous inputs). Ignored unless **task** is ``'segmenter'`` and **streaming** is ``True``."
+        'n_timesteps_input',
+        None,
+        [int, None],
+        "Number of timesteps present in the input data. If ``None``, inferred from data, possibly with different values between batches."
     ),
     Kwarg(
-        'window_len_bwd',
-        50,
-        int,
-        "Length of backward-looking prediction targets (in frames). Ignored unless **task** is ``'segmenter'``, **streaming** is ``True``, and **predict_backward** is ``True``."
-    ),
-    Kwarg(
-        'predict_forward',
-        True,
-        bool,
-        "Whether to predict forward (predict future inputs). Ignored unless **task** is ``'segmenter'`` and **streaming** is ``True``."
-    ),
-    Kwarg(
-        'window_len_fwd',
-        50,
-        int,
-        "Length of forward-looking prediction targets (in frames). Ignored unless **task** is ``'segmenter'``, **streaming** is ``True``, and **predict_forward** is ``True``."
+        'n_timesteps_output',
+        None,
+        [int, None],
+        "Number of timesteps present in the target data. If ``None``, inferred from data, possibly with different values between batches."
     ),
     Kwarg(
         'resample_inputs',
@@ -369,6 +279,266 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Resample forward targets to fixed length **resample_targets_fwd** timesteps. If ``None``, no forward target resampling.",
         aliases=['resample_targets']
     ),
+
+    # Input model
+    Kwarg(
+        'input_batch_normalization_decay',
+        None,
+        [float, None],
+        "Decay rate to use for batch normalization of inputs. If ``None``, no batch normalization."
+    ),
+
+    # Speaker model
+    Kwarg(
+        'speaker_emb_dim',
+        None,
+        [int, None],
+        "Train a **speaker_emb_dim** dimensional embedding of the speaker ID to each acoustic frame and to the utterance embedding. If ``None`` or ``0``, no speaker embedding used."
+    ),
+    Kwarg(
+        'append_speaker_emb_to_inputs',
+        False,
+        bool,
+        "Concatenate speaker embedding to inputs to encoder. Ignored if **speaker_emb_dim** is ``None`` or ``0``."
+    ),
+    Kwarg(
+        'speaker_adversarial_loss_scale',
+        None,
+        [float, None],
+        "Scale of adversarial loss for residualizing speaker information out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no speaker adversarial training.",
+        aliases=['adversarial_loss_scale']
+    ),
+    Kwarg(
+        'speaker_revnet_n_layers',
+        None,
+        [int, None],
+        "Number of layers in RevNet projection of spectral features. If ``None``, no RevNet projection.",
+        aliases=['revnet_n_layers']
+    ),
+    Kwarg(
+        'speaker_revnet_n_layers_inner',
+        1,
+        int,
+        "Number of internal layers in each block of RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['revnet_n_layers_inner']
+    ),
+    Kwarg(
+        'speaker_revnet_activation',
+        'tanh',
+        str,
+        "Activation function to use in RevNet projection of spectral features. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['revnet_activation']
+    ),
+    Kwarg(
+        'speaker_revnet_batch_normalization_decay',
+        None,
+        [float, None],
+        "Decay rate to use for batch normalization in RevNet projection of spectral features. If ``None``, no batch normalization. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['batch_normalization_decay', 'revnet_batch_normalization_decay']
+    ),
+
+    # Passthru model
+    Kwarg(
+        'n_passthru_neurons',
+        None,
+        [int, None],
+        "Number of passthru neurons to apply at the first layer of the encoder. Passthru neurons are dimensions of the underlying hidden state that get passed directly to the decoder without discretization or other constraints, and are adversarially regressed out of the rest of the hidden state. If ``None`` or ``0``, no passthru used."
+    ),
+    Kwarg(
+        'passthru_adversarial_loss_scale',
+        None,
+        [float, None],
+        "Scale of adversarial loss for residualizing contents of passthru neurons out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no passthru adversarial training.",
+        aliases=['adversarial_loss_scale']
+    ),
+    Kwarg(
+        'emb_dim',
+        None,
+        [int, None],
+        "Append **emb_dim** ELU-activated pass-through channels to the encoder output for capturing category-internal variation. If ``None`` or ``0``, no additional embedding dimensions."
+    ),
+
+    # Objective
+    Kwarg(
+        'predict_deltas',
+        False,
+        bool,
+        "Include derivatives in the prediction targets."
+    ),
+    Kwarg(
+        'dtw_gamma',
+        None,
+        [float, None],
+        "Smoothing parameter to use for soft-DTW objective. If ``Nonw``, do not use soft-DTW."
+    ),
+    Kwarg(
+        'l2_normalize_targets',
+        False,
+        bool,
+        "Whether to L2 normalize decoder targets.",
+    ),
+    Kwarg(
+        'residual_targets',
+        False,
+        bool,
+        "Use the difference from one timestep to the next as the prediction target, rather than the raw data."
+    ),
+    Kwarg(
+        'binary_classifier',
+        True,
+        bool,
+        "Implement the classifier as a binary code in which categories can share bits. If ``False``, implements the classifier using independent categories."
+    ),
+    Kwarg(
+        'predict_backward',
+        True,
+        bool,
+        "Whether to predict backward (reconstruct previous inputs). Ignored unless **task** is ``'segmenter'`` and **streaming** is ``True``."
+    ),
+    Kwarg(
+        'predict_forward',
+        True,
+        bool,
+        "Whether to predict forward (predict future inputs). Ignored unless **task** is ``'segmenter'`` and **streaming** is ``True``."
+    ),
+    Kwarg(
+        'window_len_bwd',
+        50,
+        int,
+        "Length of backward-looking prediction targets (in frames). Ignored unless **task** is ``'segmenter'``, **streaming** is ``True``, and **predict_backward** is ``True``."
+    ),
+    Kwarg(
+        'window_len_fwd',
+        50,
+        int,
+        "Length of forward-looking prediction targets (in frames). Ignored unless **task** is ``'segmenter'``, **streaming** is ``True``, and **predict_forward** is ``True``."
+    ),
+    Kwarg(
+        'reverse_targets',
+        True,
+        bool,
+        "Reverse the temporal dimension of the reconstruction targets."
+    ),
+    Kwarg(
+        'backprop_into_targets',
+        False,
+        bool,
+        "Whether to backprop into prediction targets."
+    ),
+    Kwarg(
+        'backprop_into_loss_weights',
+        False,
+        bool,
+        "Whether to backprop into weight mask on losses (matters in ``masked_neighbor`` setting for LM loss)."
+    ),
+    Kwarg(
+        'xent_state_predictions',
+        False,
+        bool,
+        "Whether to convert encoder state values to probabilities and predict them using cross-entropy."
+    ),
+
+    # Correspondence AE
+    Kwarg(
+        'n_correspondence',
+        None,
+        [int, None],
+        "Number of discovered segments to use to compute correspondence autoencoder auxiliary loss. If ``0`` or ``None``, do not use correpondence autoencoder."
+    ),
+    Kwarg(
+        'resample_correspondence',
+        25,
+        int,
+        "Number of timesteps to which correspondence autoencoder targets should be resampled. Ignored if **n_correspondence** is ``0`` or ``None``."
+    ),
+    Kwarg(
+        'correspondence_start_step',
+        1,
+        int,
+        "Step number (batch if **streaming** or iteration otherwise) at which to start minimizing correpondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
+    ),
+    Kwarg(
+        'correspondence_loss_scale',
+        None,
+        [float, None],
+        "Coefficient by which to scale correspondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
+    ),
+    Kwarg(
+        'correspondence_loss_implementation',
+        3,
+        int,
+        "Implementation of correspondence AE loss. One of ``[1, 2, 3]``. Implementation 1: Take average of acoustics of saved segments, weighted by cosine similarity to current states. Implementation 2: Use acoustics of most similar saved segment to current state. Implementation 3: Take average of losses with respect to each saved segment, weighted by cosine similarity to the current state."
+    ),
+    Kwarg(
+        'correspondence_live_targets',
+        False,
+        bool,
+        "Whether to compute correspondence AE loss against targets sampled from segmentations generated for the current minibatch. If ``False``, correspondence targets are sampled from previous minibatch. When used, correspondence targets faithfully represent the current state of the network and losses backpropagate into the representations and boundaries of both segments in the pair, but computing losses is more computationally intensive because Fourier resampling of acoustic features must be performed inside the Tensorflow graph."
+    ),
+    Kwarg(
+        'correspondence_n_timesteps',
+        None,
+        [int, None],
+        "Number of timesteps per utterance to use for computing correspondence loss. If positive integer :math:`k`, use only the math:`k` most probable segmentation points per segmenter network. If ``0`` or ``None``, use all timesteps."
+    ),
+    Kwarg(
+        'correspondence_alpha',
+        1.,
+        float,
+        "Peakiness factor for correspondence AE loss. If ``1``, use cosine similarity weights directly. If ``< 1``, decrease peakiness of weights. If ``> 1``, increase peakiness of weights. Ignored unless **correspondence_implementation** is ``1``."
+    ),
+
+    # Language model
+    Kwarg(
+        'lm_loss_scale',
+        None,
+        [float, str, None],
+        "Scale of layerwise encoder language modeling objective in the loss function. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
+    ),
+    Kwarg(
+        'lm_loss_type',
+        'masked_neighbors',
+        str,
+        "Type of LM loss. One of ``['neighbors', 'masked_neighbors', 'srn']``."
+    ),
+    Kwarg(
+        'lm_masking_mode',
+        'drop_masked',
+        str,
+        "Type of prediction to use in masked LM mode. One of ``['drop_masked', 'predict_at_boundaries', 'predict_everywhere']``. If ``drop_masked``, drop all non-boundary frames. If ``predict_at_masked``, predict non-boundary frames but only at boundaries. If ``predict_everywhere``, predict non-boundary frames from all timesteps. Ignored unless **lm_loss_type** is ``'masked_neighbors'``."
+    ),
+    Kwarg(
+        'lm_order_fwd',
+        1,
+        int,
+        "Order of forward language model (number of timesteps to predict)."
+    ),
+    Kwarg(
+        'lm_order_bwd',
+        0,
+        int,
+        "Order of backward language model (number of timesteps to predict)."
+    ),
+    Kwarg(
+        'lm_use_upper',
+        False,
+        bool,
+        "Whether to condition LM predictions on upper layers."
+    ),
+    Kwarg(
+        'lm_boundaries_as_attn',
+        False,
+        bool,
+        "Whether to use boundaries as attention mask to admit upper layers in proportion to the probability that they are the lowest non-segmenting layer. Ignored unless **lm_use_upper** is ``True``."
+    ),
+    Kwarg(
+        'scale_losses_by_boundaries',
+        False,
+        bool,
+        "Whether to scale LM and CAE losses by the corresponding boundary decisions.",
+    ),
+
+    # Curriculum settings
     Kwarg(
         'curriculum_type',
         None,
@@ -387,11 +557,310 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         int,
         "Number of steps (minibatches if **streaming** is ``True``, otherwise iterations) over which to execute a unit increase in window length (if **curriculum_type** is ``'hard'``), denominator of exponential decay rate (if **curriculum_type** is ``'exp'``), or shift of sigmoid center (if **curriculum_type** is ``'sigmoid'``). Ignored if **curriculum_type** is ``None``."
     ),
+
+    # Regularization
     Kwarg(
-        'reverse_targets',
+        'regularizer_name',
+        None,
+        [str, None],
+        "Name of global regularizer. If ``None``, no regularization."
+    ),
+    Kwarg(
+        'regularizer_scale',
+        0.01,
+        float,
+        "Scale of global regularizer (ignored if ``regularizer_name==None``)."
+    ),
+    Kwarg(
+        'segment_encoding_correspondence_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer encouraging correspondence between segment encodings in the encoder and segment decodings in the decoder. Only used if the encoder and decoder have identical numbers of layers with identical numbers of units in each layer. If ``None``, no regularization for segment encoding correspondence."
+    ),
+
+    # Encoder
+    Kwarg(
+        'encoder_type',
+        'rnn',
+        str,
+        "Encoder network to use. One of ``dense``, ``cnn``, or ``rnn``."
+    ),
+    Kwarg(
+        'encoder_use_bias',
         True,
         bool,
-        "Reverse the temporal dimension of the reconstruction targets."
+        "Whether to include bias units in encoder layers."
+    ),
+    Kwarg(
+        'encoder_bptt',
+        True,
+        bool,
+        "Backpropagate error through time in the HM-LSTM encoder.",
+    ),
+    Kwarg(
+        'encoder_conv_kernel_size',
+        3,
+        int,
+        "Size of kernel to use in convolutional encoder layers. Ignored if no convolutional encoder layers in the model.",
+        aliases=['conv_kernel_size']
+    ),
+    Kwarg(
+        'n_layers_encoder',
+        None,
+        [int, None],
+        "Number of layers to use for encoder. If ``None``, inferred from length of **n_units_encoder**."
+    ),
+    Kwarg(
+        'n_units_encoder',
+        None,
+        [int, str, None],
+        "Number of units to use in non-final encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
+    ),
+    Kwarg(
+        'encoder_boundary_implementation',
+        2,
+        int,
+        "Implementation to use for HM-LSTM encoder boundary neuron. If ``1``, use a dedicated cell of the hidden state. If ``2``, use a dense kernel over the hidden state.",
+    ),
+    Kwarg(
+        'nested_boundaries',
+        False,
+        bool,
+        "Whether to mask boundaries using the boundaries from the layer below."
+    ),
+    Kwarg(
+        'hmlstm_kernel_depth',
+        1,
+        int,
+        "Depth of deep kernel in HM-LSTM transition model."
+    ),
+    Kwarg(
+        'hmlstm_prefinal_mode',
+        'max',
+        str,
+        "Mode for choosing the number of hidden units in pre-final layers of HM-LSTM's with deep transitions. One of ``['in', 'out', 'max']``, for number input dimensions, number of output dimensions, and max of input and output dimensions, respectively. Ignored unless **hmlstm_kernel_depth** > 1."
+    ),
+    Kwarg(
+        'encoder_activation',
+        None,
+        [str, None],
+        "Name of activation to use at the output of the encoder",
+    ),
+    Kwarg(
+        'encoder_inner_activation',
+        'tanh',
+        [str, None],
+        "Name of activation to use for any internal layers of the encoder",
+        aliases=['inner_activation']
+    ),
+    Kwarg(
+        'encoder_recurrent_activation',
+        'sigmoid',
+        [str, None],
+        "Name of activation to use for recurrent activation in recurrent layers of the encoder. Ignored if encoder is not recurrent.",
+        aliases=['recurrent_activation']
+    ),
+    Kwarg(
+        'encoder_boundary_activation',
+        'sigmoid',
+        [str, None],
+        "Name of activation to use for boundary activation in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM.",
+        aliases=['boundary_activation']
+    ),
+    Kwarg(
+        'encoder_prefinal_activation',
+        'elu',
+        [str, None],
+        "Name of activation to use for prefinal layers in an HM-LSTM encoder with deep transitions. Ignored if encoder is not an HM-LSTM or if **hmlstm_kernel_depth** < 2.",
+        aliases=['boundary_activation']
+    ),
+    Kwarg(
+        'encoder_resnet_n_layers_inner',
+        None,
+        [int, None],
+        "Implement internal encoder layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
+        aliases=['resnet_n_layers_inner']
+    ),
+    Kwarg(
+        'oracle_boundaries',
+        None,
+        [str, None],
+        "Type of boundary to use for oracle evaluation (one of ``['vad', 'phn', 'wrd', 'rnd', None]``). If ``None``, do not use oracle boundaries. Ignored unless **task** is ``'segmenter'``."
+    ),
+    Kwarg(
+        'random_oracle_segmentation_rate',
+        None,
+        [float, None],
+        "Rate of segmentation to use if **oracle_boundaries** is ``rnd``."
+    ),
+    Kwarg(
+        'encoder_force_vad_boundaries',
+        True,
+        bool,
+        "Whether to force segmentation probabilities to 1 at the ends of VAD regions."
+    ),
+
+    # Encoder RevNet
+    Kwarg(
+        'encoder_revnet_n_layers',
+        None,
+        [int, None],
+        "Number of layers in RevNet projection of layerwise encoder inputs. If ``None``, no RevNet projection.",
+        aliases=['revnet_n_layers']
+    ),
+    Kwarg(
+        'encoder_revnet_n_layers_inner',
+        1,
+        int,
+        "Number of internal layers in each block of RevNet projection of layerwise encoder inputs. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['revnet_n_layers_inner']
+    ),
+    Kwarg(
+        'encoder_revnet_activation',
+        'elu',
+        str,
+        "Activation function to use in RevNet projection of layerwise encoder inputs. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['revnet_activation']
+    ),
+    Kwarg(
+        'encoder_revnet_batch_normalization_decay',
+        None,
+        [float, None],
+        "Decay rate to use for batch normalization in RevNet projection of layerwise encoder inputs. If ``None``, no batch normalization. Ignored if **revnet_n_layers** is ``None``.",
+        aliases=['batch_normalization_decay', 'revnet_batch_normalization_decay']
+    ),
+
+    # Encoder discretization
+    Kwarg(
+        'sample_at_train',
+        True,
+        bool,
+        "Use Bernoulli sampling (rather than rounding) for BSNs during training phase. Ignored unless model contains BSNs."
+    ),
+    Kwarg(
+        'sample_at_eval',
+        False,
+        bool,
+        "Use Bernoulli sampling (rather than rounding) for BSNs during evaluation phase. Ignored unless model contains BSNs."
+    ),
+    Kwarg(
+        'min_discretization_prob',
+        None,
+        [float, None],
+        "Minimum probability of discretizing. If ``None``, always discretize discretized variables."
+    ),
+    Kwarg(
+        'trainable_self_discretization',
+        True,
+        bool,
+        "Whether to allow gradients into the decision to discretize. Ignored if **min_discretization_prob** is ``None``."
+    ),
+    Kwarg(
+        'slope_annealing_max',
+        None,
+        [float, None],
+        "Maximum allowed value of the slope annealing coefficient. If ``None``, no maximum will be enforced."
+    ),
+
+    # Encoder boundary discretization
+    Kwarg(
+        'encoder_boundary_discretizer',
+        None,
+        [str, None],
+        "Discretization function to apply to encoder boundary activations, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
+    ),
+    Kwarg(
+        'boundary_slope_annealing_rate',
+        None,
+        [float, None],
+        "Whether to anneal the slopes of the boundary activations.",
+        aliases=['slope_annealing_rate']
+    ),
+
+    # Encoder state discretization
+    Kwarg(
+        'encoder_state_discretizer',
+        None,
+        [str, None],
+        "Discretization function to apply to encoder hidden states, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
+    ),
+    Kwarg(
+        'encoder_discretize_state_at_boundary',
+        False,
+        bool,
+        "Discretize state at boundary only. Otherwise, encoder state is fully discretized. Ignored if **encoder_state_discretizer** is ``None``."
+    ),
+    Kwarg(
+        'encoder_discretize_final',
+        False,
+        bool,
+        "Whether to discretize the final layer. Ignored if **encoder_state_discretizer** is ``None``."
+    ),
+    Kwarg(
+        'state_slope_annealing_rate',
+        None,
+        [float, None],
+        "Whether to anneal the slopes of the hidden state activations.",
+        aliases=['slope_annealing_rate']
+    ),
+
+    # Encoder normalization
+    Kwarg(
+        'encoder_weight_normalization',
+        False,
+        bool,
+        "Apply weight normalization to encoder. Ignored unless encoder is recurrent."
+    ),
+    Kwarg(
+        'encoder_layer_normalization',
+        False,
+        bool,
+        "Apply layer normalization to encoder. Ignored unless encoder is recurrent."
+    ),
+    Kwarg(
+        'encoder_batch_normalization_decay',
+        None,
+        [float, None],
+        "Decay rate to use for batch normalization in internal encoder layers. If ``None``, no batch normalization.",
+        aliases=['batch_normalization_decay']
+    ),
+    Kwarg(
+        'batch_normalize_encodings',
+        False,
+        bool,
+        "Batch normalize latent segment encodings."
+    ),
+    Kwarg(
+        'encoder_l2_normalize_states',
+        False,
+        bool,
+        "Whether to L2 normalize encoder states.",
+    ),
+
+    # Encoder regularization
+    Kwarg(
+        'encoder_weight_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder weight regularization. If ``float``, scale of encoder L2 weight regularization. If ``None``, no encoder weight regularization."
+    ),
+    Kwarg(
+        'encoder_state_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder state regularization. If ``float``, scale of encoder L2 state regularization. If ``None``, no encoder state regularization."
+    ),
+    Kwarg(
+        'encoder_cell_proposal_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder cell proposal regularization. If ``float``, scale of encoder L2 cell proposal regularization. If ``None``, no encoder cell proposal regularization."
+    ),
+    Kwarg(
+        'encoder_dropout',
+        None,
+        [float, None],
+        "Dropout rate to use in the encoder",
     ),
     Kwarg(
         'temporal_dropout_rate',
@@ -405,8 +874,205 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         bool,
         "Whether to plug language model predictions into dropped timesteps when temporal dropout is on."
     ),
+    Kwarg(
+        'encoder_bottomup_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder bottom-up inputs at each layer.",
+        aliases=['encoder_input_noise_sd']
+    ),
+    Kwarg(
+        'encoder_recurrent_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder recurrent inputs at each layer.",
+        aliases=['encoder_input_noise_sd']
+    ),
+    Kwarg(
+        'encoder_topdown_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder top-down inputs at each layer.",
+        aliases=['encoder_input_noise_sd']
+    ),
+    Kwarg(
+        'encoder_boundary_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into logits of boundary probabilities during training."
+    ),
+    Kwarg(
+        'encoder_state_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the pre-gated encoder outputs."
+    ),
+    Kwarg(
+        'entropy_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer on binary entropy. If ``None``, no entropy regularization."
+    ),
+    Kwarg(
+        'boundary_prob_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer on boundary activation probabilities. If ``None``, no boundary probability regularization."
+    ),
+    Kwarg(
+        'boundary_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of regularizer on boundary activations. If ``None``, no boundary regularization."
+    ),
 
-    # Optimization hyperparams
+    # Decoder
+    Kwarg(
+        'decoder_type',
+        'rnn',
+        str,
+        "Decoder network to use. One of ``dense``, ``cnn``, or ``rnn``."
+    ),
+    Kwarg(
+        'decoder_concatenate_hidden_states',
+        False,
+        bool,
+        "Whether to concatenate the hidden states from all encoder layers as input to the decoder. If ``False``, only the hidden state from the final layer will be used."
+    ),
+    Kwarg(
+        'decoder_conv_kernel_size',
+        3,
+        int,
+        "Size of kernel to use in convolutional decoder layers. Ignored if no convolutional decoder layers in the model."
+    ),
+    Kwarg(
+        'n_layers_decoder',
+        2,
+        [int, None],
+        "Number of layers to use for decoder. If ``None``, inferred from length of **n_units_decoder**."
+    ),
+    Kwarg(
+        'n_units_decoder',
+        None,
+        [int, str, None],
+        "Number of units to use in decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
+    ),
+    Kwarg(
+        'decoder_activation',
+        None,
+        [str, None],
+        "Name of activation to use at the output of the decoder"
+    ),
+    Kwarg(
+        'decoder_inner_activation',
+        None,
+        [str, None],
+        "Name of activation to use for any internal layers of the decoder",
+        aliases=['inner_activation']
+    ),
+    Kwarg(
+        'decoder_recurrent_activation',
+        'sigmoid',
+        [str, None],
+        "Name of activation to use for recurrent activation in recurrent layers of the decoder. Ignored if decoder is not recurrent.",
+        aliases=['recurrent_activation']
+    ),
+    Kwarg(
+        'decoder_resnet_n_layers_inner',
+        None,
+        [int, None],
+        "Implement internal decode layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
+        aliases=['resnet_n_layers_inner']
+    ),
+    Kwarg(
+        'decoder_use_input_length',
+        False,
+        bool,
+        "Explicitly pass number of non-padding frames in input as feature to the decoder."
+    ),
+    Kwarg(
+        'residual_decoder',
+        False,
+        bool,
+        "Compute the decoding as a sum of the network outputs and the mean activations of all cells in the training data."
+    ),
+
+    # Decoder normalization
+    Kwarg(
+        'decoder_batch_normalization_decay',
+        None,
+        [float, None],
+        "Decay rate to use for batch normalization in internal decoder layers. If ``None``, no batch normalization.",
+        aliases=['batch_normalization_decay']
+    ),
+
+    # Decoder regularization
+    Kwarg(
+        'decoder_dropout',
+        None,
+        [float, None],
+        "Dropout rate to use in the decoder",
+    ),
+    
+    # Encoder projection
+    Kwarg(
+        'n_layers_decoder_input_projection',
+        None,
+        [int, None],
+        "Number of hidden layers to use for projection of decoder inputs. If ``None``, no projection."
+    ),
+    Kwarg(
+        'decoder_input_projection_activation_inner',
+        'elu',
+        [str, None],
+        "Name of activation to use for prefinal layers in projection function of decoder inputs.",
+    ),
+
+    # Decoder positional encoding
+    Kwarg(
+        'decoder_hidden_state_expansion_type',
+        'tile',
+        str,
+        "Technique for expanding the decoder inputs over time. One of [``tile``, ``dense``], where ``tile`` tiles the state over time while ``dense`` applies and reshapes a dense layer with ``n_feats * n_timesteps`` outputs."
+    ),
+    Kwarg(
+        'decoder_positional_encoding_type',
+        None,
+        [None, str],
+        "Technique for representing time to the decoder. One of [``transformer_pe``, ``periodic``, ``weights``], where ``transformer_pe`` uses the Transformer positional encoding, ``periodic`` uses **decoder_positional_encoding_units** sin and cosine waves (with more high-frequency components than Transformer), and ``weights`` uses trainable vectors of **decoder_positional_encoding_units**, one for each timestep. If ``None``, no temporal encoding."
+    ),
+    Kwarg(
+        'decoder_positional_encoding_units',
+        32,
+        [int, None],
+        "Number of dimensions per timestep to use for the temporal input to the decoder."
+    ),
+    Kwarg(
+        'decoder_positional_encoding_transform',
+        None,
+        [str, None],
+        "Technique for transforming the base temporal input to the decoder. One of [``None``, ``dense``, ``rnn``, ``cnn``]. If ``None``, no transform."
+    ),
+    Kwarg(
+        'decoder_positional_encoding_activation',
+        None,
+        [str, None],
+        "Activation function for temporal encoding, or linear activation if ``None``."
+    ),
+    Kwarg(
+        'decoder_positional_encoding_as_mask',
+        False,
+        bool,
+        "Whether to use the temporal encoding as a mask. If ``True``, temporal encoding will be conformable to input encoder state and sigmoid activated, serving as soft attention over the expanded hidden state. If ``False``, the temporal encoding is dimensionality **decoder_positional_encoding_units** and is concatenated to the expanded hidden state features."
+    ),
+    Kwarg(
+        'decoder_positional_encoding_lock_to_data',
+        True,
+        bool,
+        "Whether to lock the positional encoding to the frame rate of the data. If ``True``, positional encodings will reflect the distance from decoder start in number of input frames. Otherwise, positional embeddings will reflect the distance from decoder start in number of segments. Affects higher layer language modeling losses."
+    ),
+
+    # Optimization
     Kwarg(
         'optim_name',
         'Nadam',
@@ -514,7 +1180,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of steps (minibatches if **streaming** is ``True``, otherwise iterations) during which to pre-train the decoder without backpropagating into the encoder."
     ),
 
-    # Checkpoint settings
+    # Checkpoint
     Kwarg(
         'save_freq',
         1,
@@ -540,638 +1206,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Log the network graph to Tensorboard"
     ),
 
-    # Encoder hyperparams
-    Kwarg(
-        'encoder_type',
-        'rnn',
-        str,
-        "Encoder network to use. One of ``dense``, ``cnn``, or ``rnn``."
-    ),
-    Kwarg(
-        'embed_inputs',
-        False,
-        bool,
-        "Apply a dense layer to each input frame prior to processing with the encoder."
-    ),
-    Kwarg(
-        'n_layers_encoder',
-        None,
-        [int, None],
-        "Number of layers to use for encoder. If ``None``, inferred from length of **n_units_encoder**."
-    ),
-    Kwarg(
-        'n_units_encoder',
-        None,
-        [int, str, None],
-        "Number of units to use in non-final encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
-    ),
-    Kwarg(
-        'encoder_activation',
-        None,
-        [str, None],
-        "Name of activation to use at the output of the encoder",
-    ),
-    Kwarg(
-        'encoder_dropout',
-        None,
-        [float, None],
-        "Dropout rate to use in the encoder",
-    ),
-    Kwarg(
-        'encoder_inner_activation',
-        'tanh',
-        [str, None],
-        "Name of activation to use for any internal layers of the encoder",
-        aliases=['inner_activation']
-    ),
-    Kwarg(
-        'encoder_recurrent_activation',
-        'sigmoid',
-        [str, None],
-        "Name of activation to use for recurrent activation in recurrent layers of the encoder. Ignored if encoder is not recurrent.",
-        aliases=['recurrent_activation']
-    ),
-    Kwarg(
-        'encoder_boundary_activation',
-        'sigmoid',
-        [str, None],
-        "Name of activation to use for boundary activation in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM.",
-        aliases=['boundary_activation']
-    ),
-    Kwarg(
-        'encoder_prefinal_activation',
-        'elu',
-        [str, None],
-        "Name of activation to use for prefinal layers in an HM-LSTM encoder with deep transitions. Ignored if encoder is not an HM-LSTM or if **hmlstm_kernel_depth** < 2.",
-        aliases=['boundary_activation']
-    ),
-    Kwarg(
-        'encoder_boundary_implementation',
-        2,
-        int,
-        "Implementation to use for HM-LSTM encoder boundary neuron. If ``1``, use a dedicated cell of the hidden state. If ``2``, use a dense kernel over the hidden state.",
-    ),
-    Kwarg(
-        'encoder_conv_kernel_size',
-        3,
-        int,
-        "Size of kernel to use in convolutional encoder layers. Ignored if no convolutional encoder layers in the model.",
-        aliases=['conv_kernel_size']
-    ),
-    Kwarg(
-        'encoder_l2_normalize_states',
-        False,
-        bool,
-        "Whether to L2 normalize encoder states.",
-    ),
-    Kwarg(
-        'l2_normalize_targets',
-        False,
-        bool,
-        "Whether to L2 normalize decoder targets.",
-    ),
-    Kwarg(
-        'encoder_bptt',
-        True,
-        bool,
-        "Backpropagate error through time in the HM-LSTM encoder. Ignored if **task** is ``classifier``.",
-    ),
-    Kwarg(
-        'hmlstm_kernel_depth',
-        1,
-        int,
-        "Depth of deep kernel in HM-LSTM transition model."
-    ),
-    Kwarg(
-        'hmlstm_prefinal_mode',
-        'max',
-        str,
-        "Mode for choosing the number of hidden units in pre-final layers of HM-LSTM's with deep transitions. One of ``['in', 'out', 'max']``, for number input dimensions, number of output dimensions, and max of input and output dimensions, respectively. Ignored unless **hmlstm_kernel_depth** > 1."
-    ),
-    Kwarg(
-        'decoder_concatenate_hidden_states',
-        False,
-        bool,
-        "Whether to concatenate the hidden states from all encoder layers as input to the decoder. If ``False``, only the hidden state from the final layer will be used."
-    ),
-    Kwarg(
-        'oracle_boundaries',
-        None,
-        [str, None],
-        "Type of boundary to use for oracle evaluation (one of ``['vad', 'phn', 'wrd', 'rnd', None]``). If ``None``, do not use oracle boundaries. Ignored unless **task** is ``'segmenter'``."
-    ),
-    Kwarg(
-        'random_oracle_segmentation_rate',
-        None,
-        [float, None],
-        "Rate of segmentation to use if **oracle_boundaries** is ``rnd``."
-    ),
-    Kwarg(
-        'encoder_use_timing_unit',
-        False,
-        bool,
-        "Whether to supply a timing unit (non-linear activation increase between segmentations) to the encoder layers. Ignored if encoder is not an HM-LSTM."
-    ),
-    Kwarg(
-        'encoder_boundary_discretizer',
-        None,
-        [str, None],
-        "Discretization function to apply to encoder boundary activations, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
-    ),
-    Kwarg(
-        'encoder_boundary_noise_sd',
-        None,
-        [float, None],
-        "Standard deviation of Gaussian 'whiteout' noise to inject into logits of boundary probabilities during training."
-    ),
-    Kwarg(
-        'boundary_slope_annealing_rate',
-        None,
-        [float, None],
-        "Whether to anneal the slopes of the boundary activations.",
-        aliases=['slope_annealing_rate']
-    ),
-    Kwarg(
-        'nested_boundaries',
-        False,
-        bool,
-        "Whether to mask boundaries using the boundaries from the layer below."
-    ),
-    Kwarg(
-        'encoder_state_discretizer',
-        None,
-        [str, None],
-        "Discretization function to apply to encoder hidden states, currently only ``None`` and ``bsn`` supported. If ``None``, no discretization."
-    ),
-    Kwarg(
-        'encoder_discretize_state_at_boundary',
-        False,
-        bool,
-        "Discretize state at boundary only. Otherwise, encoder state is fully discretized. Ignored if **encoder_state_discretizer** is ``None``."
-    ),
-    Kwarg(
-        'encoder_discretize_final',
-        False,
-        bool,
-        "Whether to discretize the final layer. Ignored if **encoder_state_discretizer** is ``None``."
-    ),
-    Kwarg(
-        'encoder_state_noise_sd',
-        None,
-        [float, None],
-        "Standard deviation of Gaussian 'whiteout' noise to inject into the pre-gated encoder outputs."
-    ),
-    Kwarg(
-        'state_slope_annealing_rate',
-        None,
-        [float, None],
-        "Whether to anneal the slopes of the hidden state activations.",
-        aliases=['slope_annealing_rate']
-    ),
-    Kwarg(
-        'encoder_bottomup_noise_sd',
-        None,
-        [float, None],
-        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder bottom-up inputs at each layer.",
-        aliases=['encoder_input_noise_sd']
-    ),
-    Kwarg(
-        'encoder_recurrent_noise_sd',
-        None,
-        [float, None],
-        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder recurrent inputs at each layer.",
-        aliases = ['encoder_input_noise_sd']
-    ),
-    Kwarg(
-        'encoder_topdown_noise_sd',
-        None,
-        [float, None],
-        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder top-down inputs at each layer.",
-        aliases=['encoder_input_noise_sd']
-    ),
-    Kwarg(
-        'slope_annealing_max',
-        None,
-        [float, None],
-        "Maximum allowed value of the slope annealing coefficient. If ``None``, no maximum will be enforced."
-    ),
-    Kwarg(
-        'min_discretization_prob',
-        None,
-        [float, None],
-        "Minimum probability of discretizing. If ``None``, always discretize discretized variables."
-    ),
-    Kwarg(
-        'trainable_self_discretization',
-        True,
-        bool,
-        "Whether to allow gradients into the decision to discretize. Ignored if **min_discretization_prob** is ``None``."
-    ),
-    Kwarg(
-        'sample_at_train',
-        True,
-        bool,
-        "Use Bernoulli sampling (rather than rounding) for BSNs during training phase. Ignored unless model contains BSNs."
-    ),
-    Kwarg(
-        'sample_at_eval',
-        False,
-        bool,
-        "Use Bernoulli sampling (rather than rounding) for BSNs during evaluation phase. Ignored unless model contains BSNs."
-    ),
-    Kwarg(
-        'encoder_weight_normalization',
-        False,
-        bool,
-        "Apply weight normalization to encoder. Ignored unless encoder is recurrent."
-    ),
-    Kwarg(
-        'encoder_layer_normalization',
-        False,
-        bool,
-        "Apply layer normalization to encoder. Ignored unless encoder is recurrent."
-    ),
-    Kwarg(
-        'encoder_batch_normalization_decay',
-        None,
-        [float, None],
-        "Decay rate to use for batch normalization in internal encoder layers. If ``None``, no batch normalization.",
-        aliases=['batch_normalization_decay']
-    ),
-    Kwarg(
-        'batch_normalize_encodings',
-        False,
-        bool,
-        "Batch normalize latent segment encodings."
-    ),
-    Kwarg(
-        'encoder_revnet_n_layers',
-        None,
-        [int, None],
-        "Number of layers in RevNet projection of layerwise encoder inputs. If ``None``, no RevNet projection.",
-        aliases=['revnet_n_layers']
-    ),
-    Kwarg(
-        'encoder_revnet_n_layers_inner',
-        1,
-        int,
-        "Number of internal layers in each block of RevNet projection of layerwise encoder inputs. Ignored if **revnet_n_layers** is ``None``.",
-        aliases=['revnet_n_layers_inner']
-    ),
-    Kwarg(
-        'encoder_revnet_activation',
-        'elu',
-        str,
-        "Activation function to use in RevNet projection of layerwise encoder inputs. Ignored if **revnet_n_layers** is ``None``.",
-        aliases=['revnet_activation']
-    ),
-    Kwarg(
-        'encoder_revnet_batch_normalization_decay',
-        None,
-        [float, None],
-        "Decay rate to use for batch normalization in RevNet projection of layerwise encoder inputs. If ``None``, no batch normalization. Ignored if **revnet_n_layers** is ``None``.",
-        aliases=['batch_normalization_decay', 'revnet_batch_normalization_decay']
-    ),
-    Kwarg(
-        'encoder_weight_regularization',
-        None,
-        [str, float, None],
-        "If ``str``, underscore-delimited name and scale of encoder weight regularization. If ``float``, scale of encoder L2 weight regularization. If ``None``, no encoder weight regularization."
-    ),
-    Kwarg(
-        'encoder_state_regularization',
-        None,
-        [str, float, None],
-        "If ``str``, underscore-delimited name and scale of encoder state regularization. If ``float``, scale of encoder L2 state regularization. If ``None``, no encoder state regularization."
-    ),
-    Kwarg(
-        'encoder_cell_proposal_regularization',
-        None,
-        [str, float, None],
-        "If ``str``, underscore-delimited name and scale of encoder cell proposal regularization. If ``float``, scale of encoder L2 cell proposal regularization. If ``None``, no encoder cell proposal regularization."
-    ),
-
-    # Decoder hyperparams
-    Kwarg(
-        'decoder_type',
-        'rnn',
-        str,
-        "Decoder network to use. One of ``dense``, ``cnn``, or ``rnn``."
-    ),
-    Kwarg(
-        'decoder_hidden_state_expansion_type',
-        'tile',
-        str,
-        "Technique for expanding the decoder inputs over time. One of [``tile``, ``dense``], where ``tile`` tiles the state over time while ``dense`` applies and reshapes a dense layer with ``n_feats * n_timesteps`` outputs."
-    ),
-    Kwarg(
-        'decoder_positional_encoding_type',
-        None,
-        [None, str],
-        "Technique for representing time to the decoder. One of [``transformer_pe``, ``periodic``, ``weights``], where ``transformer_pe`` uses the Transformer positional encoding, ``periodic`` uses **decoder_positional_encoding_units** sin and cosine waves (with more high-frequency components than Transformer), and ``weights`` uses trainable vectors of **decoder_positional_encoding_units**, one for each timestep. If ``None``, no temporal encoding."
-    ),
-    Kwarg(
-        'decoder_positional_encoding_units',
-        32,
-        [int, None],
-        "Number of dimensions per timestep to use for the temporal input to the decoder."
-    ),
-    Kwarg(
-        'decoder_positional_encoding_transform',
-        None,
-        [str, None],
-        "Technique for transforming the base temporal input to the decoder. One of [``None``, ``dense``, ``rnn``, ``cnn``]. If ``None``, no transform."
-    ),
-    Kwarg(
-        'decoder_positional_encoding_activation',
-        None,
-        [str, None],
-        "Activation function for temporal encoding, or linear activation if ``None``."
-    ),
-    Kwarg(
-        'decoder_positional_encoding_as_mask',
-        False,
-        bool,
-        "Whether to use the temporal encoding as a mask. If ``True``, temporal encoding will be conformable to input encoder state and sigmoid activated, serving as soft attention over the expanded hidden state. If ``False``, the temporal encoding is dimensionality **decoder_positional_encoding_units** and is concatenated to the expanded hidden state features."
-    ),
-    Kwarg(
-        'n_layers_decoder',
-        2,
-        [int, None],
-        "Number of layers to use for decoder. If ``None``, inferred from length of **n_units_decoder**."
-    ),
-    Kwarg(
-        'n_units_decoder',
-        None,
-        [int, str, None],
-        "Number of units to use in decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
-    ),
-    Kwarg(
-        'decoder_activation',
-        None,
-        [str, None],
-        "Name of activation to use at the output of the decoder"
-    ),
-    Kwarg(
-        'decoder_dropout',
-        None,
-        [float, None],
-        "Dropout rate to use in the decoder",
-    ),
-    Kwarg(
-        'decoder_inner_activation',
-        None,
-        [str, None],
-        "Name of activation to use for any internal layers of the decoder",
-        aliases=['inner_activation']
-    ),
-    Kwarg(
-        'decoder_recurrent_activation',
-        'sigmoid',
-        [str, None],
-        "Name of activation to use for recurrent activation in recurrent layers of the decoder. Ignored if decoder is not recurrent.",
-        aliases=['recurrent_activation']
-    ),
-    Kwarg(
-        'decoder_conv_kernel_size',
-        3,
-        int,
-        "Size of kernel to use in convolutional decoder layers. Ignored if no convolutional decoder layers in the model."
-    ),
-    Kwarg(
-        'encoder_resnet_n_layers_inner',
-        None,
-        [int, None],
-        "Implement internal encoder layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
-        aliases=['resnet_n_layers_inner']
-    ),
-    Kwarg(
-        'encoder_use_bias',
-        True,
-        bool,
-        "Whether to include bias units in encoder layers."
-    ),
-    Kwarg(
-        'encoder_force_vad_boundaries',
-        True,
-        bool,
-        "Whether to force segmentation probabilities to 1 at the ends of VAD regions."
-    ),
-    Kwarg(
-        'decoder_resnet_n_layers_inner',
-        None,
-        [int, None],
-        "Implement internal decode layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
-        aliases=['resnet_n_layers_inner']
-    ),
-    Kwarg(
-        'decoder_batch_normalization_decay',
-        None,
-        [float, None],
-        "Decay rate to use for batch normalization in internal decoder layers. If ``None``, no batch normalization.",
-        aliases=['batch_normalization_decay']
-    ),
-    Kwarg(
-        'predict_deltas',
-        False,
-        bool,
-        "Include derivatives in the prediction targets."
-    ),
-    Kwarg(
-        'constrain_output',
-        False,
-        bool,
-        "Use an output model constrained to :math:`[0, 1]` (sigmoid with cross-entropy loss if MLE and LogitNormal if Bayesian). Otherwise, use linear/normal output. Ignored unless **normalize_data* is ``True``."
-    ),
-    Kwarg(
-        'n_timesteps_input',
-        None,
-        [int, None],
-        "Number of timesteps present in the input data. If ``None``, inferred from data, possibly with different values between batches."
-    ),
-    Kwarg(
-        'n_timesteps_output',
-        None,
-        [int, None],
-        "Number of timesteps present in the target data. If ``None``, inferred from data, possibly with different values between batches."
-    ),
-    Kwarg(
-        'decoder_use_input_means',
-        False,
-        bool,
-        "In addition to classifier's encoding, provide mean activations across the spectral and time dimensions to the decoder."
-    ),
-    Kwarg(
-        'decoder_use_input_length',
-        False,
-        bool,
-        "Explicitly pass number of non-padding frames in input as feature to the decoder."
-    ),
-    Kwarg(
-        'residual_decoder',
-        False,
-        bool,
-        "Compute the decoding as a sum of the network outputs and the mean activations of all cells in the training data."
-    ),
-    Kwarg(
-        'regularizer_name',
-        None,
-        [str, None],
-        "Name of global regularizer. If ``None``, no regularization."
-    ),
-    Kwarg(
-        'regularizer_scale',
-        0.01,
-        float,
-        "Scale of global regularizer (ignored if ``regularizer_name==None``)."
-    ),
-    Kwarg(
-        'entropy_regularizer_scale',
-        None,
-        [float, None],
-        "Scale of regularizer on binary entropy. If ``None``, no entropy regularization."
-    ),
-    Kwarg(
-        'boundary_prob_regularizer_scale',
-        None,
-        [float, None],
-        "Scale of regularizer on boundary activation probabilities. If ``None``, no boundary probability regularization."
-    ),
-    Kwarg(
-        'boundary_regularizer_scale',
-        None,
-        [float, None],
-        "Scale of regularizer on boundary activations. If ``None``, no boundary regularization."
-    ),
-    Kwarg(
-        'lm_loss_scale',
-        None,
-        [float, str, None],
-        "Scale of layerwise encoder language modeling objective in the loss function. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
-    ),
-    Kwarg(
-        'lm_loss_type',
-        'masked_neighbors',
-        str,
-        "Type of LM loss. One of ``['neighbors', 'masked_neighbors', 'srn']``."
-    ),
-    Kwarg(
-        'lm_drop_masked',
-        True,
-        bool,
-        "Whether to drop (vs. multiplicatively mask) non-boundary input timesteps in LM loss. Ignored unless **lm_loss_type** is ``masked_neighbors``."
-    ),
-    Kwarg(
-        'lm_use_upper',
-        False,
-        bool,
-        "Whether to condition LM predictions on upper layers."
-    ),
-    Kwarg(
-        'scale_losses_by_boundaries',
-        False,
-        bool,
-        "Whether to scale LM and CAE losses by the corresponding boundary decisions.",
-    ),
-    Kwarg(
-        'backprop_into_targets',
-        False,
-        bool,
-        "Whether to backprop into prediction targets."
-    ),
-    Kwarg(
-        'backprop_into_loss_weights',
-        False,
-        bool,
-        "Whether to backprop into weight mask on losses (matters in ``masked_neighbor`` setting for LM loss)."
-    ),
-    Kwarg(
-        'xent_state_predictions',
-        False,
-        bool,
-        "Whether to convert encoder state values to probabilities and predict them using cross-entropy."
-    ),
-    Kwarg(
-        'lm_order_fwd',
-        1,
-        int,
-        "Order of forward language model (number of timesteps to predict)."
-    ),
-    Kwarg(
-        'lm_order_bwd',
-        0,
-        int,
-        "Order of backward language model (number of timesteps to predict)."
-    ),
-    Kwarg(
-        'segment_encoding_correspondence_regularizer_scale',
-        None,
-        [float, None],
-        "Scale of regularizer encouraging correspondence between segment encodings in the encoder and segment decodings in the decoder. Only used if the encoder and decoder have identical numbers of layers with identical numbers of units in each layer. If ``None``, no regularization for segment encoding correspondence."
-    ),
-
-    Kwarg(
-        'float_type',
-        'float32',
-        str,
-        "``float`` type to use throughout the network."
-    ),
-    Kwarg(
-        'int_type',
-        'int32',
-        str,
-        "``int`` type to use throughout the network (used for tensor slicing)."
-    ),
-
-    # Correspondence autoencoder hyperparams
-    Kwarg(
-        'n_correspondence',
-        None,
-        [int, None],
-        "Number of discovered segments to use to compute correspondence autoencoder auxiliary loss. If ``0`` or ``None``, do not use correpondence autoencoder."
-    ),
-    Kwarg(
-        'resample_correspondence',
-        25,
-        int,
-        "Number of timesteps to which correspondence autoencoder targets should be resampled. Ignored if **n_correspondence** is ``0`` or ``None``."
-    ),
-    Kwarg(
-        'correspondence_start_step',
-        1,
-        int,
-        "Step number (batch if **streaming** or iteration otherwise) at which to start minimizing correpondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
-    ),
-    Kwarg(
-        'correspondence_loss_scale',
-        None,
-        [float, None],
-        "Coefficient by which to scale correspondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
-    ),
-    Kwarg(
-        'correspondence_loss_implementation',
-        3,
-        int,
-        "Implementation of correspondence AE loss. One of ``[1, 2, 3]``. Implementation 1: Take average of acoustics of saved segments, weighted by cosine similarity to current states. Implementation 2: Use acoustics of most similar saved segment to current state. Implementation 3: Take average of losses with respect to each saved segment, weighted by cosine similarity to the current state."
-    ),
-    Kwarg(
-        'correspondence_live_targets',
-        False,
-        bool,
-        "Whether to compute correspondence AE loss against targets sampled from segmentations generated for the current minibatch. If ``False``, correspondence targets are sampled from previous minibatch. When used, correspondence targets faithfully represent the current state of the network and losses backpropagate into the representations and boundaries of both segments in the pair, but computing losses is more computationally intensive because Fourier resampling of acoustic features must be performed inside the Tensorflow graph."
-    ),
-    Kwarg(
-        'correspondence_n_timesteps',
-        None,
-        [int, None],
-        "Number of timesteps per utterance to use for computing correspondence loss. If positive integer :math:`k`, use only the math:`k` most probable segmentation points per segmenter network. If ``0`` or ``None``, use all timesteps."
-    ),
-    Kwarg(
-        'correspondence_alpha',
-        1.,
-        float,
-        "Peakiness factor for correspondence AE loss. If ``1``, use cosine similarity weights directly. If ``< 1``, decrease peakiness of weights. If ``> 1``, increase peakiness of weights. Ignored unless **correspondence_implementation** is ``1``."
-    ),
+    # Segment extraction
     Kwarg(
         'segment_at_peaks',
         False,
@@ -1190,6 +1225,8 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         [str, None],
         'Post-process segmentations by smoothing them using function defined by underscore_delimited string, where the first element is the type of smooth and all subsequent elements are positional arguments. One of ["rbf_<order>_<penalty>", "ema_<decay>", "dema_<decay>", "wma_<width>"], where "rbf", "ema", "dema", and "wma" are (respectively) radial basis function, exponential moving average, double exponential moving average, and weighted moving average.  If ``None``, no smoothing. Has no effect unless **segment_at_peaks** is ``True``.'
     ),
+
+    # Visualization
     Kwarg(
         'label_map_file',
         None,

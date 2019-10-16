@@ -4,6 +4,8 @@ import shutil
 import pandas as pd
 import argparse
 
+from dnnseg.util import stderr
+
 argparser = argparse.ArgumentParser('''
 Compiles Zerospeech data for processing with DNN-Seg.
 ''')
