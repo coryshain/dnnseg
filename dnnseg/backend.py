@@ -56,25 +56,43 @@ def masked_roll(X, roll_ix, batch_ids, weights=None, session=None):
     session = get_session(session)
     with session.as_default():
         with session.graph.as_default():
+            # Shift batch indices
             batch_ids_rolled = tf.manip.roll(
                 batch_ids,
                 roll_ix,
                 axis=0
             )
+
+            # Force batch indices to -1 when they loop all they way back, so that they never match the current batch index
+            seq_len = tf.shape(batch_ids)[0]
+            seq_mask = tf.cond(
+                roll_ix < 0,
+                lambda: tf.sequence_mask(lengths=seq_len + roll_ix, maxlen=seq_len),
+                lambda: tf.reverse(tf.sequence_mask(lengths=seq_len - roll_ix, maxlen=seq_len), axis=[0]),
+            )
+            batch_ids_rolled = tf.where(
+                seq_mask,
+                batch_ids_rolled,
+                tf.fill(tf.shape(batch_ids_rolled), -1)
+            )
+
+            # Keep only timepoints within the same batch item
             mask = tf.cast(tf.equal(batch_ids_rolled, batch_ids), dtype=X.dtype)
 
+            # Shift and mask features
             X = tf.manip.roll(
                 X,
                 roll_ix,
                 axis=0
-            )
+            ) * mask[..., None]
 
             if weights is not None:
+                # Shift and mask weights
                 weights = tf.manip.roll(
                     weights,
                     roll_ix,
                     axis=0
-                )
+                ) * mask
 
             return X, weights, mask
 
@@ -111,45 +129,76 @@ def mask_and_lag(X, mask=None, weights=None, n_forward=0, n_backward=0, session=
             
             X = tf.concat([X, time_ids[..., None]], axis=-1)
 
+            # BACKWARD
+            # Tile
             tile_bwd = [n_backward, 1]
             X_tile_bwd = tile_bwd + [1]
             roll_bwd = tf.range(0, n_backward)
             X_bwd = tf.tile(X[None, ...], X_tile_bwd)
             batch_ids_bwd = tf.tile(batch_ids[None, ...], tile_bwd)
             weights_bwd = tf.tile(weights[None, ...], tile_bwd)
+
+            # Shift
             X_bwd, weights_bwd, mask_bwd = tf.map_fn(
                 lambda x: masked_roll(x[0], x[1], batch_ids=x[2], weights=x[3], session=session),
                 [X_bwd, roll_bwd, batch_ids_bwd, weights_bwd],
                 dtype=(X.dtype, weights.dtype, X.dtype)
             )
-            weights_bwd *= mask_bwd
-            weights_bwd = tf.transpose(weights_bwd, [1, 0])
+
+            # Transpose
             X_bwd = tf.transpose(X_bwd, [1, 0, 2])
+            weights_bwd = tf.transpose(weights_bwd, [1, 0])
+            mask_bwd = tf.transpose(mask_bwd, [1, 0])
+
+            # Split feats and time indices
             time_ids_bwd = tf.cast(X_bwd[..., -1], dtype=tf.int32)
             X_bwd = X_bwd[..., :-1]
 
+            # Relativize timesteps to current timestep
+            time_ids_0 = time_ids_bwd[..., :1]
+            time_ids_bwd = (time_ids_0 - time_ids_bwd) * tf.cast(mask_bwd, dtype=time_ids_0.dtype)
+
+
+            # FORWARD
+            # Tile
             tile_fwd = [n_forward, 1]
             X_tile_fwd = tile_fwd + [1]
             roll_fwd = tf.range(-1, -n_forward - 1, delta=-1)
             X_fwd = tf.tile(X[None, ...], X_tile_fwd)
             batch_ids_fwd = tf.tile(batch_ids[None, ...], tile_fwd)
             weights_fwd = tf.tile(weights[None, ...], tile_fwd)
+
+            # Shift
             X_fwd, weights_fwd, mask_fwd = tf.map_fn(
                 lambda x: masked_roll(x[0], x[1], batch_ids=x[2], weights=x[3], session=session),
                 [X_fwd, roll_fwd, batch_ids_fwd, weights_fwd],
                 dtype=(X.dtype, weights.dtype, X.dtype)
             )
-            weights_fwd *= mask_fwd
-            weights_fwd = tf.transpose(weights_fwd, [1, 0])
+
+            # Transpose
             X_fwd = tf.transpose(X_fwd, [1, 0, 2])
+            weights_fwd = tf.transpose(weights_fwd, [1, 0])
+            mask_fwd = tf.transpose(mask_fwd, [1, 0])
+
+            # Split feats and time indices
             time_ids_fwd = tf.cast(X_fwd[..., -1], dtype=tf.int32)
             X_fwd = X_fwd[..., :-1]
 
-            time_ids_0 = time_ids_bwd[..., :1]
-            time_ids_bwd = tf.maximum(time_ids_0 - time_ids_bwd, 0)
-            time_ids_fwd = tf.maximum(time_ids_fwd - time_ids_0 - 1, 0)
+            # Relativize timesteps to current timestep
+            time_ids_fwd = (time_ids_fwd - time_ids_0 - 1) * tf.cast(mask_fwd, dtype=time_ids_0.dtype)
 
-            return X_bwd, weights_bwd, time_ids_bwd, X_fwd, weights_fwd, time_ids_fwd
+            out = {
+                'X_bwd': X_bwd,
+                'weights_bwd': weights_bwd,
+                'time_ids_bwd': time_ids_bwd,
+                'mask_bwd': mask_bwd,
+                'X_fwd': X_fwd,
+                'weights_fwd': weights_fwd,
+                'time_ids_fwd': time_ids_fwd,
+                'mask_fwd': mask_fwd
+            }
+
+            return out
 
 
 # Debugged reduce_logsumexp to allow -inf
@@ -4565,7 +4614,6 @@ def preprocess_decoder_inputs(
         decoder_conv_kernel_size=3,
         frame_dim=None,
         step=None,
-        mask=None,
         n_pretrain_steps=0,
         name=None,
         session=None,
@@ -4651,10 +4699,6 @@ def preprocess_decoder_inputs(
             else:
                 raise ValueError(
                     'Unrecognized decoder hidden state expansion type "%s".' % decoder_hidden_state_expansion_type)
-
-            # Mask time series if needed
-            if mask is not None:
-                out *= mask[..., None]
 
             # Create a representation of time to supply to decoder
             if decoder_positional_encoding is not None or decoder_positional_encoding_type:

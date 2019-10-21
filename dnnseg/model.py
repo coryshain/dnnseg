@@ -1328,7 +1328,7 @@ class DNNSeg(object):
                     if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
                         targets_cur = tf.round(targets_cur)
 
-                    targets_bwd_cur, weights_bwd_cur, time_ids_bwd_cur, targets_fwd_cur, weights_fwd_cur, time_ids_fwd_cur = mask_and_lag(
+                    lag_dict = mask_and_lag(
                         targets_cur,
                         mask=mask_cur,
                         weights=weights_cur,
@@ -1336,6 +1336,46 @@ class DNNSeg(object):
                         n_backward=self.lm_order_bwd,
                         session=self.sess
                     )
+
+                    targets_bwd_cur = lag_dict['X_bwd']
+                    weights_bwd_cur = lag_dict['weights_bwd']
+                    time_ids_bwd_cur = lag_dict['time_ids_bwd']
+                    mask_bwd_cur = lag_dict['mask_bwd']
+                    targets_fwd_cur = lag_dict['X_fwd']
+                    weights_fwd_cur = lag_dict['weights_fwd']
+                    time_ids_fwd_cur = lag_dict['time_ids_fwd']
+                    mask_fwd_cur = lag_dict['mask_fwd']
+
+                    # targets_bwd_cur = tf.Print(targets_bwd_cur, ['weights_bwd', weights_bwd_cur, 'time_ids_bwd', time_ids_bwd_cur, 'weights_fwd', weights_fwd_cur, 'time_ids_fwd', time_ids_fwd_cur], summarize=100)
+
+                    # if True and l == 0:
+                    #     t = tf.cast(tf.range(1, 11), dtype=self.FLOAT_TF)[None, ..., None]
+                    #     m = tf.ones([1, 10], dtype=self.FLOAT_TF)
+                    #     w = tf.cast(tf.random_uniform([1, 10]) > 0.75, dtype=self.FLOAT_TF)
+                    #     m = w
+                    #     TB, WB, IB, TF, WF, IF = mask_and_lag(
+                    #         t,
+                    #         mask=m,
+                    #         weights=w,
+                    #         n_forward=5,
+                    #         n_backward=5,
+                    #         session=self.sess
+                    #     )
+                    #
+                    #     print('TB.shape')
+                    #     print(TB.shape)
+                    #     print('WB.shape')
+                    #     print(WB.shape)
+                    #     print('IB.shape')
+                    #     print(IB.shape)
+                    #     print('TF.shape')
+                    #     print(TF.shape)
+                    #     print('WF.shape')
+                    #     print(WF.shape)
+                    #     print('IF.shape')
+                    #     print(IF.shape)
+                    #
+                    #     targets_bwd_cur = tf.Print(targets_bwd_cur, ['t', t, 'm', m, 'w', w, 'TB', tf.squeeze(TB, axis=-1), 'WB', WB, 'IB', IB, 'TF', tf.squeeze(TF, axis=-1), 'WF', WF, 'IF', IF], summarize=100)
 
                     if predict_at_boundaries and not drop_masked:
                         mask_cur = weights_cur
@@ -1476,12 +1516,17 @@ class DNNSeg(object):
                                 decoder_positional_encoding_activation=self.decoder_positional_encoding_activation,
                                 name='decoder_LM_bwd_L%d' % l
                             )
+                            pe_bwd_cur *= mask_bwd_cur[..., None]
+                            logits_bwd_cur *= mask_bwd_cur[..., None]
                         else:
                             logits_bwd_cur = None
                             pe_bwd_cur = None
 
                         if self.lm_order_fwd:
-                            pe_fwd_in = tf.gather(pe, time_ids_fwd_cur, axis=0)
+                            if self.decoder_positional_encoding_lock_to_data:
+                                pe_fwd_in = tf.gather(pe, time_ids_fwd_cur, axis=0)
+                            else:
+                                pe_fwd_in = None
                             logits_fwd_cur, pe_fwd_cur = self._initialize_decoder(
                                 decoder_in,
                                 self.lm_order_fwd,
@@ -1496,6 +1541,8 @@ class DNNSeg(object):
                                 decoder_positional_encoding_activation=self.decoder_positional_encoding_activation,
                                 name='decoder_LM_fwd_L%d' % l
                             )
+                            pe_fwd_cur *= mask_fwd_cur[..., None]
+                            logits_fwd_cur *= mask_fwd_cur[..., None]
                         else:
                             logits_fwd_cur = None
                             pe_fwd_cur = None
@@ -1550,15 +1597,15 @@ class DNNSeg(object):
                         if plot_preds_bwd_cur is not None:
                             plot_preds_bwd_cur = tf.sigmoid(plot_preds_bwd_cur)
 
-                    if self.lm_order_bwd:
-                        plot_weights_bwd_cur = weights_bwd_cur[..., None]
-                        plot_targs_bwd_cur *= plot_weights_bwd_cur
-                        plot_preds_bwd_cur *= plot_weights_bwd_cur
-
-                    if self.lm_order_fwd:
-                        plot_weights_fwd_cur = weights_fwd_cur[..., None]
-                        plot_targs_fwd_cur *= plot_weights_fwd_cur
-                        plot_preds_fwd_cur *= plot_weights_fwd_cur
+                    # if self.lm_order_bwd:
+                    #     plot_weights_bwd_cur = weights_bwd_cur[..., None]
+                    #     plot_targs_bwd_cur *= plot_weights_bwd_cur
+                    #     plot_preds_bwd_cur *= plot_weights_bwd_cur
+                    #
+                    # if self.lm_order_fwd:
+                    #     plot_weights_fwd_cur = weights_fwd_cur[..., None]
+                    #     plot_targs_fwd_cur *= plot_weights_fwd_cur
+                    #     plot_preds_fwd_cur *= plot_weights_fwd_cur
 
                     if initialize_decoder:
                         if self.lm_order_bwd:
@@ -1694,6 +1741,7 @@ class DNNSeg(object):
             n_timesteps,
             frame_dim=None,
             mask=None,
+            output_mask=None,
             decoder_hidden_state_expansion_type='tile',
             positional_encoding=None,
             decoder_positional_encoding_type='periodic',
@@ -1727,7 +1775,6 @@ class DNNSeg(object):
                     decoder_conv_kernel_size=self.decoder_conv_kernel_size,
                     frame_dim=frame_dim,
                     step=self.step,
-                    mask=mask,
                     n_pretrain_steps=self.n_pretrain_steps,
                     name=name,
                     session=self.sess,
@@ -1880,6 +1927,9 @@ class DNNSeg(object):
 
                 if self.speaker_revnet_n_layers:
                     decoder = self.speaker_revnet.backward(decoder, weights=self.speaker_embeddings)
+
+                if output_mask is not None:
+                    decoder *= output_mask[..., None]
 
                 return decoder, positional_encoding
 
