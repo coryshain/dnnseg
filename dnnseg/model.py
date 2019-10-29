@@ -241,6 +241,24 @@ class DNNSeg(object):
                 else:
                     self.entropy_regularizer = None
 
+                if self.boundary_rate_extremeness_regularizer_scale:
+                    assert self.boundary_rate_extremeness_regularizer_shape >= 0 and self.boundary_rate_extremeness_regularizer_shape <= 1, 'boundary_rate_extremeness_regularizer_shape must be in [0,1], got %s.' % self.boundary_rate_extremeness_regularizer_shape
+                    self.boundary_rate_extremeness_regularizer = lambda x: tf.contrib.distributions.Beta(
+                        self.boundary_rate_extremeness_regularizer_shape,
+                        self.boundary_rate_extremeness_regularizer_shape
+                    ).prob(x) * self.boundary_rate_extremeness_regularizer_scale
+                else:
+                    self.boundary_rate_extremeness_regularizer = None
+                    
+                if self.boundary_prob_extremeness_regularizer_scale:
+                    assert self.boundary_prob_extremeness_regularizer_shape >= 0 and self.boundary_prob_extremeness_regularizer_shape <= 1, 'boundary_prob_extremeness_regularizer_shape must be in [0,1], got %s.' % self.boundary_prob_extremeness_regularizer_shape
+                    self.boundary_prob_extremeness_regularizer = lambda x: tf.contrib.distributions.Beta(
+                        self.boundary_prob_extremeness_regularizer_shape,
+                        self.boundary_prob_extremeness_regularizer_shape
+                    ).prob(x) * self.boundary_prob_extremeness_regularizer_scale
+                else:
+                    self.boundary_prob_extremeness_regularizer = None
+
                 if self.boundary_prob_regularizer_scale:
                     self.boundary_prob_regularizer = lambda bit_probs: tf.reduce_mean(bit_probs) * self.boundary_prob_regularizer_scale
                 else:
@@ -903,7 +921,8 @@ class DNNSeg(object):
                                 self.segmentations[l] = segmentations
 
                     self.encoder_hidden_states = self.segmenter_output.state(mask=self.X_mask)
-                    if self.encoder_state_discretizer or self.xent_state_predictions:
+                    # if self.encoder_state_discretizer or self.xent_state_predictions:
+                    if self.xent_state_predictions:
                         encoder_hidden_states = []
                         for l in range(len(self.encoder_hidden_states)):
                             encoder_hidden_states_cur = self.encoder_hidden_states[l]
@@ -913,7 +932,7 @@ class DNNSeg(object):
                             encoder_hidden_states.append(encoder_hidden_states_cur)
                         self.encoder_hidden_states = encoder_hidden_states
                     else:
-                        self.encoder_hidden_states = list(self.encoder_hidden_states)
+                        self.encoder_hidden_states = [x * self.X_mask[..., None] for x in self.encoder_hidden_states]
                     self.encoder_cell_states = self.segmenter_output.cell(mask=self.X_mask)
                     self.encoder_cell_proposals = self.segmenter_output.cell_proposals(mask=self.X_mask)
 
@@ -945,6 +964,10 @@ class DNNSeg(object):
                         self._add_regularization(seg_probs, self.entropy_regularizer)
                         mean_denom = tf.reduce_sum(self.X_mask) + self.epsilon
                         seg_probs_mean = tf.reduce_sum(seg_probs) / mean_denom
+                        boundary_rate = tf.reduce_sum(self.encoder_segmentations[l]) / tf.maximum(tf.reduce_sum(self.X_mask), self.epsilon)
+                        self._add_regularization(boundary_rate, self.boundary_rate_extremeness_regularizer)
+                        mean_boundary_prob = tf.reduce_sum(self.segmentation_probs[l]) / tf.maximum(tf.reduce_sum(self.X_mask), self.epsilon)
+                        self._add_regularization(mean_boundary_prob, self.boundary_prob_extremeness_regularizer)
                         self._add_regularization(seg_probs_mean, self.boundary_prob_regularizer)
                         segs_mean = tf.reduce_sum(self.encoder_segmentations[l]) / mean_denom
                         self._add_regularization(segs_mean, self.boundary_regularizer)
@@ -5403,9 +5426,8 @@ class DNNSegMLE(DNNSeg):
     def _lm_distance_func(self, l):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                # if l > 0 and self.encoder_state_discretizer is not None or self.encoder_inner_activation == 'sigmoid':
-                # if l > 0 and self.encoder_state_discretizer is not None:
-                if l > 0 and (self.encoder_state_discretizer or self.xent_state_predictions):
+                # if l > 0 and (self.encoder_state_discretizer or self.xent_state_predictions):
+                if l > 0 and self.xent_state_predictions:
                     binary_state = True
                 else:
                     binary_state = False

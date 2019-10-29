@@ -617,18 +617,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of units to use in non-final encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
     ),
     Kwarg(
-        'encoder_boundary_implementation',
-        2,
-        int,
-        "Implementation to use for HM-LSTM encoder boundary neuron. If ``1``, use a dedicated cell of the hidden state. If ``2``, use a dense kernel over the hidden state.",
-    ),
-    Kwarg(
-        'nested_boundaries',
-        False,
-        bool,
-        "Whether to mask boundaries using the boundaries from the layer below."
-    ),
-    Kwarg(
         'hmlstm_kernel_depth',
         1,
         int,
@@ -661,6 +649,27 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['recurrent_activation']
     ),
     Kwarg(
+        'encoder_resnet_n_layers_inner',
+        None,
+        [int, None],
+        "Implement internal encoder layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
+        aliases=['resnet_n_layers_inner']
+    ),
+
+    # Encoder boundaries
+    Kwarg(
+        'encoder_boundary_implementation',
+        2,
+        int,
+        "Implementation to use for HM-LSTM encoder boundary neuron. If ``1``, use a dedicated cell of the hidden state. If ``2``, use a dense kernel over the hidden state.",
+    ),
+    Kwarg(
+        'nested_boundaries',
+        False,
+        bool,
+        "Whether to mask boundaries using the boundaries from the layer below."
+    ),
+    Kwarg(
         'encoder_boundary_activation',
         'sigmoid',
         [str, None],
@@ -673,13 +682,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         [str, None],
         "Name of activation to use for prefinal layers in an HM-LSTM encoder with deep transitions. Ignored if encoder is not an HM-LSTM or if **hmlstm_kernel_depth** < 2.",
         aliases=['boundary_activation']
-    ),
-    Kwarg(
-        'encoder_resnet_n_layers_inner',
-        None,
-        [int, None],
-        "Implement internal encoder layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
-        aliases=['resnet_n_layers_inner']
     ),
     Kwarg(
         'oracle_boundaries',
@@ -908,6 +910,30 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Standard deviation of Gaussian 'whiteout' noise to inject into the pre-gated encoder outputs."
     ),
     Kwarg(
+        'boundary_rate_extremeness_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of penalty on extreme boundary rates (very low or very high). If ``None``, no boundary rate extremeness penalty."
+    ),
+    Kwarg(
+        'boundary_rate_extremeness_regularizer_shape',
+        0.1,
+        float,
+        "Shape parameter ``a in [0,1]`` on boundary rate ``p``, such that the boundary rate extremeness penalty is proportional to ``Beta(a, a).pdf(p)``. The lower the shape value, the more the penalty is pushed to the edges (high or low values of p)."
+    ),
+    Kwarg(
+        'boundary_prob_extremeness_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of penalty on extreme boundary probs (very low or very high). If ``None``, no boundary prob extremeness penalty."
+    ),
+    Kwarg(
+        'boundary_prob_extremeness_regularizer_shape',
+        0.1,
+        float,
+        "Shape parameter ``a in [0,1]`` on mean boundary prob ``p``, such that the boundary prob extremeness penalty is proportional to ``Beta(a, a).pdf(p)``. The lower the shape value, the more the penalty is pushed to the edges (high or low values of p)."
+    ),
+    Kwarg(
         'entropy_regularizer_scale',
         None,
         [float, None],
@@ -924,6 +950,24 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [float, None],
         "Scale of regularizer on boundary activations. If ``None``, no boundary regularization."
+    ),
+    Kwarg(
+        'segment_at_peaks',
+        False,
+        bool,
+        'Re-extracting segment boundaries at peak values of the segmentation probability vector. Does not affect internal segmentation behavior of the HMLSTM cell but changes selection of segments for the correspondence AE.'
+    ),
+    Kwarg(
+        'boundary_prob_discretization_threshold',
+        None,
+        [float, None],
+        'Minimum value that boundary probabilities must exceed in order to be eligible candidates for a discrete segmentation boundary. Has no effect unless **segment_at_peaks** is ``True``.'
+    ),
+    Kwarg(
+        'boundary_prob_smoothing',
+        None,
+        [str, None],
+        'Post-process segmentations by smoothing them using function defined by underscore_delimited string, where the first element is the type of smooth and all subsequent elements are positional arguments. One of ["rbf_<order>_<penalty>", "ema_<decay>", "dema_<decay>", "wma_<width>"], where "rbf", "ema", "dema", and "wma" are (respectively) radial basis function, exponential moving average, double exponential moving average, and weighted moving average.  If ``None``, no smoothing. Has no effect unless **segment_at_peaks** is ``True``.'
     ),
 
     # Decoder
@@ -1014,7 +1058,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Dropout rate to use in the decoder",
     ),
     
-    # Encoder projection
+    # Decoder projection
     Kwarg(
         'n_layers_decoder_input_projection',
         None,
@@ -1204,26 +1248,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Log the network graph to Tensorboard"
-    ),
-
-    # Segment extraction
-    Kwarg(
-        'segment_at_peaks',
-        False,
-        bool,
-        'Re-extracting segment boundaries at peak values of the segmentation probability vector. Does not affect internal segmentation behavior of the HMLSTM cell but changes selection of segments for the correspondence AE.'
-    ),
-    Kwarg(
-        'boundary_prob_discretization_threshold',
-        None,
-        [float, None],
-        'Minimum value that boundary probabilities must exceed in order to be eligible candidates for a discrete segmentation boundary. Has no effect unless **segment_at_peaks** is ``True``.'
-    ),
-    Kwarg(
-        'boundary_prob_smoothing',
-        None,
-        [str, None],
-        'Post-process segmentations by smoothing them using function defined by underscore_delimited string, where the first element is the type of smooth and all subsequent elements are positional arguments. One of ["rbf_<order>_<penalty>", "ema_<decay>", "dema_<decay>", "wma_<width>"], where "rbf", "ema", "dema", and "wma" are (respectively) radial basis function, exponential moving average, double exponential moving average, and weighted moving average.  If ``None``, no smoothing. Has no effect unless **segment_at_peaks** is ``True``.'
     ),
 
     # Visualization

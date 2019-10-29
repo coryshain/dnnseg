@@ -1610,7 +1610,7 @@ class HMLSTMCell(LayerRNNCell):
                         # Add in top-down features
                         s = s + s_topdown
 
-                    s /= normalizer
+                    # s /= normalizer
 
                     if self._state_noise_sd:
                         s = tf.cond(self._training, lambda: s + tf.random_normal(shape=tf.shape(s), stddev=self._state_noise_sd), lambda: s)
