@@ -1169,6 +1169,8 @@ class Dataset(object):
                 from .cochleagram import wav_to_cochleagram as featurizer
             elif self.filter_type.lower() == "prosodic":
                 from .prosodicfeatures import wav_to_prosodic as featurizer
+            elif self.filter_type.lower() == "intensity":
+                from .prosodicfeatures import wav_to_intensity as featurizer
             else:
                 raise ValueError('Unrecognized filter type "%s".' % self.filter_type)
             data_kwargs['featurizer'] = featurizer
