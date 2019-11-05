@@ -1167,6 +1167,10 @@ class Dataset(object):
             elif self.filter_type.lower() == 'cochleagram':
                 stderr('IGNORE ANY IMMEDIATELY FOLLOWING ERRORS. These are spuriously thrown by the pycochleagram module.\n')
                 from .cochleagram import wav_to_cochleagram as featurizer
+            elif self.filter_type.lower() == "prosodic":
+                from .prosodicfeatures import wav_to_prosodic as featurizer
+            elif self.filter_type.lower() == "intensity":
+                from .prosodicfeatures import wav_to_intensity as featurizer
             else:
                 raise ValueError('Unrecognized filter type "%s".' % self.filter_type)
             data_kwargs['featurizer'] = featurizer
@@ -3350,7 +3354,7 @@ class AcousticDatafile(Datafile):
                 n_coef=n_coef,
                 order=order
             )
-        else:
+        elif filter_type.lower() == 'cochleagram':
             data_src, duration = featurizer(
                 path,
                 sr=sr,
@@ -3359,6 +3363,13 @@ class AcousticDatafile(Datafile):
                 n_coef=n_coef,
                 order=order
             )
+        else:
+            data_src, duration = featurizer(
+                path,
+                sr=sr,
+                offset=offset
+                )
+
         data_src = np.transpose(data_src, [1, 0])
 
         if self.clip_timesteps is not None:
