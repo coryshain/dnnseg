@@ -701,6 +701,24 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         bool,
         "Whether to force segmentation probabilities to 1 at the ends of VAD regions."
     ),
+    Kwarg(
+        'n_boundary_neurons',
+        1,
+        int,
+        "Number of boundary neurons to use in segmenter."
+    ),
+    Kwarg(
+        'boundary_neuron_agg_fn',
+        'logsumexp',
+        str,
+        "Name of aggregation function to use over boundary neurons when **n_boundary_neurons** > 1."
+    ),
+    Kwarg(
+        'recurrent_at_forget',
+        True,
+        bool,
+        "Whether to retain recurrent connection to previous hidden state over segment boundaries."
+    ),
 
     # Encoder RevNet
     Kwarg(

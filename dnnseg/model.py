@@ -798,6 +798,9 @@ class DNNSeg(object):
                         self.units_encoder[:-1] + [units_utt],
                         self.layers_encoder,
                         training=self.training,
+                        num_boundary_neurons=self.n_boundary_neurons,
+                        boundary_neuron_agg_fn=self.boundary_neuron_agg_fn,
+                        recurrent_at_forget=self.recurrent_at_forget,
                         kernel_depth=self.hmlstm_kernel_depth,
                         prefinal_mode=self.hmlstm_prefinal_mode,
                         resnet_n_layers=self.encoder_resnet_n_layers_inner,
@@ -961,15 +964,15 @@ class DNNSeg(object):
 
                     for l in range(len(self.segmentations)):
                         seg_probs = self.segmentation_probs[l]
-                        self._add_regularization(seg_probs, self.entropy_regularizer)
-                        mean_denom = tf.reduce_sum(self.X_mask) + self.epsilon
-                        seg_probs_mean = tf.reduce_sum(seg_probs) / mean_denom
-                        boundary_rate = tf.reduce_sum(self.encoder_segmentations[l]) / tf.maximum(tf.reduce_sum(self.X_mask), self.epsilon)
+                        self._add_regularization(tf.boolean_mask(seg_probs, self.X_mask), self.entropy_regularizer)
+                        denom = tf.reduce_sum(self.X_mask)
+                        seg_probs_mean = tf.reduce_sum(seg_probs) / tf.maximum(denom, self.epsilon)
+                        boundary_rate = tf.reduce_sum(self.encoder_segmentations[l]) / tf.maximum(denom, self.epsilon)
                         self._add_regularization(boundary_rate, self.boundary_rate_extremeness_regularizer)
-                        mean_boundary_prob = tf.reduce_sum(self.segmentation_probs[l]) / tf.maximum(tf.reduce_sum(self.X_mask), self.epsilon)
+                        mean_boundary_prob = tf.reduce_sum(self.segmentation_probs[l]) / tf.maximum(denom, self.epsilon)
                         self._add_regularization(mean_boundary_prob, self.boundary_prob_extremeness_regularizer)
                         self._add_regularization(seg_probs_mean, self.boundary_prob_regularizer)
-                        segs_mean = tf.reduce_sum(self.encoder_segmentations[l]) / mean_denom
+                        segs_mean = tf.reduce_sum(self.encoder_segmentations[l]) / tf.maximum(denom, self.epsilon)
                         self._add_regularization(segs_mean, self.boundary_regularizer)
 
                         if self.n_correspondence:
@@ -2440,18 +2443,19 @@ class DNNSeg(object):
 
     def _apply_regularization(self, normalized=False):
         regularizer_losses = []
-        denom = self.epsilon
+        denom = 0
         for var in self.regularizer_map:
             reg_loss = tf.contrib.layers.apply_regularization(self.regularizer_map[var], [var])
             if normalized:
                 # Normalize the loss by dividing by the number of cells in var
                 # Makes regularization scales comparable across tensors of different sizes
-                denom += tf.cast(tf.reduce_prod(tf.shape(var)), self.FLOAT_TF)
+                reg_loss /= tf.cast(tf.reduce_prod(tf.shape(var)), self.FLOAT_TF)
+                denom += 1
             regularizer_losses.append(reg_loss)
 
         regularizer_loss = tf.add_n(regularizer_losses)
 
-        if normalized:
+        if normalized and denom > 0:
             regularizer_loss /= denom
 
         return regularizer_loss

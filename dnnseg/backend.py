@@ -817,6 +817,9 @@ class HMLSTMCell(LayerRNNCell):
             num_units,
             num_layers,
             training=False,
+            num_boundary_neurons=1,
+            boundary_neuron_agg_fn='logsumexp',
+            recurrent_at_forget=False,
             kernel_depth=2,
             prefinal_mode='max',
             resnet_n_layers=1,
@@ -908,6 +911,31 @@ class HMLSTMCell(LayerRNNCell):
                 self._num_layers = num_layers
 
                 self._training = training
+
+                self._num_boundary_neurons = num_boundary_neurons
+                if boundary_neuron_agg_fn.lower() == 'uniform':
+                    def agg_fn(x, axis=-1, keepdims=False):
+                        def train_fn(x):
+                            b = tf.shape(x)[0]
+                            ix = tf.random_uniform([b], 0, self._num_boundary_neurons, dtype=tf.int32)
+                            ix = tf.stack([tf.range(b), ix], axis=-1)
+                            out = tf.gather_nd(x, ix)
+                            if keepdims:
+                                out = tf.expand_dims(out, axis=axis)
+                            return out
+
+                        def eval_fn(x):
+                            return tf.reduce_mean(x, axis=axis, keepdims=keepdims)
+
+                        if self._sample_at_eval:
+                            return train_fn(x)
+                        else:
+                            return tf.cond(self._training, lambda: train_fn(x), lambda: eval_fn(x))
+                else:
+                    agg_fn = getattr(tf, 'reduce_' + boundary_neuron_agg_fn)
+                self._boundary_neuron_agg_fn = agg_fn
+                
+                self._recurrent_at_forget = recurrent_at_forget
 
                 self._kernel_depth = kernel_depth
                 self._prefinal_mode = prefinal_mode
@@ -1246,7 +1274,7 @@ class HMLSTMCell(LayerRNNCell):
                     output_dim *= 4 # forget, input, and output gates, plus cell proposal
                     if self._implementation == 1:
                         if l < self._num_layers - 1:
-                            output_dim += 1
+                            output_dim += self._num_boundary_neurons
 
                     # Build bias
                     if not self._layer_normalization and self._use_bias:
@@ -1294,7 +1322,7 @@ class HMLSTMCell(LayerRNNCell):
                     # Build boundary (and, if necessary, boundary kernel)
                     if l < self._num_layers - 1 and self._infer_boundary:
                         if self._implementation == 1 and not self._layer_normalization and self._use_bias:
-                            bias_boundary = bias[:, -1:]
+                            bias_boundary = bias[:, -self._num_boundary_neurons:]
                             self._bias_boundary.append(bias_boundary)
                         elif self._implementation == 2:
                             # boundary_in_dim = self._num_units[l] * 2
@@ -1306,7 +1334,7 @@ class HMLSTMCell(LayerRNNCell):
                                 self.initialize_kernel(
                                     l,
                                     boundary_in_dim,
-                                    1,
+                                    self._num_boundary_neurons,
                                     self._boundary_initializer,
                                     prefinal_mode='in',
                                     name='boundary'
@@ -1574,6 +1602,9 @@ class HMLSTMCell(LayerRNNCell):
 
                     h_below = self._bottomup_dropout(h_below)
 
+                    # Compute state preactivations
+                    s = []
+
                     s_bottomup = self._kernel_bottomup[l](h_below)
                     if l > 0:
                         s_bottomup *= z_below
@@ -1595,12 +1626,14 @@ class HMLSTMCell(LayerRNNCell):
                     if l > 0:
                         normalizer *= z_below
 
+                    s.append(s_bottomup)
+
                     # Recurrent features
                     s_recurrent = self._kernel_recurrent[l](h_behind)
+                    if not self._recurrent_at_forget:
+                        s_recurrent *= (1 - flush_prob)
                     normalizer += 1.
-
-                    # Sum bottom-up and recurrent features
-                    s = s_bottomup + s_recurrent
+                    s.append(s_recurrent)
 
                     # Top-down features (if non-final layer)
                     if l < self._num_layers - 1:
@@ -1608,7 +1641,9 @@ class HMLSTMCell(LayerRNNCell):
                         s_topdown = self._kernel_topdown[l](h_above) * z_behind
                         normalizer += z_behind
                         # Add in top-down features
-                        s = s + s_topdown
+                        s.append(s_topdown)
+
+                    s = sum(s)
 
                     # s /= normalizer
 
@@ -1751,6 +1786,9 @@ class HMLSTMCell(LayerRNNCell):
 
                             if self.boundary_noise_sd:
                                 z_logit = tf.cond(self._training, lambda: z_logit + tf.random_normal(shape=tf.shape(z_logit), stddev=self.boundary_noise_sd), lambda: z_logit)
+
+                            if self._num_boundary_neurons > 1:
+                                z_logit = self._boundary_neuron_agg_fn(z_logit, axis=-1, keepdims=True)
 
                             z_prob = self._boundary_activation(z_logit)
 
@@ -2028,6 +2066,9 @@ class HMLSTMSegmenter(object):
             num_units,
             num_layers,
             training=False,
+            num_boundary_neurons=1,
+            boundary_neuron_agg_fn='logsumexp',
+            recurrent_at_forget=False,
             kernel_depth=2,
             prefinal_mode='max',
             resnet_n_layers=1,
@@ -2112,6 +2153,9 @@ class HMLSTMSegmenter(object):
 
                 self.num_layers = num_layers
                 self.training = training
+                self.num_boundary_neurons = num_boundary_neurons
+                self.boundary_neuron_agg_fn = boundary_neuron_agg_fn
+                self.recurrent_at_forget = recurrent_at_forget
                 self.kernel_depth = kernel_depth
                 self.prefinal_mode = prefinal_mode
                 self.resnet_n_layers = resnet_n_layers
@@ -2205,6 +2249,9 @@ class HMLSTMSegmenter(object):
                     self.num_units,
                     self.num_layers,
                     training=self.training,
+                    num_boundary_neurons=self.num_boundary_neurons,
+                    boundary_neuron_agg_fn=self.boundary_neuron_agg_fn,
+                    recurrent_at_forget=self.recurrent_at_forget,
                     kernel_depth=self.kernel_depth,
                     prefinal_mode=self.prefinal_mode,
                     resnet_n_layers=self.resnet_n_layers,

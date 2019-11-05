@@ -19,6 +19,7 @@ if __name__ == '__main__':
     argparser.add_argument('config', help='Path to configuration file.')
     argparser.add_argument('-f', '--feature_names', default=['english'], nargs='+', help='Names of phonological features to use to color plots.')
     argparser.add_argument('-m', '--method', default='tsne', help='Embedding method to use for projections. One of ["lle", "mds", "pca", "spectral_embedding", "tsne"].')
+    argparser.add_argument('-l', '--layers', default=None, nargs='+', help='IDs of layers to project (0, ..., L).')
     args = argparser.parse_args()
 
     p = Config(args.config)
@@ -56,27 +57,28 @@ if __name__ == '__main__':
 
     for e in embeddings:
         segtype, l = emb_file.match(e).groups()
-        outdir_cur = outdir + '/' + segtype + '/l' + l + '/' + args.method
-        if not os.path.exists(outdir_cur):
-            os.makedirs(outdir_cur)
-        df = pd.read_csv(p.outdir + '/' + e, sep=' ')
+        if args.layers is None or l in args.layers:
+            outdir_cur = outdir + '/' + segtype + '/l' + l + '/' + args.method
+            if not os.path.exists(outdir_cur):
+                os.makedirs(outdir_cur)
+            df = pd.read_csv(p.outdir + '/' + e, sep=' ')
 
-        stderr('Projecting using %s. Segtype = %s. Layer = %s. Segments = %d.\n' % (args.method.upper(), segtype, l, len(df)))
-        sys.stderr.flush()
+            stderr('Projecting using %s. Segtype = %s. Layer = %s. Segments = %d.\n' % (args.method.upper(), segtype, l, len(df)))
+            sys.stderr.flush()
 
-        df = project_matching_segments(df, method=args.method)
+            df = project_matching_segments(df, method=args.method)
 
-        stderr('Plotting...\n')
-        sys.stderr.flush()
+            stderr('Plotting...\n')
+            sys.stderr.flush()
 
-        plot_projections(
-            df,
-            label_map=label_map,
-            feature_table=feature_table,
-            feature_names=feature_names,
-            directory=outdir_cur,
-            prefix='l%s_' % l,
-            suffix='.png'
-        )
+            plot_projections(
+                df,
+                label_map=label_map,
+                feature_table=feature_table,
+                feature_names=feature_names,
+                directory=outdir_cur,
+                prefix='l%s_' % l,
+                suffix='.png'
+            )
 
 
