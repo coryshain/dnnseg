@@ -1348,6 +1348,8 @@ class DNNSeg(object):
                             mask_cur = self.X_mask
 
                         targets_cur = self.encoder_hidden_states[l - 1]
+                        if not self.backprop_into_targets:
+                            targets_cur = tf.stop_gradient(targets_cur)
 
                     k = int(targets_cur.shape[-1])
 
@@ -5641,10 +5643,12 @@ class DNNSegMLE(DNNSeg):
                                     logits_bwd = self.lm_logits_bwd[l]
                                     targets_bwd = self.lm_targets_bwd[l]
                                     weights_bwd = self.lm_weights_bwd[l]
-                                    if not self.backprop_into_targets:
-                                        targets_bwd = tf.stop_gradient(targets_bwd)
-                                    if not self.backprop_into_loss_weights:
-                                        weights_bwd = tf.stop_gradient(weights_bwd)
+                                    # if not self.backprop_into_targets:
+                                    #     targets_bwd = tf.stop_gradient(targets_bwd)
+                                    # if not self.backprop_into_loss_weights:
+                                    #     weights_bwd = tf.stop_gradient(weights_bwd)
+                                    targets_bwd = tf.stop_gradient(targets_bwd)
+                                    weights_bwd = tf.stop_gradient(weights_bwd)
                                     lm_losses += self._get_loss(
                                         targets_bwd,
                                         logits_bwd,
@@ -5659,10 +5663,12 @@ class DNNSegMLE(DNNSeg):
                                     logits_fwd = self.lm_logits_fwd[l]
                                     targets_fwd = self.lm_targets_fwd[l]
                                     weights_fwd = self.lm_weights_fwd[l]
-                                    if not self.backprop_into_targets:
-                                        targets_fwd = tf.stop_gradient(targets_fwd)
-                                    if not self.backprop_into_loss_weights:
-                                        weights_fwd = tf.stop_gradient(weights_fwd)
+                                    # if not self.backprop_into_targets:
+                                    #     targets_fwd = tf.stop_gradient(targets_fwd)
+                                    # if not self.backprop_into_loss_weights:
+                                    #     weights_fwd = tf.stop_gradient(weights_fwd)
+                                    targets_fwd = tf.stop_gradient(targets_fwd)
+                                    weights_fwd = tf.stop_gradient(weights_fwd)
                                     lm_losses += self._get_loss(
                                         targets_fwd,
                                         logits_fwd,
