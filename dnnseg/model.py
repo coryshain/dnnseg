@@ -216,8 +216,6 @@ class DNNSeg(object):
                 self.lm_loss_scale = self.lm_loss_scale
         assert len(self.lm_loss_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_loss_scale and n_units_encoder.'
 
-        self.update_mode = 'all'
-
         ppx = self.plot_position_index.split()
         if len(ppx) == 1:
             ppx *= 2
@@ -923,19 +921,36 @@ class DNNSeg(object):
                                 segmentations = tf.clip_by_value(segmentations + fixed_boundaries, 0., 1.)
                                 self.segmentations[l] = segmentations
 
-                    self.encoder_hidden_states = self.segmenter_output.state(mask=self.X_mask)
+                    encoder_hidden_states_tmp = self.segmenter_output.state(mask=self.X_mask)
                     # if self.encoder_state_discretizer or self.xent_state_predictions:
                     if self.xent_state_predictions:
                         encoder_hidden_states = []
-                        for l in range(len(self.encoder_hidden_states)):
-                            encoder_hidden_states_cur = self.encoder_hidden_states[l]
+                        for l in range(len(encoder_hidden_states_tmp)):
+                            encoder_hidden_states_cur = encoder_hidden_states_tmp[l]
                             if l < self.layers_encoder - 1 or self.encoder_discretize_final:
                                 encoder_hidden_states_cur = (encoder_hidden_states_cur + 1) / 2
                                 encoder_hidden_states_cur *= self.X_mask[..., None]
                             encoder_hidden_states.append(encoder_hidden_states_cur)
-                        self.encoder_hidden_states = encoder_hidden_states
                     else:
-                        self.encoder_hidden_states = [x * self.X_mask[..., None] for x in self.encoder_hidden_states]
+                        encoder_hidden_states = [x * self.X_mask[..., None] for x in encoder_hidden_states_tmp]
+                    self.encoder_hidden_states = encoder_hidden_states
+
+                    if self.encoder_state_noise_sd:
+                        encoder_hidden_states_clean_tmp = self.segmenter_output.state_clean(mask=self.X_mask)
+                        if self.xent_state_predictions:
+                            encoder_hidden_states_clean = []
+                            for l in range(len(encoder_hidden_states_clean_tmp)):
+                                encoder_hidden_states_clean_cur = encoder_hidden_states_clean_tmp[l]
+                                if l < self.layers_encoder - 1 or self.encoder_discretize_final:
+                                    encoder_hidden_states_clean_cur = (encoder_hidden_states_clean_cur + 1) / 2
+                                    encoder_hidden_states_clean_cur *= self.X_mask[..., None]
+                                encoder_hidden_states_clean.append(encoder_hidden_states_clean_cur)
+                        else:
+                            encoder_hidden_states_clean = [x * self.X_mask[..., None] for x in encoder_hidden_states_clean_tmp]
+                        self.encoder_hidden_states_clean = encoder_hidden_states_clean
+                    else:
+                        self.encoder_hidden_states_clean = self.encoder_hidden_states
+
                     self.encoder_cell_states = self.segmenter_output.cell(mask=self.X_mask)
                     self.encoder_cell_proposals = self.segmenter_output.cell_proposals(mask=self.X_mask)
 
@@ -972,7 +987,7 @@ class DNNSeg(object):
                         mean_boundary_prob = tf.reduce_sum(self.segmentation_probs[l]) / tf.maximum(denom, self.epsilon)
                         self._add_regularization(mean_boundary_prob, self.boundary_prob_extremeness_regularizer)
                         self._add_regularization(seg_probs_mean, self.boundary_prob_regularizer)
-                        segs_mean = tf.reduce_sum(self.encoder_segmentations[l]) / tf.maximum(denom, self.epsilon)
+                        segs_mean = tf.reduce_sum(round_straight_through(self.encoder_segmentations[l], session=self.sess)) / tf.maximum(denom, self.epsilon)
                         self._add_regularization(segs_mean, self.boundary_regularizer)
 
                         if self.n_correspondence:
@@ -1198,7 +1213,7 @@ class DNNSeg(object):
                     if l == 0:
                         lm_targets_cur = self.X
                     else:
-                        lm_targets_cur = self.encoder_hidden_states[l - 1]
+                        lm_targets_cur = self.encoder_hidden_states_clean[l - 1]
 
                     if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
                         lm_targets_cur = tf.round(lm_targets_cur)
@@ -1347,9 +1362,12 @@ class DNNSeg(object):
                         else:
                             mask_cur = self.X_mask
 
-                        targets_cur = self.encoder_hidden_states[l - 1]
+                        targets_cur = self.encoder_hidden_states_clean[l - 1]
                         if not self.backprop_into_targets:
                             targets_cur = tf.stop_gradient(targets_cur)
+
+                        # if l > 0:
+                        #     targets_cur = tf.Print(targets_cur, ['l%d' % l, targets_cur], summarize=100)
 
                     k = int(targets_cur.shape[-1])
 
@@ -4410,13 +4428,14 @@ class DNNSeg(object):
                         self.save()
 
                 while self.global_step.eval(session=self.sess) < n_iter:
+                    self.set_update_mode(verbose=False)
+
                     if verbose:
                         t0_iter = time.time()
                         stderr('-' * 50 + '\n')
                         stderr('Iteration %d\n' % int(self.global_step.eval(session=self.sess) + 1))
                         stderr('\n')
 
-                    if verbose:
                         if self.streaming:
                             if n_pb > 1:
                                 stderr('Running minibatches %d-%d (out of %d)...\n' % (1, n_pb, n_minibatch))
@@ -4425,7 +4444,7 @@ class DNNSeg(object):
                         else:
                             stderr('Running minibatch updates...\n')
 
-                        self.set_update_mode(verbose=True)
+                        stderr('Update mode: %s\n' % self.update_mode)
 
                         if self.n_pretrain_steps and (self.step.eval(session=self.sess) <= self.n_pretrain_steps):
                             stderr('Pretraining decoder...\n')
@@ -4614,6 +4633,8 @@ class DNNSeg(object):
                                 verbose=verbose_cur
                             )
 
+                            self.set_update_mode(verbose=False)
+
                             if self.streaming and (save or evaluate or log):
                                 if verbose:
                                     if save:
@@ -4650,7 +4671,7 @@ class DNNSeg(object):
                                     else:
                                         sys.stderr.write('Running minibatch %d (out of %d)...\n' % (i + 1 + n_pb, n_minibatch))
 
-                                    self.set_update_mode(verbose=True)
+                                    stderr('Update mode: %s\n' % self.update_mode)
 
                                     if self.optim_name is not None and self.lr_decay_family is not None:
                                         sys.stderr.write('Learning rate: %s\n' % self.lr.eval(session=self.sess))
@@ -5208,16 +5229,42 @@ class DNNSeg(object):
                     if predict:
                         sys.stderr.write('No EMA checkpoint available. Leaving internal variables unchanged.\n')
 
-    def set_update_mode(self, mode='all', verbose=False):
-        if isinstance(mode, str):
-            update_mode = mode
-        else:
-            prob = float(mode)
-            update_boundaries = random.random() > prob
-            if update_boundaries:
-                update_mode = 'boundary'
+    def set_update_mode(self, verbose=False):
+        if isinstance(self.weight_update_mode, str):
+            if self.weight_update_mode in ['all', 'state', 'boundary']:
+                update_mode = self.weight_update_mode
+            elif self.weight_update_mode.lower().startswith('alternating'):
+                freq = int(self.weight_update_mode[11:])
+                if (self.global_batch_step.eval(self.sess) // freq) % 2 == 0:
+                    update_mode = 'state'
+                else:
+                    update_mode = 'boundary'
+            elif self.weight_update_mode.lower().startswith('layerwise'):
+                def mod_map(l):
+                    if l % 2 == 0:
+                        key = 'state_'
+                    else:
+                        key = 'boundary_'
+                    key +=  str(l // 2)
+
+                    return key
+
+                freq = int(self.weight_update_mode[9:])
+                mod = self.layers_encoder * 2 - 1
+
+                update_mode = mod_map(
+                    (self.global_batch_step.eval(self.sess) // freq) % mod
+                )
             else:
+                raise ValueError('Unrecognized update mode %s' % self.weight_update_mode)
+
+        else:
+            prob = float(self.weight_update_mode)
+            update_state = random.random() < prob
+            if update_state:
                 update_mode = 'state'
+            else:
+                update_mode = 'boundary'
 
         if verbose:
             sys.stderr.write('Update mode: %s\n' % update_mode)
@@ -5468,219 +5515,169 @@ class DNNSegMLE(DNNSeg):
                 else:
                     distance_func = 'l2norm'
 
-                if self.task == 'streaming_autoencoder':
-                    units_utt = self.units_encoder[-1]
-                    if self.emb_dim:
-                        units_utt += self.emb_dim
+                loss = 0
 
-                    self.encoder_cell = HMLSTMCell(
-                        self.units_encoder[:-1] + [units_utt],
-                        self.layers_encoder,
-                        training=self.training,
-                        one_hot_inputs=self.data_type.lower() == 'text',
-                        activation=self.encoder_inner_activation,
-                        inner_activation=self.encoder_inner_activation,
-                        recurrent_activation=self.encoder_recurrent_activation,
-                        boundary_activation=self.encoder_boundary_activation,
-                        boundary_discretizer=self.encoder_boundary_discretizer,
-                        bottomup_regularizer=self.encoder_weight_regularization,
-                        recurrent_regularizer=self.encoder_weight_regularization,
-                        topdown_regularizer=self.encoder_weight_regularization,
-                        boundary_regularizer=self.encoder_weight_regularization,
-                        bottomup_dropout=self.encoder_dropout,
-                        recurrent_dropout=self.encoder_dropout,
-                        topdown_dropout=self.encoder_dropout,
-                        boundary_dropout=self.encoder_dropout,
-                        bias_regularizer=None,
-                        layer_normalization=self.encoder_layer_normalization,
-                        refeed_boundary=False,
-                        boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
-                        boundary_slope_annealing_max=self.boundary_slope_annealing_max,
-                        state_slope_annealing_rate=self.state_slope_annealing_rate,
-                        slope_annealing_max=self.slope_annealing_max,
-                        state_discretizer=self.encoder_state_discretizer,
-                        global_step=self.step,
-                        implementation=2
+                if not self.streaming or self.predict_backward:
+                    self.encoding_post = self.encoding
+                    if self.task == 'classifier':
+                        self.labels_post = self.labels
+                        self.label_probs_post = self.label_probs
+
+                    targets = self.y_bwd
+                    preds = self.decoder_bwd
+                    if self.curriculum_t is not None:
+                        if self.curriculum_type.lower() == 'hard':
+                            targets = targets[..., :self.curriculum_t, :]
+                            preds = preds[..., :self.curriculum_t, :]
+                            weights = None
+                        elif self.curriculum_type.lower() == 'exp':
+                            weights = tf.exp(
+                                - (tf.range(self.n_timesteps_output_bwd, dtype=self.FLOAT_TF) / self.curriculum_t)
+                            )
+                            weights = (weights, weights)
+                        else:
+                            weights = 1 / (1 + tf.exp(
+                                self.curriculum_init *
+                                (tf.range(self.n_timesteps_output_bwd, dtype=self.FLOAT_TF) - self.curriculum_t))
+                            )
+                    else:
+                        weights = None
+
+                    self.loss_reconstruction = self._get_loss(
+                        targets,
+                        preds,
+                        use_dtw=self.use_dtw,
+                        distance_func=distance_func,
+                        weights=weights
                     )
 
-                    self.encoder_zero_state = self.encoder_cell.zero_state(tf.shape(self.X)[0], self.FLOAT_TF)
-                    encoder_state = []
-                    for i in range(len(self.encoder_zero_state)):
-                        state_layer = []
-                        for j in range(len(self.encoder_zero_state[i])):
-                            state_layer.append(tf.placeholder(self.FLOAT_TF, shape=self.encoder_zero_state[i][j].shape))
-                        encoder_state.append(tuple(state_layer))
+                    loss += self.loss_reconstruction
 
-                    self.encoder_state = tuple(encoder_state)
-                    loss, self.encoder_states, self.out_left, self.out_right = self._streaming_dynamic_scan(self.X)
-
-                    self.encoder_hidden_states = [self.encoder_states[i][1] for i in range(len(self.encoder_states))]
-                    self.segmentation_probs = [self.encoder_states[i][2] for i in range(len(self.encoder_states) - 1)]
-
-                else:
-                    loss = 0
-
-                    if not self.streaming or self.predict_backward:
-                        self.encoding_post = self.encoding
-                        if self.task == 'classifier':
-                            self.labels_post = self.labels
-                            self.label_probs_post = self.label_probs
-
-                        targets = self.y_bwd
-                        preds = self.decoder_bwd
-                        if self.curriculum_t is not None:
-                            if self.curriculum_type.lower() == 'hard':
-                                targets = targets[..., :self.curriculum_t, :]
-                                preds = preds[..., :self.curriculum_t, :]
-                                weights = None
-                            elif self.curriculum_type.lower() == 'exp':
-                                weights = tf.exp(
-                                    - (tf.range(self.n_timesteps_output_bwd, dtype=self.FLOAT_TF) / self.curriculum_t)
-                                )
-                                weights = (weights, weights)
-                            else:
-                                weights = 1 / (1 + tf.exp(
-                                    self.curriculum_init *
-                                    (tf.range(self.n_timesteps_output_bwd, dtype=self.FLOAT_TF) - self.curriculum_t))
-                                )
-                        else:
+                if self.streaming and self.predict_forward:
+                    targets = self.y_fwd
+                    preds = self.decoder_fwd
+                    if self.curriculum_t is not None:
+                        if self.curriculum_type.lower() == 'hard':
+                            targets = targets[..., :self.curriculum_t, :]
+                            preds = preds[..., :self.curriculum_t, :]
                             weights = None
-
-                        self.loss_reconstruction = self._get_loss(
-                            targets,
-                            preds,
-                            use_dtw=self.use_dtw,
-                            distance_func=distance_func,
-                            weights=weights
-                        )
-
-                        loss += self.loss_reconstruction
-
-                    if self.streaming and self.predict_forward:
-                        targets = self.y_fwd
-                        preds = self.decoder_fwd
-                        if self.curriculum_t is not None:
-                            if self.curriculum_type.lower() == 'hard':
-                                targets = targets[..., :self.curriculum_t, :]
-                                preds = preds[..., :self.curriculum_t, :]
-                                weights = None
-                            elif self.curriculum_type.lower() == 'exp':
-                                weights = tf.exp(
-                                    - (tf.range(self.n_timesteps_output_fwd, dtype=self.FLOAT_TF) / self.curriculum_t)
-                                )
-                                weights = (weights, weights)
-                            else:
-                                weights = 1 / (1 + tf.exp(
-                                    self.curriculum_init *
-                                    (tf.range(self.n_timesteps_output_fwd, dtype=self.FLOAT_TF) - self.curriculum_t))
-                                )
-                        else:
-                            weights = None
-
-                        self.loss_prediction = self._get_loss(
-                            targets,
-                            preds,
-                            use_dtw=self.use_dtw,
-                            distance_func=distance_func,
-                            weights=weights
-                        )
-
-                        loss += self.loss_prediction
-
-                    if self.correspondence_loss_scale:
-                        self.correspondence_losses = []
-
-                        if self.n_correspondence:
-                            correspondence_ae_losses = self._compute_correspondence_ae_loss(
-                                implementation=self.correspondence_loss_implementation,
-                                n_timesteps=self.correspondence_n_timesteps,
-                                alpha=self.correspondence_alpha
+                        elif self.curriculum_type.lower() == 'exp':
+                            weights = tf.exp(
+                                - (tf.range(self.n_timesteps_output_fwd, dtype=self.FLOAT_TF) / self.curriculum_t)
                             )
-                            for cae_loss in correspondence_ae_losses:
-                                self.correspondence_losses.append(cae_loss)
-                                loss += cae_loss
+                            weights = (weights, weights)
                         else:
-                            for l in range(len(self.averaged_inputs) - 1):
-                                correspondence_targets = self.averaged_inputs[l]
-                                if not (l == 0 and self.data_type.lower() == 'acoustic'):
-                                    # Xent loss, so renormalize counts
-                                    correspondence_targets /= tf.maximum(tf.reduce_sum(correspondence_targets, axis=-1, keepdims=True), self.epsilon)
-                                if not self.backprop_into_targets:
-                                    correspondence_targets = tf.stop_gradient(correspondence_targets)
-                                correspondence_logits = self.averaged_input_logits[l]
-                                if l == 0 and self.speaker_revnet_n_layers:
-                                    correspondence_logits = self.speaker_revnet.backward(correspondence_logits, weights=self.speaker_embeddings)
+                            weights = 1 / (1 + tf.exp(
+                                self.curriculum_init *
+                                (tf.range(self.n_timesteps_output_fwd, dtype=self.FLOAT_TF) - self.curriculum_t))
+                            )
+                    else:
+                        weights = None
 
-                                if self.scale_losses_by_boundaries:
-                                    mask = self.encoder_segmentations[l]
-                                else:
-                                    mask = self.X_mask
+                    self.loss_prediction = self._get_loss(
+                        targets,
+                        preds,
+                        use_dtw=self.use_dtw,
+                        distance_func=distance_func,
+                        weights=weights
+                    )
 
-                                cae_loss = self._get_loss(
-                                    correspondence_targets,
-                                    correspondence_logits,
-                                    use_dtw=False,
+                    loss += self.loss_prediction
+
+                if self.correspondence_loss_scale:
+                    self.correspondence_losses = []
+
+                    if self.n_correspondence:
+                        correspondence_ae_losses = self._compute_correspondence_ae_loss(
+                            implementation=self.correspondence_loss_implementation,
+                            n_timesteps=self.correspondence_n_timesteps,
+                            alpha=self.correspondence_alpha
+                        )
+                        for cae_loss in correspondence_ae_losses:
+                            self.correspondence_losses.append(cae_loss)
+                            loss += cae_loss
+                    else:
+                        for l in range(len(self.averaged_inputs) - 1):
+                            correspondence_targets = self.averaged_inputs[l]
+                            if not (l == 0 and self.data_type.lower() == 'acoustic'):
+                                # Xent loss, so renormalize counts
+                                correspondence_targets /= tf.maximum(tf.reduce_sum(correspondence_targets, axis=-1, keepdims=True), self.epsilon)
+                            if not self.backprop_into_targets:
+                                correspondence_targets = tf.stop_gradient(correspondence_targets)
+                            correspondence_logits = self.averaged_input_logits[l]
+                            if l == 0 and self.speaker_revnet_n_layers:
+                                correspondence_logits = self.speaker_revnet.backward(correspondence_logits, weights=self.speaker_embeddings)
+
+                            if self.scale_losses_by_boundaries:
+                                mask = self.encoder_segmentations[l]
+                            else:
+                                mask = self.X_mask
+
+                            cae_loss = self._get_loss(
+                                correspondence_targets,
+                                correspondence_logits,
+                                use_dtw=False,
+                                distance_func=self._lm_distance_func(l),
+                                weights=mask,
+                                reduce=True,
+                                name='cae_loss_L%d' % l
+                            ) * self.correspondence_loss_scale
+
+                            self.correspondence_losses.append(cae_loss)
+
+                            loss += cae_loss
+
+                if self.lm_loss_scale:
+                    assert not self.residual_targets, 'residual_targets is currently broken. Do not use.'
+
+                    self.lm_losses = []
+                    for l in range(self.layers_encoder - 1, -1, -1):
+                        lm_losses = tf.constant(0, dtype=self.FLOAT_TF)
+                        loss_scale = self.lm_loss_scale[l]
+
+                        if loss_scale:
+                            if self.lm_targets_bwd[l] is not None and self.lm_order_bwd:
+                                logits_bwd = self.lm_logits_bwd[l]
+                                targets_bwd = self.lm_targets_bwd[l]
+                                weights_bwd = self.lm_weights_bwd[l]
+                                # if not self.backprop_into_targets:
+                                #     targets_bwd = tf.stop_gradient(targets_bwd)
+                                # if not self.backprop_into_loss_weights:
+                                #     weights_bwd = tf.stop_gradient(weights_bwd)
+                                targets_bwd = tf.stop_gradient(targets_bwd)
+                                weights_bwd = tf.stop_gradient(weights_bwd)
+                                lm_losses += self._get_loss(
+                                    targets_bwd,
+                                    logits_bwd,
+                                    use_dtw=self._apply_dtw(l),
                                     distance_func=self._lm_distance_func(l),
-                                    weights=mask,
+                                    weights=weights_bwd,
                                     reduce=True,
-                                    name='cae_loss_L%d' % l
-                                ) * self.correspondence_loss_scale
+                                    name='lm_bwd_loss_L%d' % l
+                                ) * loss_scale
 
-                                self.correspondence_losses.append(cae_loss)
+                            if self.lm_targets_fwd[l] is not None and self.lm_order_fwd:
+                                logits_fwd = self.lm_logits_fwd[l]
+                                targets_fwd = self.lm_targets_fwd[l]
+                                weights_fwd = self.lm_weights_fwd[l]
+                                # if not self.backprop_into_targets:
+                                #     targets_fwd = tf.stop_gradient(targets_fwd)
+                                # if not self.backprop_into_loss_weights:
+                                #     weights_fwd = tf.stop_gradient(weights_fwd)
+                                targets_fwd = tf.stop_gradient(targets_fwd)
+                                weights_fwd = tf.stop_gradient(weights_fwd)
+                                lm_losses += self._get_loss(
+                                    targets_fwd,
+                                    logits_fwd,
+                                    use_dtw=self._apply_dtw(l),
+                                    distance_func=self._lm_distance_func(l),
+                                    weights=weights_fwd,
+                                    reduce=True,
+                                    name='lm_fwd_loss_L%d' % l
+                                ) * loss_scale
 
-                                loss += cae_loss
-
-                    if self.lm_loss_scale:
-                        assert not self.residual_targets, 'residual_targets is currently broken. Do not use.'
-
-                        self.lm_losses = []
-                        for l in range(self.layers_encoder - 1, -1, -1):
-                            lm_losses = tf.constant(0, dtype=self.FLOAT_TF)
-                            loss_scale = self.lm_loss_scale[l]
-
-                            if loss_scale:
-                                if self.lm_targets_bwd[l] is not None and self.lm_order_bwd:
-                                    logits_bwd = self.lm_logits_bwd[l]
-                                    targets_bwd = self.lm_targets_bwd[l]
-                                    weights_bwd = self.lm_weights_bwd[l]
-                                    # if not self.backprop_into_targets:
-                                    #     targets_bwd = tf.stop_gradient(targets_bwd)
-                                    # if not self.backprop_into_loss_weights:
-                                    #     weights_bwd = tf.stop_gradient(weights_bwd)
-                                    targets_bwd = tf.stop_gradient(targets_bwd)
-                                    weights_bwd = tf.stop_gradient(weights_bwd)
-                                    lm_losses += self._get_loss(
-                                        targets_bwd,
-                                        logits_bwd,
-                                        use_dtw=self._apply_dtw(l),
-                                        distance_func=self._lm_distance_func(l),
-                                        weights=weights_bwd,
-                                        reduce=True,
-                                        name='lm_bwd_loss_L%d' % l
-                                    ) * loss_scale
-
-                                if self.lm_targets_fwd[l] is not None and self.lm_order_fwd:
-                                    logits_fwd = self.lm_logits_fwd[l]
-                                    targets_fwd = self.lm_targets_fwd[l]
-                                    weights_fwd = self.lm_weights_fwd[l]
-                                    # if not self.backprop_into_targets:
-                                    #     targets_fwd = tf.stop_gradient(targets_fwd)
-                                    # if not self.backprop_into_loss_weights:
-                                    #     weights_fwd = tf.stop_gradient(weights_fwd)
-                                    targets_fwd = tf.stop_gradient(targets_fwd)
-                                    weights_fwd = tf.stop_gradient(weights_fwd)
-                                    lm_losses += self._get_loss(
-                                        targets_fwd,
-                                        logits_fwd,
-                                        use_dtw=self._apply_dtw(l),
-                                        distance_func=self._lm_distance_func(l),
-                                        weights=weights_fwd,
-                                        reduce=True,
-                                        name='lm_fwd_loss_L%d' % l
-                                    ) * loss_scale
-
-                            self.lm_losses.insert(0, lm_losses)
-                            loss += lm_losses
+                        self.lm_losses.insert(0, lm_losses)
+                        loss += lm_losses
 
                 if self.speaker_adversarial_loss_scale and self.speaker_emb_dim:
                     speaker_adversarial_loss = 0.
@@ -5783,12 +5780,41 @@ class DNNSegMLE(DNNSeg):
 
                 boundary_var_re = re.compile('boundary')
                 state_var_re = re.compile('hmlstm_encoder/(bottomup|recurrent|topdown)')
-                non_state_vars = [x for x in tf.trainable_variables() if not boundary_var_re.search(x.name)]
-                non_boundary_vars = [x for x in tf.trainable_variables() if not state_var_re.search(x.name)]
+                
+                trainable_variables = tf.trainable_variables()
 
-                self.train_op_all = self.optim.minimize(self.full_loss, global_step=self.global_batch_step)
-                self.train_op_boundary = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=non_state_vars)
-                self.train_op_state = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=non_boundary_vars)
+                varset = {
+                    'boundary': [x for x in trainable_variables if not state_var_re.search(x.name)],
+                    'state': [x for x in trainable_variables if not boundary_var_re.search(x.name)]
+                }
+
+                for l in range(self.layers_encoder):
+                    s_key = 'state_%d' % l
+                    b_key = 'boundary_%d' % l
+                    l_str = '_l%d_' % l
+                    
+                    varset[s_key] = []
+                    varset[b_key] = []
+
+                    for x in trainable_variables:
+                        s_match = state_var_re.search(x.name)
+                        b_match = boundary_var_re.search(x.name)
+                        if s_match:
+                            if l_str in x.name:
+                                varset[s_key].append(x)
+                        elif b_match:
+                            if l_str in x.name:
+                                varset[b_key].append(x)
+                        else:
+                            varset[s_key].append(x)
+                            varset[b_key].append(x)
+
+                self.train_ops = {
+                    'all': self.optim.minimize(self.full_loss, global_step=self.global_batch_step)
+                }
+
+                for k in varset:
+                    self.train_ops[k] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset[k])
 
     def run_train_step(
             self,
@@ -5806,14 +5832,7 @@ class DNNSegMLE(DNNSeg):
                 out_dict = {}
 
                 if return_loss or return_reconstructions or return_labels or return_label_probs:
-                    if self.update_mode == 'all':
-                        train_op = self.train_op_all
-                    elif self.update_mode == 'boundary':
-                        train_op = self.train_op_boundary
-                    elif self.update_mode == 'state':
-                        train_op = self.train_op_state
-                    else:
-                        raise ValueError('Unrecognized update_mode "%s".' % update_mode)
+                    train_op = self.train_ops[self.update_mode]
 
                     to_run = [train_op]
                     to_run_names = []

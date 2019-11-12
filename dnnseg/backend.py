@@ -714,6 +714,7 @@ def wma(x, filter_width=5, session=None):
 HMLSTM_RETURN_SIGNATURE = [
     'c',
     'h',
+    'h_clean',
     'z_prob',
     'z',
     'lm',
@@ -768,7 +769,7 @@ def hmlstm_state_size(
                 value = units[l]
                 if l == 0 and units_passthru:
                     value += units_passthru
-            elif name == 'h':
+            elif name in ['h', 'h_clean']:
                 include = True
                 value = units[l]
             elif name in ['z', 'z_prob']:
@@ -1647,6 +1648,7 @@ class HMLSTMCell(LayerRNNCell):
 
                     # s /= normalizer
 
+                    s_clean = s
                     if self._state_noise_sd:
                         s = tf.cond(self._training, lambda: s + tf.random_normal(shape=tf.shape(s), stddev=self._state_noise_sd), lambda: s)
 
@@ -1654,6 +1656,7 @@ class HMLSTMCell(LayerRNNCell):
                         # In implementation 1, boundary has its own slice of the hidden state preactivations
                         z_logit = s[:, units * 4:]
                         s = s[:, :units * 4]
+                        s_clean = s_clean[:, :units * 4]
                     else:
                         z_logit = None
 
@@ -1661,6 +1664,7 @@ class HMLSTMCell(LayerRNNCell):
                         if self._implementation == 1:
                             z_logit += self._bias[l][:, units * 4:]
                         s = s + self._bias[l][:, :units * 4]
+                        s_clean = s_clean + self._bias[l][:, :units * 4]
 
                     # Forget gate
                     f = s[:, :units]
@@ -1668,11 +1672,22 @@ class HMLSTMCell(LayerRNNCell):
                         f = self.norm(f, 'f_ln_%d' % l)
                     f = self._recurrent_activation(f + self._forget_bias)
 
+                    f_clean = s_clean[:, :units]
+                    if self._layer_normalization:
+                        f_clean = self.norm(f_clean, 'f_ln_%d' % l)
+                    f_clean = self._recurrent_activation(f_clean + self._forget_bias)
+
+
                     # Input gate
                     i = s[:, units:units * 2]
                     if self._layer_normalization:
                         i = self.norm(i, 'i_ln_%d' % l)
                     i = self._recurrent_activation(i)
+
+                    i_clean = s_clean[:, units:units * 2]
+                    if self._layer_normalization:
+                        i_clean = self.norm(i_clean, 'i_ln_%d' % l)
+                    i_clean = self._recurrent_activation(i_clean)
 
                     # Output gate
                     o = s[:, units * 2:units * 3]
@@ -1680,24 +1695,37 @@ class HMLSTMCell(LayerRNNCell):
                         o = self.norm(o, 'o_ln_%d' % l)
                     o = self._recurrent_activation(o)
 
+                    o_clean = s_clean[:, units * 2:units * 3]
+                    if self._layer_normalization:
+                        o_clean = self.norm(o_clean, 'o_ln_%d' % l)
+                    o_clean = self._recurrent_activation(o_clean)
+
                     # Cell proposal
                     g = s[:, units * 3:units * 4]
                     if self._layer_normalization:
                         g = self.norm(g, 'g_ln_%d' % l)
                     g = activation(g)
 
+                    g_clean = s_clean[:, units * 3:units * 4]
+                    if self._layer_normalization:
+                        g_clean = self.norm(g_clean, 'g_ln_%d' % l)
+                    g_clean = activation(g_clean)
+
                     # Compute cell state flush operation
                     c_flush = i * g
+                    c_flush_clean = i_clean * g_clean
 
                     # Compute cell state copy operation
                     c_copy = c_behind
 
                     # Cell state update (forget-gated previous cell plus input-gated cell proposal)
                     c_update = f * c_behind + c_flush
+                    c_update_clean = f_clean * c_behind + c_flush_clean
 
                     # Merge cell operations. If boundaries are hard, selects between update, copy, and flush.
                     # If boundaries are soft, sums update copy and flush proportionally to their probs.
                     c = update_prob * c_update + flush_prob * c_flush + copy_prob * c_copy
+                    c_clean = update_prob * c_update_clean + flush_prob * c_flush_clean + copy_prob * c_copy
 
                     # Compute the gated output of non-copy cell state
                     h = c
@@ -1705,11 +1733,20 @@ class HMLSTMCell(LayerRNNCell):
                         h *= self.state_slope_coef
                     h = activation(h) * o
 
+                    h_clean = c_clean
+                    if self._state_discretizer and self._state_slope_annealing_rate and self._global_step is not None:
+                        h_clean *= self.state_slope_coef
+                    h_clean = activation(h_clean) * o_clean
+
                     if l == 0 and self._n_passthru_neurons:
                         passthru = h[:, :self._n_passthru_neurons]
                         h = h[:, self._n_passthru_neurons:]
+
+                        passthru_clean = h_clean[:, :self._n_passthru_neurons]
+                        h_clean = h_clean[:, self._n_passthru_neurons:]
                     else:
                         passthru = None
+                        passthru_clean = None
 
                     # if self._state_discretizer and not self._discretize_state_at_boundary and self._global_step is not None:
                     if l < (self._num_layers - 1 + self._discretize_final) \
@@ -1723,6 +1760,15 @@ class HMLSTMCell(LayerRNNCell):
                             h_prob = h
                         h_prob = (h_prob + 1) / 2
                         h_discrete = self._state_discretizer(h_prob)
+
+
+                        if (l < self._num_layers - 1 and not self._tanh_inner_activation) \
+                                or (l == self._num_layers - 1 and not self._tanh_activation):
+                            h_prob_clean = tf.tanh(h_clean)
+                        else:
+                            h_prob_clean = h_clean
+                        h_prob_clean = (h_prob_clean + 1) / 2
+                        h_discrete_clean = round_straight_through(h_prob_clean, session=self._session)
 
                         if self._min_discretization_prob is None:
                             h = h_discrete
@@ -1749,13 +1795,18 @@ class HMLSTMCell(LayerRNNCell):
 
                             h = tf.cond(self._training, train_func, eval_func)
 
+                        h_clean = h_discrete_clean
+
                         h = h * 2 - 1
+                        h_clean = h_clean * 2 - 1
 
                     elif self._l2_normalize_states:
                         h = tf.nn.l2_normalize(h, axis=-1, epsilon=self._epsilon)
+                        h_clean = tf.nn.l2_normalize(h_clean, axis=-1, epsilon=self._epsilon)
 
                     # Mix gated output with the previous hidden state proportionally to the copy probability
                     h = copy_prob * h_behind + (1 - copy_prob) * h
+                    h_clean = copy_prob * h_behind + (1 - copy_prob) * h_clean
 
                     # Compute the current boundary probability
                     if l < self._num_layers - 1:
@@ -1839,14 +1890,6 @@ class HMLSTMCell(LayerRNNCell):
                         z_prob = None
                         z = None
 
-                    if False:
-                        z_comp = 1 - z
-                        a_prev = state.a
-                        a_cur = h_below_clean
-                        a_lt = z_comp * a_prev + z * a_cur
-                        a_gt = a_cur
-                        a = tf.maximum(a_lt, a_gt)
-
                     name_map = {
                         'c': c,
                         'h': h,
@@ -1856,16 +1899,24 @@ class HMLSTMCell(LayerRNNCell):
                         'passthru': passthru
                     }
 
+                    if self._state_noise_sd:
+                        name_map['h_clean'] = h_clean
+                    else:
+                        name_map['h_clean'] = h
+
                     h_below = h
                     z_below = z
 
                     # Clear variables to prevent accidental reuse from wrong layer
                     c = None
+                    c_clean = None
                     h = None
+                    h_clean = None
                     z = None
                     z_prob = None
                     cell_proposal = None
                     passthru = None
+                    passthru_clean = None
 
                     name_maps.append(name_map)
 
@@ -2036,7 +2087,7 @@ class HMLSTMCell(LayerRNNCell):
 
                     for name in HMLSTM_RETURN_SIGNATURE:
                         include = False
-                        if name in ['c', 'h', 'cell_proposal']:
+                        if name in ['c', 'h', 'h_clean', 'cell_proposal']:
                             include = True
                         elif name in ['z', 'z_prob'] and l < self._num_layers - 1:
                             include = True
@@ -2390,6 +2441,14 @@ class HMLSTMOutput(object):
 
         return out
 
+    def state_clean(self, level=None, discrete=False, method='round', mask=None):
+        if level is None:
+            out = tuple([l.state_clean(discrete=discrete, discretization_method=method, mask=mask) for l in self.l])
+        else:
+            out = self.l[level].state_clean(discrete=discrete, discretization_method=method, mask=mask)
+
+        return out
+
     def boundary(self, level=None, discrete=False, method='round', as_logits=False, mask=None):
         if level is None:
             out = tuple(
@@ -2485,6 +2544,23 @@ class HMLSTMOutputLevel(object):
         with self.session.as_default():
             with self.session.graph.as_default():
                 out = self.h
+                if discrete:
+                    if discretization_method == 'round':
+                        out = tf.cast(tf.round(self.h), dtype=tf.int32)
+                    else:
+                        raise ValueError('Discretization method "%s" not currently supported' % discretization_method)
+
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
+
+                return out
+
+    def state_clean(self, discrete=False, discretization_method='round', mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                out = self.h_clean
                 if discrete:
                     if discretization_method == 'round':
                         out = tf.cast(tf.round(self.h), dtype=tf.int32)

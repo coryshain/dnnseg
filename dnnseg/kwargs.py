@@ -1218,6 +1218,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of samples to take per training point. Do not set to > 1 unless model contains stochastic decisions (e.g. Bernoulli-distributed binary stochastic neurons)."
     ),
     Kwarg(
+        'weight_update_mode',
+        'all',
+        [str, float],
+        "Weight update mode, one of ``'all'``, ``'boundary'``, ``'state'``, or ``float``."
+    ),
+    Kwarg(
         'ema_decay',
         None,
         [float, None],
