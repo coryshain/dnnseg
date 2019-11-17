@@ -714,7 +714,8 @@ def wma(x, filter_width=5, session=None):
 HMLSTM_RETURN_SIGNATURE = [
     'c',
     'h',
-    'h_clean',
+    'h_discrete',
+    'h_target',
     'z_prob',
     'z',
     'lm',
@@ -732,6 +733,7 @@ def hmlstm_state_size(
         units_below=None,
         units_lm=None,
         units_passthru=None,
+        return_discrete=True,
         return_c=True,
         return_z_prob=True,
         return_lm=True,
@@ -769,7 +771,7 @@ def hmlstm_state_size(
                 value = units[l]
                 if l == 0 and units_passthru:
                     value += units_passthru
-            elif name in ['h', 'h_clean']:
+            elif name in ['h', 'h_discrete', 'h_target']:
                 include = True
                 value = units[l]
             elif name in ['z', 'z_prob']:
@@ -859,7 +861,6 @@ class HMLSTMCell(LayerRNNCell):
             boundary_dropout=None,
             weight_normalization=False,
             layer_normalization=False,
-            refeed_boundary=False,
             use_bias=True,
             boundary_slope_annealing_rate=None,
             state_slope_annealing_rate=None,
@@ -935,7 +936,7 @@ class HMLSTMCell(LayerRNNCell):
                 else:
                     agg_fn = getattr(tf, 'reduce_' + boundary_neuron_agg_fn)
                 self._boundary_neuron_agg_fn = agg_fn
-                
+
                 self._recurrent_at_forget = recurrent_at_forget
 
                 self._kernel_depth = kernel_depth
@@ -975,7 +976,7 @@ class HMLSTMCell(LayerRNNCell):
                     )
                 else:
                     self._boundary_discretizer = None
-                self.boundary_noise_sd = boundary_noise_sd
+                self._boundary_noise_sd = boundary_noise_sd
 
                 self._bottomup_initializer = get_initializer(bottomup_initializer, session=self._session)
                 self._recurrent_initializer = get_initializer(recurrent_initializer, session=self._session)
@@ -1016,7 +1017,6 @@ class HMLSTMCell(LayerRNNCell):
 
                 self._weight_normalization = weight_normalization
                 self._layer_normalization = layer_normalization
-                self._refeed_boundary = refeed_boundary
                 self._use_timing_unit = False
                 self._use_bias = use_bias
                 self._boundary_slope_annealing_rate = boundary_slope_annealing_rate
@@ -1142,6 +1142,7 @@ class HMLSTMCell(LayerRNNCell):
     def initialize_kernel(self, l, in_dim, out_dim, kernel_initializer, prefinal_mode=None, name=None):
         with self._session.as_default():
             with self._session.graph.as_default():
+                units_below = in_dim
                 kernel_lambdas = []
                 depth = self._kernel_depth
                 if prefinal_mode is None:
@@ -1183,7 +1184,7 @@ class HMLSTMCell(LayerRNNCell):
                     else:
                         name_cur = 'l%d_d%d' % (l, d)
 
-                    if self._resnet_n_layers > 1:
+                    if self._resnet_n_layers and self._resnet_n_layers > 1 and units == units_below:
                         kernel_layer = DenseResidualLayer(
                             training=self._training,
                             units=units,
@@ -1216,6 +1217,8 @@ class HMLSTMCell(LayerRNNCell):
                         )
 
                     kernel_lambdas.append(make_lambda(kernel_layer, session=self._session))
+
+                    units_below = units
 
                 kernel = compose_lambdas(kernel_lambdas)
 
@@ -1265,7 +1268,7 @@ class HMLSTMCell(LayerRNNCell):
                         bottomup_dim = inputs_shape[1].value - n_boundary_dims
                     else:
                         bottomup_dim = self._num_units[l - 1]
-                    bottomup_dim += self._refeed_boundary and (self._implementation == 1)
+                    bottomup_dim += (self._implementation == 1)
 
                     recurrent_dim = self._num_units[l]
 
@@ -1320,27 +1323,25 @@ class HMLSTMCell(LayerRNNCell):
                             )
                         )
 
-                    # Build boundary (and, if necessary, boundary kernel)
-                    if l < self._num_layers - 1 and self._infer_boundary:
-                        if self._implementation == 1 and not self._layer_normalization and self._use_bias:
-                            bias_boundary = bias[:, -self._num_boundary_neurons:]
-                            self._bias_boundary.append(bias_boundary)
-                        elif self._implementation == 2:
-                            # boundary_in_dim = self._num_units[l] * 2
-                            boundary_in_dim = self._num_units[l]
-                            if l == 0 and self._n_passthru_neurons:
-                                boundary_in_dim += self._n_passthru_neurons * 4
+                    if not self._oracle_boundary:
+                        # Build boundary (and, if necessary, boundary kernel)
+                        if l < self._num_layers - 1 and self._infer_boundary:
+                            if self._implementation == 1 and not self._layer_normalization and self._use_bias:
+                                bias_boundary = bias[:, -self._num_boundary_neurons:]
+                                self._bias_boundary.append(bias_boundary)
+                            elif self._implementation == 2:
+                                boundary_in_dim = self._num_units[l]
 
-                            self._kernel_boundary.append(
-                                self.initialize_kernel(
-                                    l,
-                                    boundary_in_dim,
-                                    self._num_boundary_neurons,
-                                    self._boundary_initializer,
-                                    prefinal_mode='in',
-                                    name='boundary'
+                                self._kernel_boundary.append(
+                                    self.initialize_kernel(
+                                        l,
+                                        boundary_in_dim,
+                                        self._num_boundary_neurons,
+                                        self._boundary_initializer,
+                                        prefinal_mode='in',
+                                        name='boundary'
+                                    )
                                 )
-                            )
 
                     # Build language model kernel(s)
                     if self._lm:
@@ -1488,6 +1489,8 @@ class HMLSTMCell(LayerRNNCell):
 
                 for l, layer in enumerate(state):
                     h_below_clean = h_below
+                    h_below = self._bottomup_dropout(h_below)
+
                     # if not self._bptt:
                     #     h_below = tf.stop_gradient(h_below)
 
@@ -1554,7 +1557,10 @@ class HMLSTMCell(LayerRNNCell):
 
                     # h_above: Hidden state of layer above at previous timestep (implicitly 0 if final layer)
                     if l < self._num_layers - 1:
-                        h_above = state[l + 1].h
+                        if self._state_discretizer and self._discretize_state_at_boundary and l < self._num_layers - 2 + self._discretize_final:
+                            h_above = state[l + 1].h_discrete
+                        else:
+                            h_above = state[l + 1].h
                         # if not self._bptt:
                         #     h_above = tf.stop_gradient(h_above)
                         if self._topdown_noise_sd:
@@ -1566,42 +1572,6 @@ class HMLSTMCell(LayerRNNCell):
                         h_above = self._topdown_dropout(h_above)
                     else:
                         h_above = None
-
-                    if self._implementation == 1 and self._refeed_boundary:
-                        h_below = tf.concat([z_behind, h_below], axis=1)
-
-                    if l > 0 and self._state_discretizer and self._discretize_state_at_boundary:
-                        h_below_prob = (h_below + 1) / 2
-                        h_below_discrete = self._state_discretizer(h_below_prob)
-
-                        if self._min_discretization_prob is None:
-                            h_below = h_below_discrete
-                        else:
-                            def train_func():
-                                a = self._min_discretization_prob
-                                discretization_prob = 2 * (1 - a) * tf.abs(h_below_prob - 0.5) + a
-                                if self._trainable_self_discretization:
-                                    discretize = self._state_discretizer(discretization_prob)
-                                    discrete = h_discrete * discretize
-                                    continuous = h_prob * (1 - discretize)
-                                    out = discrete + continuous
-                                else:
-                                    # if self._sample_at_train:
-                                    #     discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
-                                    # else:
-                                    #     discretize = discretization_prob < 0.5
-                                    discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
-                                    out = tf.where(discretize, h_below_discrete, h_below_prob)
-                                return out
-
-                            def eval_func():
-                                return h_below_discrete
-
-                            h_below = tf.cond(self._training, train_func, eval_func)
-
-                        h_below = h_below * 2 - 1
-
-                    h_below = self._bottomup_dropout(h_below)
 
                     # Compute state preactivations
                     s = []
@@ -1668,47 +1638,39 @@ class HMLSTMCell(LayerRNNCell):
 
                     # Forget gate
                     f = s[:, :units]
-                    if self._layer_normalization:
-                        f = self.norm(f, 'f_ln_%d' % l)
-                    f = self._recurrent_activation(f + self._forget_bias)
-
                     f_clean = s_clean[:, :units]
                     if self._layer_normalization:
+                        f = self.norm(f, 'f_ln_%d' % l)
                         f_clean = self.norm(f_clean, 'f_ln_%d' % l)
+                    f = self._recurrent_activation(f + self._forget_bias)
                     f_clean = self._recurrent_activation(f_clean + self._forget_bias)
 
 
                     # Input gate
                     i = s[:, units:units * 2]
-                    if self._layer_normalization:
-                        i = self.norm(i, 'i_ln_%d' % l)
-                    i = self._recurrent_activation(i)
-
                     i_clean = s_clean[:, units:units * 2]
                     if self._layer_normalization:
+                        i = self.norm(i, 'i_ln_%d' % l)
                         i_clean = self.norm(i_clean, 'i_ln_%d' % l)
+                    i = self._recurrent_activation(i)
                     i_clean = self._recurrent_activation(i_clean)
 
                     # Output gate
                     o = s[:, units * 2:units * 3]
-                    if self._layer_normalization:
-                        o = self.norm(o, 'o_ln_%d' % l)
-                    o = self._recurrent_activation(o)
-
                     o_clean = s_clean[:, units * 2:units * 3]
                     if self._layer_normalization:
+                        o = self.norm(o, 'o_ln_%d' % l)
                         o_clean = self.norm(o_clean, 'o_ln_%d' % l)
+                    o = self._recurrent_activation(o)
                     o_clean = self._recurrent_activation(o_clean)
 
                     # Cell proposal
                     g = s[:, units * 3:units * 4]
-                    if self._layer_normalization:
-                        g = self.norm(g, 'g_ln_%d' % l)
-                    g = activation(g)
-
                     g_clean = s_clean[:, units * 3:units * 4]
                     if self._layer_normalization:
+                        g = self.norm(g, 'g_ln_%d' % l)
                         g_clean = self.norm(g_clean, 'g_ln_%d' % l)
+                    g = activation(g)
                     g_clean = activation(g_clean)
 
                     # Compute cell state flush operation
@@ -1729,84 +1691,78 @@ class HMLSTMCell(LayerRNNCell):
 
                     # Compute the gated output of non-copy cell state
                     h = c
-                    if self._state_discretizer and self._state_slope_annealing_rate and self._global_step is not None:
-                        h *= self.state_slope_coef
-                    h = activation(h) * o
-
                     h_clean = c_clean
                     if self._state_discretizer and self._state_slope_annealing_rate and self._global_step is not None:
+                        h *= self.state_slope_coef
                         h_clean *= self.state_slope_coef
+                    h = activation(h) * o
                     h_clean = activation(h_clean) * o_clean
 
                     if l == 0 and self._n_passthru_neurons:
                         passthru = h[:, :self._n_passthru_neurons]
-                        h = h[:, self._n_passthru_neurons:]
-
                         passthru_clean = h_clean[:, :self._n_passthru_neurons]
+                        h = h[:, self._n_passthru_neurons:]
                         h_clean = h_clean[:, self._n_passthru_neurons:]
                     else:
                         passthru = None
                         passthru_clean = None
 
-                    # if self._state_discretizer and not self._discretize_state_at_boundary and self._global_step is not None:
-                    if l < (self._num_layers - 1 + self._discretize_final) \
-                            and self._state_discretizer \
-                            and not self._discretize_state_at_boundary:
-                        # Squash to [-1,1] if state activation is not tanh
-                        if (l < self._num_layers - 1 and not self._tanh_inner_activation) \
-                                or (l == self._num_layers - 1 and not self._tanh_activation):
-                            h_prob = tf.tanh(h)
-                        else:
-                            h_prob = h
-                        h_prob = (h_prob + 1) / 2
-                        h_discrete = self._state_discretizer(h_prob)
+                    h_cont = h
+                    h_cont_clean = h_clean
 
+                    # Define discrete state
+                    # Squash to [-1,1] if state activation is not tanh
+                    if (l < self._num_layers - 1 and not self._tanh_inner_activation) \
+                            or (l == self._num_layers - 1 and not self._tanh_activation):
+                        h_prob = tf.tanh(h)
+                        h_prob_clean = tf.tanh(h_clean)
+                    else:
+                        h_prob = h
+                        h_prob_clean = h_clean
 
-                        if (l < self._num_layers - 1 and not self._tanh_inner_activation) \
-                                or (l == self._num_layers - 1 and not self._tanh_activation):
-                            h_prob_clean = tf.tanh(h_clean)
-                        else:
-                            h_prob_clean = h_clean
-                        h_prob_clean = (h_prob_clean + 1) / 2
-                        h_discrete_clean = round_straight_through(h_prob_clean, session=self._session)
+                    # Probs in [0,1]
+                    h_prob = (h_prob + 1) / 2
+                    h_prob_clean = (h_prob_clean + 1) / 2
 
-                        if self._min_discretization_prob is None:
-                            h = h_discrete
-                        else:
-                            def train_func():
+                    # Discrete states in {0,1}
+                    h_discrete = self._state_discretizer(h_prob) * 2 - 1
+                    h_discrete_clean = round_straight_through(h_prob_clean, session=self._session) * 2 - 1
+
+                    if l < (self._num_layers - 1 + self._discretize_final) and self._state_discretizer:
+                        if self._min_discretization_prob is not None:
+                            def train_func(h_discrete=h_discrete, h_prob=h_prob, h_cont=h_cont):
                                 a = self._min_discretization_prob
                                 discretization_prob = 2 * (1 - a) * tf.abs(h_prob - 0.5) + a
                                 if self._trainable_self_discretization:
                                     discretize = self._state_discretizer(discretization_prob)
-                                    discrete = h_discrete * discretize
-                                    continuous = h_prob * (1 - discretize)
-                                    out = discrete + continuous
+                                    out = h_discrete * discretize + h_cont * (1 - discretize)
                                 else:
-                                    # if self._sample_at_train:
-                                    #     discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
-                                    # else:
-                                    #     discretize = discretization_prob < 0.5
                                     discretize = tf.random_uniform(tf.shape(discretization_prob)) < discretization_prob
-                                    out = tf.where(discretize, h_discrete, h_prob)
+                                    out = tf.where(discretize, h_discrete, h_cont)
                                 return out
 
-                            def eval_func():
+                            def eval_func(h_discrete=h_discrete):
                                 return h_discrete
 
-                            h = tf.cond(self._training, train_func, eval_func)
-
-                        h_clean = h_discrete_clean
-
-                        h = h * 2 - 1
-                        h_clean = h_clean * 2 - 1
-
-                    elif self._l2_normalize_states:
-                        h = tf.nn.l2_normalize(h, axis=-1, epsilon=self._epsilon)
-                        h_clean = tf.nn.l2_normalize(h_clean, axis=-1, epsilon=self._epsilon)
+                            h_discrete = tf.cond(self._training, train_func, eval_func)
+                        if not self._discretize_state_at_boundary:
+                            h = h_discrete
+                            h_clean = h_discrete_clean
 
                     # Mix gated output with the previous hidden state proportionally to the copy probability
                     h = copy_prob * h_behind + (1 - copy_prob) * h
                     h_clean = copy_prob * h_behind + (1 - copy_prob) * h_clean
+
+                    if self._state_noise_sd or self._boundary_noise_sd:
+                        if self._state_discretizer and l < (self._num_layers - 1 + self._discretize_final):
+                            h_target = h_discrete_clean
+                        else:
+                            h_target = h_clean
+                    else:
+                        if self._state_discretizer and l < (self._num_layers - 1 + self._discretize_final):
+                            h_target = h_discrete
+                        else:
+                            h_target = h
 
                     # Compute the current boundary probability
                     if l < self._num_layers - 1:
@@ -1815,14 +1771,13 @@ class HMLSTMCell(LayerRNNCell):
                             z_prob = inputs[:, inputs_last_dim + l:inputs_last_dim + l+1]
                         else:
                             z_prob = tf.zeros([tf.shape(inputs)[0], 1])
+
                         if self._infer_boundary:
                             z_prob_oracle = z_prob
                             if self._implementation == 2:
                                 # In implementation 2, boundary is computed by linear transform of h
                                 # z_in = [h, c]
                                 z_in = [h]
-                                if self._refeed_boundary:
-                                    z_in.append(z_behind)
 
                                 if len(z_in) == 1:
                                     z_in = z_in[0]
@@ -1835,8 +1790,8 @@ class HMLSTMCell(LayerRNNCell):
                             if self._boundary_discretizer and self._boundary_slope_annealing_rate and self._global_step is not None:
                                 z_logit *= self.boundary_slope_coef
 
-                            if self.boundary_noise_sd:
-                                z_logit = tf.cond(self._training, lambda: z_logit + tf.random_normal(shape=tf.shape(z_logit), stddev=self.boundary_noise_sd), lambda: z_logit)
+                            if self._boundary_noise_sd:
+                                z_logit = tf.cond(self._training, lambda: z_logit + tf.random_normal(shape=tf.shape(z_logit), stddev=self._boundary_noise_sd), lambda: z_logit)
 
                             if self._num_boundary_neurons > 1:
                                 z_logit = self._boundary_neuron_agg_fn(z_logit, axis=-1, keepdims=True)
@@ -1893,30 +1848,20 @@ class HMLSTMCell(LayerRNNCell):
                     name_map = {
                         'c': c,
                         'h': h,
+                        'h_target': h_target,
+                        'h_discrete': h_discrete,
                         'z': z,
                         'z_prob': z_prob,
                         'cell_proposal': c_flush,
                         'passthru': passthru
                     }
 
-                    if self._state_noise_sd:
-                        name_map['h_clean'] = h_clean
+                    if l > 0 and self._state_discretizer and self._discretize_state_at_boundary:
+                        h_below = h_discrete
                     else:
-                        name_map['h_clean'] = h
+                        h_below = h
 
-                    h_below = h
                     z_below = z
-
-                    # Clear variables to prevent accidental reuse from wrong layer
-                    c = None
-                    c_clean = None
-                    h = None
-                    h_clean = None
-                    z = None
-                    z_prob = None
-                    cell_proposal = None
-                    passthru = None
-                    passthru_clean = None
 
                     name_maps.append(name_map)
 
@@ -2087,7 +2032,7 @@ class HMLSTMCell(LayerRNNCell):
 
                     for name in HMLSTM_RETURN_SIGNATURE:
                         include = False
-                        if name in ['c', 'h', 'h_clean', 'cell_proposal']:
+                        if name in ['c', 'h', 'h_discrete', 'h_target', 'cell_proposal']:
                             include = True
                         elif name in ['z', 'z_prob'] and l < self._num_layers - 1:
                             include = True
@@ -2098,7 +2043,7 @@ class HMLSTMCell(LayerRNNCell):
                         elif self._n_passthru_neurons and l == 0 and name == 'passthru':
                             include = True
 
-                        if include:
+                        if include and name in name_map:
                             new_state_names.append(name)
                             new_state_cur.append(name_map[name])
 
@@ -2158,7 +2103,6 @@ class HMLSTMSegmenter(object):
             boundary_dropout=None,
             weight_normalization=False,
             layer_normalization=False,
-            refeed_boundary=False,
             use_bias=True,
             boundary_slope_annealing_rate=None,
             state_slope_annealing_rate=None,
@@ -2250,7 +2194,6 @@ class HMLSTMSegmenter(object):
 
                 self.weight_normalization = weight_normalization
                 self.layer_normalization = layer_normalization
-                self.refeed_boundary = refeed_boundary
                 self.use_bias = use_bias
                 self.boundary_slope_annealing_rate = boundary_slope_annealing_rate
                 self.state_slope_annealing_rate = state_slope_annealing_rate
@@ -2340,7 +2283,6 @@ class HMLSTMSegmenter(object):
                     bias_regularizer=self.bias_regularizer,
                     weight_normalization=self.weight_normalization,
                     layer_normalization=self.layer_normalization,
-                    refeed_boundary=self.refeed_boundary,
                     use_bias=self.use_bias,
                     boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                     state_slope_annealing_rate=self.state_slope_annealing_rate,
@@ -2441,11 +2383,11 @@ class HMLSTMOutput(object):
 
         return out
 
-    def state_clean(self, level=None, discrete=False, method='round', mask=None):
+    def state_target(self, level=None, mask=None):
         if level is None:
-            out = tuple([l.state_clean(discrete=discrete, discretization_method=method, mask=mask) for l in self.l])
+            out = tuple([l.state_target(mask=mask) for l in self.l])
         else:
-            out = self.l[level].state_clean(discrete=discrete, discretization_method=method, mask=mask)
+            out = self.l[level].state_target(mask=mask)
 
         return out
 
@@ -2557,15 +2499,10 @@ class HMLSTMOutputLevel(object):
 
                 return out
 
-    def state_clean(self, discrete=False, discretization_method='round', mask=None):
+    def state_target(self, mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
-                out = self.h_clean
-                if discrete:
-                    if discretization_method == 'round':
-                        out = tf.cast(tf.round(self.h), dtype=tf.int32)
-                    else:
-                        raise ValueError('Discretization method "%s" not currently supported' % discretization_method)
+                out = self.h_target
 
                 if mask is not None:
                     while len(mask.shape) < len(out.shape):
@@ -2789,6 +2726,7 @@ class MaskedLSTMCell(LayerRNNCell):
     def initialize_kernel(self, in_dim, out_dim, kernel_initializer, prefinal_mode=None, name=None):
         with self._session.as_default():
             with self._session.graph.as_default():
+                units_below = in_dim
                 kernel_lambdas = []
                 depth = self._kernel_depth
                 if prefinal_mode is None:
@@ -2830,7 +2768,7 @@ class MaskedLSTMCell(LayerRNNCell):
                     else:
                         name_cur = 'd%d' % d
 
-                    if self._resnet_n_layers > 1:
+                    if self._resnet_n_layers and self._resnet_n_layers > 1 and units == units_below:
                         kernel_layer = DenseResidualLayer(
                             training=self._training,
                             units=units,
@@ -2863,6 +2801,8 @@ class MaskedLSTMCell(LayerRNNCell):
                         )
 
                     kernel_lambdas.append(make_lambda(kernel_layer, session=self._session))
+
+                    units_below = units
 
                 kernel = compose_lambdas(kernel_lambdas)
 

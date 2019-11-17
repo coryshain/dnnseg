@@ -98,6 +98,8 @@ if __name__ == '__main__':
         if val_data is not None:
             val_data.initialize_random_segmentation(7.4153)
 
+    data = train_data
+
     stderr('Caching data...\n')
     sys.stderr.flush()
 
@@ -134,10 +136,75 @@ if __name__ == '__main__':
         data_type=p['data_type']
     )
 
-    # data_feed = train_data.get_data_feed('val_files', minibatch_size=1, randomize=False)
-    # for batch in data_feed:
-    #     print(np.stack([batch['oracle_boundaries'][0,:,0],batch['oracle_labels'][0,:,0]], axis=1)[:100])
-    #     input()
+    if False:
+        layers_encoder = len(p['n_units_encoder'].split())
+
+        feats, splits, _ = data.features(
+            mask='vad'
+        )
+
+        segmentations = [[] for _ in range(layers_encoder - 1)]
+        states = [[] for _ in range(layers_encoder - 1)]
+        for f, s in zip(feats, splits):
+            for l in range(layers_encoder - 1):
+                segmentations_cur = [(np.random.random((1, f.shape[1])) > 0.8).astype(float) for _ in
+                                     range(layers_encoder - 1)]
+                states_cur = [(np.random.random((1, f.shape[1], 2)) > 0.5).astype(float) for _ in
+                              range(layers_encoder - 1)]
+                splits_cur = np.where(np.concatenate([np.zeros((1,)), s[0, :-1]]))[0]
+
+                segmentations[l].append(segmentations_cur[l][0])
+                states[l].append(states_cur[l][0])
+
+        segmentations = [data.cache['files']['oracle_boundaries']] * (layers_encoder - 1)
+        print(segmentations)
+        input()
+
+        pred_table = data.get_segment_tables(
+            segmentations=segmentations,
+            parent_segment_type='vad',
+            states=states,
+            add_phn_labels=True,
+            add_wrd_labels=True,
+            state_activation='sigmoid',
+            smoothing_algorithm=None,
+            smoothing_algorithm_params=None,
+            n_points=None,
+            padding='pre'
+        )
+
+        phn_table = data.get_segment_tables(
+            timestamps='phn',
+            parent_segment_type='vad',
+            states=states,
+            add_phn_labels=True,
+            add_wrd_labels=False,
+            state_activation='sigmoid',
+            smoothing_algorithm=None,
+            smoothing_algorithm_params=None,
+            n_points=None,
+            padding='pre'
+        )
+
+        wrd_table = data.get_segment_tables(
+            timestamps='wrd',
+            parent_segment_type='vad',
+            states=states,
+            add_phn_labels=False,
+            add_wrd_labels=True,
+            state_activation='sigmoid',
+            smoothing_algorithm=None,
+            smoothing_algorithm_params=None,
+            n_points=None,
+            padding='pre'
+        )
+
+        print(pred_table[0].head())
+        input()
+        print(phn_table[0].head())
+        input()
+        print(wrd_table[0].head())
+        input()
 
     stderr('Initializing DNNSeg...\n\n')
 

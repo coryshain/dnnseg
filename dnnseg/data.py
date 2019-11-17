@@ -181,7 +181,7 @@ def extract_states_at_timestamps(
         states,
         seconds_per_step=0.01,
         activation='tanh',
-        discretize=True,
+        discretize=False,
         as_categories=True
 ):
     ix = np.minimum(np.floor(timestamps / seconds_per_step), len(states) - 1).astype('int')
@@ -215,7 +215,7 @@ def extract_states_at_timestamps_batch(
         states,
         seconds_per_step=0.01,
         activation='tanh',
-        discretize=True,
+        discretize=False,
         as_categories=True,
         mask=None,
         padding=None
@@ -245,6 +245,83 @@ def extract_states_at_timestamps_batch(
         out.append(out_cur)
 
     return out
+
+
+def get_labels_by_timestamp(time, s_lab, e_lab, lab):
+    time = np.array(time)
+    s_lab = np.array(s_lab)
+    e_lab = np.array(e_lab)
+    lab = np.array(lab)
+
+    assert len(s_lab) == len(e_lab) == len(lab), 's_lab, e_lab, and lab must all be vectors of the same length. Saw %d, %d, %d.' % (len(s_lab), len(e_lab), len(lab))
+
+    i = 0 # time pointer
+    j = 0 # label pointer
+
+    n = len(time)
+    m = len(lab)
+
+    out = np.zeros(n, dtype=lab.dtype)
+
+    while i < n:
+        t_cur = time[i]
+        if j < m:
+            s_cur = s_lab[j]
+            e_cur = e_lab[j]
+
+            if e_cur - t_cur >= -1e-2: # 1e-2 is the imprecison imposed by snapping to 10ms intervals
+                if t_cur - s_cur >= -1e-2:
+                    out[i] = lab[j]
+                i += 1
+            else:
+                j += 1
+        else:
+            i += 1
+
+    return out
+
+
+def timestamps_to_timestamps_by_vad(time, s_vad, e_vad):
+    # Drops timestamps that fall outside VAD regions
+
+    time = np.array(time)
+    s_vad = np.array(s_vad)
+    e_vad = np.array(e_vad)
+
+    assert len(s_vad) == len(e_vad), 's_vad, e_vad must be vectors of the same length. Saw %d, %d.' % (len(s_vad), len(e_vad))
+
+    i = 0 # time pointer
+    j = 0 # vad pointer
+
+    n = len(time)
+    m = len(s_vad)
+
+    out = []
+    out_cur = []
+
+    while i < n:
+        t_cur = time[i]
+        s_vad_cur = s_vad[j]
+        e_vad_cur = e_vad[j]
+
+        if j < m:
+            if e_vad_cur - t_cur > -1e-5:
+                if t_cur - s_vad_cur > -1e-5:
+                    out_cur.append(t_cur - s_vad_cur)
+                i += 1
+            else:
+                out.append(np.array(out_cur))
+                out_cur = []
+                j += 1
+        else:
+            i += 1
+
+    if out_cur:
+        out.append(np.array(out_cur))
+
+    return out
+
+
 
 
 def binary_segments_to_intervals_inner(binary_segments, mask, src_segments=None, labels=None, seconds_per_step=0.01):
@@ -1034,10 +1111,10 @@ def cache_data(
         val_data = train_data
 
     if train_data is not None:
-        if not train_data.cached('train'):
-            if streaming:
+        if streaming:
+            if not val_data.cached('streaming'):
                 train_data.cache_streaming_data(
-                    'train',
+                    'streaming',
                     max_len,
                     window_len_bwd,
                     window_len_fwd,
@@ -1051,9 +1128,10 @@ def cache_data(
                     target_fwd_resampling=resample_targets_fwd,
                     oracle_boundaries=oracle_boundaries
                 )
-            else:
+        else:
+            if not val_data.cached('utt'):
                 train_data.cache_utterance_data(
-                    'train',
+                    'utt',
                     segments=segtype,
                     max_len=max_len,
                     input_normalization=data_normalization,
@@ -1070,10 +1148,10 @@ def cache_data(
                 )
 
     if val_data is not None:
-        if not val_data.cached('val'):
-            if streaming:
+        if streaming:
+            if not val_data.cached('streaming'):
                 val_data.cache_streaming_data(
-                    'val',
+                    'streaming',
                     max_len,
                     window_len_bwd,
                     window_len_fwd,
@@ -1087,11 +1165,12 @@ def cache_data(
                     target_fwd_resampling=resample_targets_fwd,
                     oracle_boundaries=oracle_boundaries
                 )
-            else:
+        else:
+            if not val_data.cached('utt'):
                 if task.lower() != 'classifier':
                     max_len = None
                 val_data.cache_utterance_data(
-                    'val',
+                    'utt',
                     segments=segtype,
                     max_len=max_len,
                     input_normalization=data_normalization,
@@ -1106,12 +1185,12 @@ def cache_data(
                     reverse_targets=reverse_targets,
                     oracle_boundaries=oracle_boundaries
                 )
-        if task.lower() == 'segmenter' and not val_data.cached('val_files'):
+        if task.lower() == 'segmenter' and not val_data.cached('files'):
             oracle_boundaries = oracle_boundaries
             if oracle_boundaries is None and data_type.lower() == 'acoustic':
                 oracle_boundaries = 'phn'
             val_data.cache_files_data(
-                'val_files',
+                'files',
                 mask=segtype,
                 normalization=data_normalization,
                 reduction_axis=reduction_axis,
@@ -1134,7 +1213,6 @@ class Dataset(object):
             verbose=True,
             **kwargs
     ):
-
         self.dir_path = dir_path
         self.datatype = datatype.lower()
         assert self.datatype in ['acoustic', 'text'], 'Unrecognized datatype requested: "%s"' % self.datatype
@@ -1255,6 +1333,9 @@ class Dataset(object):
             self.offset = 1.
             self.steps_per_second = 1.
             self.seconds_per_step = 1.
+
+    def __len__(self):
+        return sum([len(self.data[f]) for f in self.data])
 
     def features(
             self,
@@ -1526,16 +1607,16 @@ class Dataset(object):
             reduction_axis=reduction_axis
         )
         feats_inputs = []
-        boundaries = []
+        fixed_boundaries = []
         file_lengths = []
         for i, x in enumerate(feats_tmp):
             file_lengths.append(len(x[0]) - (left_pad + right_pad))
             feats_inputs.append(x[0])
-            boundaries.append(boundaries_tmp[i][0])
+            fixed_boundaries.append(boundaries_tmp[i][0])
 
         n = sum(file_lengths)
         feats_inputs = pad_sequence(feats_inputs, padding='post')
-        boundaries = pad_sequence(boundaries, padding='post')
+        fixed_boundaries = pad_sequence(fixed_boundaries, padding='post')
 
         if input_normalization == target_normalization:
             feats_targets = feats_inputs
@@ -1665,13 +1746,13 @@ class Dataset(object):
             'file_lengths': file_lengths,
             'feats_inputs': feats_inputs,
             'feats_targets': feats_targets,
-            'boundaries': boundaries,
             'file_ix': file_ix,
             'reduction_axis': reduction_axis,
             'shift': shift,
             'scale': scale,
             'time_ix': time_ix,
             'speaker': speaker,
+            'fixed_boundaries': fixed_boundaries,
             'oracle_boundaries': oracle_boundaries,
             'window_len_input': window_len_input,
             'window_len_bwd': window_len_bwd,
@@ -1726,29 +1807,14 @@ class Dataset(object):
         speaker = np.array(speaker)
 
         if oracle_boundaries:
-            oracle_labels_src = self.oracle_labels(segment_type=oracle_boundaries)
-            oracle_labels = [oracle_labels_src[f] for f in self.fileIDs]
             oracle_boundaries, _ = self.one_hot_boundaries(
                 inner_segments=oracle_boundaries,
                 outer_segments=None,
                 padding=None
             )
             if mask:
-                oracle_labels_tmp = []
                 oracle_boundaries_tmp = []
                 for i, f in enumerate(self.fileIDs):
-                    oracle_labels_cur, _, _ = self.data[f].segment_and_stack(
-                        segments=mask,
-                        features=oracle_labels[i][0],
-                        boundaries_as_features=False,
-                        padding=None
-                    )
-                    oracle_labels_cur = np.concatenate(
-                        oracle_labels_cur,
-                        axis=1
-                    )
-                    oracle_labels_tmp.append(oracle_labels_cur)
-
                     oracle_boundaries_cur, _, _ = self.data[f].segment_and_stack(
                         segments=mask,
                         features=oracle_boundaries[i],
@@ -1761,10 +1827,8 @@ class Dataset(object):
                     )
                     oracle_boundaries_tmp.append(oracle_boundaries_cur)
 
-                oracle_labels = oracle_labels_tmp
                 oracle_boundaries = oracle_boundaries_tmp
         else:
-            oracle_labels = None
             oracle_boundaries = None
 
         cache_dict = {
@@ -1772,7 +1836,6 @@ class Dataset(object):
             'n': n,
             'file_lengths': file_lengths,
             'feats': feats,
-            'oracle_labels': oracle_labels,
             'oracle_boundaries': oracle_boundaries,
             'fixed_boundaries': boundaries,
             'file_ix': file_ix,
@@ -1869,7 +1932,7 @@ class Dataset(object):
         n = self.cache[name]['n']
         feats_inputs = self.cache[name]['feats_inputs']
         feats_targets = self.cache[name]['feats_targets']
-        fixed_boundaries = self.cache[name]['boundaries']
+        fixed_boundaries = self.cache[name]['fixed_boundaries']
         file_ix = self.cache[name]['file_ix']
         reduction_axis = self.cache[name]['reduction_axis']
         shift = self.cache[name]['shift']
@@ -1977,7 +2040,6 @@ class Dataset(object):
         shift = self.cache[name]['shift']
         scale = self.cache[name]['scale']
         speaker = self.cache[name]['speaker']
-        oracle_labels = self.cache[name]['oracle_labels']
         oracle_boundaries = self.cache[name]['oracle_boundaries']
 
         i = 0
@@ -1992,14 +2054,9 @@ class Dataset(object):
                 oracle_boundaries_cur = None
             else:
                 oracle_boundaries_cur = oracle_boundaries[index]
-            if oracle_labels is None:
-                oracle_labels_cur = None
-            else:
-                oracle_labels_cur = oracle_labels[index]
 
             out = {
                 'X': feats[index],
-                'oracle_labels': oracle_labels_cur,
                 'oracle_boundaries': oracle_boundaries_cur,
                 'fixed_boundaries': fixed_boundaries[index],
                 'file_ix': file_ix[index],
@@ -2263,50 +2320,47 @@ class Dataset(object):
         for f in self.data:
             self.data[f].initialize_random_segmentation(mean_frames_per_segment)
 
-    def get_segment_tables_from_segmenter_states(
+    def get_segment_tables(
             self,
-            segmentations,
+            segmentations=None,
+            timestamps=None,
             parent_segment_type='vad',
             states=None,
-            true_labels=None,
-            discretize=True,
+            add_phn_labels=False,
+            add_wrd_labels=False,
             state_activation='tanh',
             smoothing_algorithm=None,
             smoothing_algorithm_params=None,
             seconds_per_step=None,
             n_points=None,
-            mask=None,
             padding=None
     ):
+        assert not (segmentations is None and timestamps is None), 'Either segmentations or timestamps must be provided.'
+        assert not (segmentations is None and states is None), 'Either segmentations or states (or both) must be provided.'
+
         if seconds_per_step is None:
             seconds_per_step = self.seconds_per_step
 
-        n_levels = len(segmentations)
-        out = []
+        if segmentations is not None:
+            n_layers = len(segmentations)
+        else:
+            n_layers = len(states)
 
-        for i in range(n_levels):
-            out.append({})
+        out = [[] for _ in range(n_layers)]
 
-        i = 0
+        fixed_boundaries = self.cache['files']['fixed_boundaries']
 
-        for f in self.fileIDs:
+        for i, f in enumerate(self.fileIDs):
             F = self.data[f]
-            if parent_segment_type == 'vad':
-                n_utt = len(F.vad_segments)
-            elif parent_segment_type == 'wrd':
-                n_utt = len(F.wrd_segments)
-            elif parent_segment_type == 'phn':
-                n_utt = len(F.phn_segments)
-            elif parent_segment_type == 'rnd':
-                n_utt = len(F.rnd_segments)
 
-            dfs = F.get_segment_tables_from_segmenter_states(
-                [s[i:i+n_utt] for s in segmentations],
+            dfs = F.get_segment_tables(
+                segmentations=None if segmentations is None else [s[i] for s in segmentations],
+                timestamps=timestamps,
                 parent_segment_type=parent_segment_type,
-                states=[s[i:i+n_utt] for s in states],
-                true_labels=None if true_labels is None else true_labels[i:i+n_utt],
-                discretize=discretize,
-                mask=None if mask is None else mask[i:i + n_utt],
+                fixed_boundaries=fixed_boundaries[i],
+                states=None if states is None else [s[i] for s in states],
+                add_phn_labels=add_phn_labels,
+                add_wrd_labels=add_wrd_labels,
                 state_activation=state_activation,
                 smoothing_algorithm=smoothing_algorithm,
                 smoothing_algorithm_params=smoothing_algorithm_params,
@@ -2316,68 +2370,17 @@ class Dataset(object):
             )
 
             if len(dfs) > 0:
-                for j in range(n_levels):
-                    out[j][f] = dfs[j]
+                for j in range(n_layers):
+                    out[j].append(dfs[j])
 
-            i += n_utt
-
-        return out
-
-    def get_segment_tables_from_true_boundaries(
-            self,
-            true_segment_type='phn',
-            parent_segment_type='vad',
-            states=None,
-            discretize=True,
-            state_activation='tanh',
-            seconds_per_step=None,
-            mask=None,
-            padding=None
-    ):
-        assert states is not None, 'Calling get_segment_tables_from_true_boundaries with states=None does not make sense and is not supported.'
-
-        if seconds_per_step is None:
-            seconds_per_step = self.seconds_per_step
-
-        n_levels = len(states)
-        out = []
-
-        for i in range(n_levels):
-            out.append({})
-
-        i = 0
-
-        for f in self.fileIDs:
-            F = self.data[f]
-            if parent_segment_type == 'vad':
-                n_utt = len(F.vad_segments)
-            elif parent_segment_type == 'wrd':
-                n_utt = len(F.wrd_segments)
-            elif parent_segment_type == 'phn':
-                n_utt = len(F.phn_segments)
-            elif parent_segment_type == 'rnd':
-                n_utt = len(F.rnd_segments)
-
-            dfs = F.get_segment_tables_from_true_boundaries(
-                true_segment_type=true_segment_type,
-                parent_segment_type=parent_segment_type,
-                states=[s[i:i+n_utt] for s in states],
-                discretize=discretize,
-                mask=None if mask is None else mask[i:i + n_utt],
-                state_activation=state_activation,
-                seconds_per_step=seconds_per_step,
-                padding=padding
-            )
-
-            if len(dfs) > 0:
-                for j in range(n_levels):
-                    out[j][f] = dfs[j]
-
-            i += n_utt
+        out = [pd.concat(x, axis=0) for x in out]
+        for x in out:
+            label_map = {x: i for i, x in enumerate(sorted(list(x.label.unique())))}
+            x.label = x.label.map(label_map)
 
         return out
 
-    def score_segmentation(self, true, pred, tol=0.02):
+    def score_segmentation(self, true, segment_table, tol=0.02):
         score_dict = {}
         for f in self.fileIDs:
             if isinstance(true, str):
@@ -2386,14 +2389,11 @@ class Dataset(object):
                 # ``true`` is a dictionary
                 true_cur = true[f]
 
-            if isinstance(pred, str):
-                pred_cur = self.data[f].segments(pred)
+            if isinstance(segment_table, str):
+                pred_cur = self.data[f].segments(segment_table)
             else:
-                # ``true`` is a dictionary
-                if f in pred:
-                    pred_cur = pred[f]
-                else:
-                    pred_cur = None
+                # ``pred`` is a pandas table
+                pred_cur = segment_table[segment_table.fileID == f]
 
             if pred_cur is None:
                 fn = len(true_cur)
@@ -2455,11 +2455,8 @@ class Dataset(object):
             if isinstance(pred, str):
                 pred_cur = self.data[f].segments(pred)
             else:
-                # ``pred`` is a dictionary
-                if f in pred:
-                    pred_cur = pred[f]
-                else:
-                    pred_cur = None
+                # ``pred`` is a pandas table
+                pred_cur = pred[pred.fileID == f]
 
             seg_dict[f] = self.data[f].extract_matching_segment_embeddings(true_cur, pred_cur, tol=tol)
 
@@ -2485,11 +2482,8 @@ class Dataset(object):
             if isinstance(pred, str):
                 pred_cur = self.data[f].segments(pred)
             else:
-                # ``true`` is a dictionary
-                if f in pred:
-                    pred_cur = pred[f]
-                else:
-                    pred_cur = None
+                # ``pred`` is a pandas table
+                pred_cur = pred[pred.fileID == f]
 
             if pred_cur is None:
                 fn = len(true_cur)
@@ -2542,7 +2536,7 @@ class Dataset(object):
                     if isinstance(seg, str):
                         segments_cur.append(seg)
                     else:
-                        segments_cur.append(seg[f])
+                        segments_cur.append(seg[seg.fileID == f])
 
                 self.data[f].dump_segmentations_to_textgrid(
                     outdir=outdir,
@@ -2644,6 +2638,8 @@ class Datafile(object):
         self.wrd_segments = None
 
         self.data_src = None
+
+        self.speaker = None
 
     def __len__(self):
         return self.len
@@ -2969,22 +2965,26 @@ class Datafile(object):
     def initialize_random_segmentation(self, mean_frames_per_segment):
         self.rnd_segments = self.generate_random_segmentation(mean_frames_per_segment)
 
-    def get_segment_tables_from_segmenter_states(
+    def get_segment_tables(
             self,
-            segmentations,
+            segmentations=None,
+            timestamps=None,
             parent_segment_type='vad',
+            fixed_boundaries=None,
             states=None,
-            true_labels=None,
-            discretize=True,
+            add_phn_labels=False,
+            add_wrd_labels=False,
             state_activation='tanh',
             smoothing_algorithm=None,
             smoothing_algorithm_params=None,
             seconds_per_step=None,
             n_points=None,
-            mask=None,
             padding=None,
             snap_ends=True
     ):
+        assert not (segmentations is None and timestamps is None), 'Either segmentations or timestamps must be provided.'
+        assert not (segmentations is None and states is None), 'Either segmentations or states (or both) must be provided.'
+
         if seconds_per_step is None:
             seconds_per_step = self.seconds_per_step
 
@@ -3002,51 +3002,84 @@ class Datafile(object):
         parent_starts = parent_segs.start.as_matrix()
         parent_ends = parent_segs.end.as_matrix()
 
-        n_layers = len(segmentations)
+        if segmentations is not None:
+            n_layers = len(segmentations)
+        else:
+            n_layers = len(states)
+
         out = []
 
-        if len(segmentations[0]) > 0:
-            for i in range(n_layers):
-                starts = []
-                ends = []
-                labels_cur = []
-                true_labels_cur = []
+        if timestamps is None:
+            use_segmentations = True
+        else:
+            use_segmentations = False
 
-                timestamps = extract_segment_timestamps_batch(
-                    segmentations[i],
-                    algorithm=smoothing_algorithm,
-                    algorithm_params=smoothing_algorithm_params,
+        if fixed_boundaries is not None:
+            splits = np.where(
+                np.concatenate([
+                    np.zeros((1,)),
+                    fixed_boundaries[0, :-1]
+                ])
+            )[0]
+        else:
+            splits = None
+
+        if use_segmentations:
+            timestamps_by_vad = []
+
+            for l in range(n_layers):
+                segmentations_cur = segmentations[l]
+                if splits is not None:
+                    segmentations_cur = np.split(
+                        segmentations_cur,
+                        splits
+                    )
+
+                if len(segmentations_cur) > 0:
+                    timestamps_by_vad.append(
+                        extract_segment_timestamps_batch(
+                            segmentations_cur,
+                            algorithm=smoothing_algorithm,
+                            algorithm_params=smoothing_algorithm_params,
+                            seconds_per_step=seconds_per_step,
+                            n_points=n_points,
+                            padding=padding
+                        )
+                    )
+                else:
+                    timestamps_by_vad.append(np.zeros(0))
+        else:
+            timestamps_by_vad = timestamps_to_timestamps_by_vad(
+                self.segments(timestamps).end,
+                parent_starts,
+                parent_ends
+            )
+            timestamps_by_vad = [timestamps_by_vad] * n_layers
+
+        for l in range(n_layers):
+            if states is not None:
+                states_cur = states[l]
+                if splits is not None:
+                    states_cur = np.split(
+                        states_cur,
+                        splits
+                    )
+
+                states_extracted = extract_states_at_timestamps_batch(
+                    timestamps_by_vad[l],
+                    states_cur,
                     seconds_per_step=seconds_per_step,
-                    n_points=n_points,
-                    mask=mask,
+                    activation=state_activation,
+                    as_categories=True,
                     padding=padding
                 )
 
-                if states is not None:
-                    states_extracted = extract_states_at_timestamps_batch(
-                        timestamps,
-                        states[i],
-                        seconds_per_step=seconds_per_step,
-                        activation=state_activation,
-                        discretize=discretize,
-                        as_categories=True,
-                        mask=mask,
-                        padding=padding
-                    )
+            starts = []
+            ends = []
+            embeddings_cur = []
 
-                if true_labels is not None:
-                    true_labels_extracted = extract_states_at_timestamps_batch(
-                        timestamps,
-                        true_labels,
-                        seconds_per_step=seconds_per_step,
-                        activation=None,
-                        discretize=False,
-                        as_categories=False,
-                        mask=mask,
-                        padding=padding
-                    )
-
-                for j, s in enumerate(timestamps):
+            if len(timestamps_by_vad[l]) > 0:
+                for j, s in enumerate(timestamps_by_vad[l]):
                     s = np.concatenate([[0.], s], axis=0)
                     segs = s + parent_starts[j]
                     starts_cur = segs[:-1]
@@ -3054,137 +3087,76 @@ class Datafile(object):
                     if snap_ends:
                         ends_cur[-1] = parent_ends[j]
                     select = ends_cur > starts_cur
+
                     starts_cur = starts_cur[select]
                     ends_cur = ends_cur[select]
                     starts.append(starts_cur)
                     ends.append(ends_cur)
                     if states is not None:
-                        labels_cur.append(states_extracted[j][select])
-                    if true_labels is not None:
-                        true_labels_cur.append(true_labels_extracted[j][select])
+                        embeddings_cur.append(states_extracted[j][select])
 
                 starts = np.concatenate(starts, axis=0)
                 ends = np.concatenate(ends, axis=0)
 
                 if states is not None:
-                    labels_cur = np.concatenate(labels_cur, axis=0)
+                    embeddings_cur = np.concatenate(embeddings_cur, axis=0)
                 else:
-                    labels_cur = 0
+                    embeddings_cur = 0
 
-                if true_labels is not None:
-                    true_labels_cur = np.concatenate(true_labels_cur, axis=0)[..., 0]
-                else:
-                    true_labels_cur = ''
+                if add_phn_labels:
+                    phn_labels_extracted = get_labels_by_timestamp(
+                        ends,
+                        self.phn_segments.start,
+                        self.phn_segments.end,
+                        self.phn_segments.label,
+                    )
+
+                if add_wrd_labels is not None:
+                    wrd_labels_extracted = get_labels_by_timestamp(
+                        ends,
+                        self.wrd_segments.start,
+                        self.wrd_segments.end,
+                        self.wrd_segments.label,
+                    )
 
                 df = {
                     'start': starts,
                     'end': ends
                 }
 
-                if discretize:
-                    df['label'] = labels_cur
+                columns = ['fileID', 'speaker', 'start', 'end', 'label']
+
+                if 'sigmoid' in state_activation:
+                    threshold = 0.5
                 else:
-                    df['label'] = 0
-                    for j in range(labels_cur.shape[1]):
-                        df['d%s' %j] = labels_cur[:,j]
-                if true_labels is not None:
-                    df['gold_label'] = true_labels_cur
+                    threshold = 0.0
+                label = (embeddings_cur > threshold).astype('int')
+                label = binary_to_string_np(label)
 
-                df = pd.DataFrame(df)
-                out.append(df)
-        else:
-            out = pd.DataFrame(columns=['start', 'end', 'label', 'gold_label'])
+                df['label'] = label
+                if add_phn_labels:
+                    df['phn_label'] = phn_labels_extracted
+                    columns.append('phn_label')
+                if add_wrd_labels:
+                    df['wrd_label'] = wrd_labels_extracted
+                    columns.append('wrd_label')
 
-        return out
+                for j in range(embeddings_cur.shape[1]):
+                    df['d%s' % j] = embeddings_cur[:, j]
+                    columns.append('d%s' % j)
 
-    def get_segment_tables_from_true_boundaries(
-            self,
-            true_segment_type='phn',
-            parent_segment_type='vad',
-            states=None,
-            discretize=True,
-            state_activation='tanh',
-            seconds_per_step=None,
-            mask=None,
-            padding=None,
-            snap_ends=True
-    ):
-        assert states is not None, 'Calling get_segment_tables_from_true_boundaries with states=None does not make sense and is not supported.'
+                df['fileID'] = self.ID
+                df['speaker'] = 'ANON' if self.speaker is None else self.speaker
 
-        if seconds_per_step is None:
-            seconds_per_step = self.seconds_per_step
+                df = pd.DataFrame(df, columns=columns)
+            else:
+                columns = ['fileID', 'speaker', 'start', 'end', 'label']
+                if add_phn_labels:
+                    columns.append('phn_label')
+                if add_wrd_labels:
+                    columns.append('wrd_label')
+                df = pd.DataFrame(columns=columns)
 
-        if true_segment_type == 'vad':
-            true_segs = self.vad_segments
-        elif true_segment_type == 'wrd':
-            true_segs = self.wrd_segments
-        elif true_segment_type == 'phn':
-            true_segs = self.phn_segments
-        elif true_segment_type == 'rnd':
-            true_segs = self.rnd_segments
-        else:
-            raise ValueError('Unrecognized true segment type "%s".' % true_segment_type)
-
-        if parent_segment_type == 'vad':
-            parent_segs = self.vad_segments
-        elif parent_segment_type == 'wrd':
-            parent_segs = self.wrd_segments
-        elif parent_segment_type == 'phn':
-            parent_segs = self.phn_segments
-        elif parent_segment_type == 'rnd':
-            parent_segs = self.rnd_segments
-        else:
-            raise ValueError('Unrecognized parent segment type "%s".' % parent_segment_type)
-
-        timestamps = true_segs.end.as_matrix()
-        parent_starts = parent_segs.start.as_matrix()
-        parent_ends = parent_segs.end.as_matrix()
-
-        n_layers = len(states)
-        out = []
-
-        labels = true_segs.label
-
-        for i in range(n_layers):
-            starts = []
-            ends = []
-
-            states_extracted = extract_states_at_timestamps_batch(
-                timestamps,
-                states,
-                seconds_per_step=seconds_per_step,
-                activation=state_activation,
-                discretize=discretize,
-                as_categories=True,
-                mask=mask,
-                padding=padding
-            )
-    
-            for j, s in enumerate(timestamps):
-                s = np.concatenate([[0.], s], axis=0)
-                segs = s + parent_starts[j]
-                starts_cur = segs[:-1]
-                ends_cur = segs[1:]
-                if snap_ends:
-                    ends_cur[-1] = parent_ends[j]
-                select = ends_cur > starts_cur
-                starts_cur = starts_cur[select]
-                ends_cur = ends_cur[select]
-                starts.append(starts_cur)
-                ends.append(ends_cur)
-    
-            df = {
-                'start': starts,
-                'end': ends,
-                'label': labels
-            }
-    
-            if not discretize:
-                for j in range(labels.shape[1]):
-                    df['d%s' % j] = states_extracted[:, j]
-    
-            df = pd.DataFrame(df)
-            
             out.append(df)
 
         return out
@@ -3343,7 +3315,6 @@ class AcousticDatafile(Datafile):
         self.window_len = window_len
         self.n_coef = n_coef
         self.order = order
-        self.speaker = None
 
         if filter_type.lower() == 'mfcc':
             data_src, duration = featurizer(
@@ -3556,9 +3527,7 @@ class TextDatafile(Datafile):
     ):
         super(TextDatafile, self).__init__(path, clip_timesteps=clip_timesteps)
 
-        if speaker is None:
-            self.speaker = '0'
-        else:
+        if speaker is not None:
             self.speaker = speaker
 
         self.lower = lower

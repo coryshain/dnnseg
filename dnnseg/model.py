@@ -228,6 +228,21 @@ class DNNSeg(object):
         self.ppx_bwd = ppx_bwd
         self.ppx_fwd = ppx_fwd
 
+        if self.streaming:
+            self.train_data_name = 'streaming'
+        else:
+            self.train_data_name = 'utt'
+
+        val_data_name = 'files'
+        if self.task.lower() == 'classifier':
+            val_data_name = 'utt'
+        self.val_data_name = val_data_name
+
+        plot_data_name = 'utt'
+        if self.streaming:
+            plot_data_name = 'streaming'
+        self.plot_data_name = plot_data_name
+
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if self.entropy_regularizer_scale:
@@ -290,6 +305,13 @@ class DNNSeg(object):
                 self.label_map = pd.read_csv(self.label_map_file)
             else:
                 stderr('Label map file %s does not exist. Label mapping will not be used.' %self.label_map_file)
+                
+        self.feature_map = None
+        if self.feature_map_file:
+            if os.path.exists(self.feature_map_file):
+                self.feature_map = pd.read_csv(self.feature_map_file)
+            else:
+                stderr('Feature map file %s does not exist. Feature mapping will not be used.' %self.feature_map_file)
 
         self.predict_mode = False
 
@@ -803,7 +825,7 @@ class DNNSeg(object):
                         prefinal_mode=self.hmlstm_prefinal_mode,
                         resnet_n_layers=self.encoder_resnet_n_layers_inner,
                         one_hot_inputs=self.data_type.lower() == 'text',
-                        oracle_boundary=self.encoder_force_vad_boundaries,
+                        oracle_boundary=self.encoder_force_vad_boundaries or self.oracle_boundaries is not None,
                         infer_boundary=self.oracle_boundaries is None,
                         activation=self.encoder_activation,
                         inner_activation=self.encoder_inner_activation,
@@ -830,7 +852,6 @@ class DNNSeg(object):
                         topdown_dropout=self.encoder_dropout,
                         boundary_dropout=self.encoder_dropout,
                         layer_normalization=self.encoder_layer_normalization,
-                        refeed_boundary=False,
                         use_bias=self.encoder_use_bias,
                         boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                         state_slope_annealing_rate=self.state_slope_annealing_rate,
@@ -922,34 +943,23 @@ class DNNSeg(object):
                                 self.segmentations[l] = segmentations
 
                     encoder_hidden_states_tmp = self.segmenter_output.state(mask=self.X_mask)
-                    # if self.encoder_state_discretizer or self.xent_state_predictions:
+                    encoder_hidden_state_targets_tmp = self.segmenter_output.state_target(mask=self.X_mask)
                     if self.xent_state_predictions:
                         encoder_hidden_states = []
-                        for l in range(len(encoder_hidden_states_tmp)):
+                        encoder_hidden_state_targets = []
+                        for l in range(self.layers_encoder):
                             encoder_hidden_states_cur = encoder_hidden_states_tmp[l]
+                            encoder_hidden_state_targets_cur = encoder_hidden_state_targets_tmp[l]
                             if l < self.layers_encoder - 1 or self.encoder_discretize_final:
-                                encoder_hidden_states_cur = (encoder_hidden_states_cur + 1) / 2
-                                encoder_hidden_states_cur *= self.X_mask[..., None]
+                                encoder_hidden_states_cur = ((encoder_hidden_states_cur + 1) / 2) * self.X_mask[..., None]
+                                encoder_hidden_state_targets_cur = (encoder_hidden_state_targets_cur + 1) / 2 * self.X_mask[..., None]
                             encoder_hidden_states.append(encoder_hidden_states_cur)
+                            encoder_hidden_state_targets.append(encoder_hidden_state_targets_cur)
                     else:
                         encoder_hidden_states = [x * self.X_mask[..., None] for x in encoder_hidden_states_tmp]
+                        encoder_hidden_state_targets = [x * self.X_mask[..., None] for x in encoder_hidden_state_targets_tmp]
                     self.encoder_hidden_states = encoder_hidden_states
-
-                    if self.encoder_state_noise_sd:
-                        encoder_hidden_states_clean_tmp = self.segmenter_output.state_clean(mask=self.X_mask)
-                        if self.xent_state_predictions:
-                            encoder_hidden_states_clean = []
-                            for l in range(len(encoder_hidden_states_clean_tmp)):
-                                encoder_hidden_states_clean_cur = encoder_hidden_states_clean_tmp[l]
-                                if l < self.layers_encoder - 1 or self.encoder_discretize_final:
-                                    encoder_hidden_states_clean_cur = (encoder_hidden_states_clean_cur + 1) / 2
-                                    encoder_hidden_states_clean_cur *= self.X_mask[..., None]
-                                encoder_hidden_states_clean.append(encoder_hidden_states_clean_cur)
-                        else:
-                            encoder_hidden_states_clean = [x * self.X_mask[..., None] for x in encoder_hidden_states_clean_tmp]
-                        self.encoder_hidden_states_clean = encoder_hidden_states_clean
-                    else:
-                        self.encoder_hidden_states_clean = self.encoder_hidden_states
+                    self.encoder_hidden_state_targets = encoder_hidden_state_targets
 
                     self.encoder_cell_states = self.segmenter_output.cell(mask=self.X_mask)
                     self.encoder_cell_proposals = self.segmenter_output.cell_proposals(mask=self.X_mask)
@@ -987,6 +997,9 @@ class DNNSeg(object):
                         mean_boundary_prob = tf.reduce_sum(self.segmentation_probs[l]) / tf.maximum(denom, self.epsilon)
                         self._add_regularization(mean_boundary_prob, self.boundary_prob_extremeness_regularizer)
                         self._add_regularization(seg_probs_mean, self.boundary_prob_regularizer)
+                        segs = self.encoder_segmentations[l]
+                        if not self.encoder_boundary_discretizer:
+                            segs = round_straight_through(segs, session=self.session)
                         segs_mean = tf.reduce_sum(round_straight_through(self.encoder_segmentations[l], session=self.sess)) / tf.maximum(denom, self.epsilon)
                         self._add_regularization(segs_mean, self.boundary_regularizer)
 
@@ -1069,7 +1082,7 @@ class DNNSeg(object):
 
                 elif self.encoder_type.lower() == 'cnn':
                     for i in range(self.layers_encoder - 1):
-                        if i > 0 and self.encoder_resnet_n_layers_inner:
+                        if i > 0 and self.encoder_resnet_n_layers_inner and self.encoder_resnet_n_layers_inner > 1:
                             encoder = Conv1DResidualLayer(
                                 self.conv_kernel_size,
                                 training=self.training,
@@ -1107,7 +1120,7 @@ class DNNSeg(object):
                     encoder = tf.layers.Flatten()(encoder)
 
                     for i in range(self.layers_encoder - 1):
-                        if i > 0 and self.encoder_resnet_n_layers_inner:
+                        if i > 0 and self.encoder_resnet_n_layers_inner and self.encoder_resnet_n_layers_inner > 1:
                             encoder = DenseResidualLayer(
                                 training=self.training,
                                 units=self.n_timesteps_input * self.units_encoder[i],
@@ -1213,10 +1226,10 @@ class DNNSeg(object):
                     if l == 0:
                         lm_targets_cur = self.X
                     else:
-                        lm_targets_cur = self.encoder_hidden_states_clean[l - 1]
+                        lm_targets_cur = self.encoder_hidden_state_targets[l - 1]
 
-                    if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
-                        lm_targets_cur = tf.round(lm_targets_cur)
+                    # if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
+                    #     lm_targets_cur = tf.round(lm_targets_cur)
 
                     if self.scale_losses_by_boundaries:
                         if l == 0:
@@ -1362,7 +1375,7 @@ class DNNSeg(object):
                         else:
                             mask_cur = self.X_mask
 
-                        targets_cur = self.encoder_hidden_states_clean[l - 1]
+                        targets_cur = self.encoder_hidden_state_targets[l - 1]
                         if not self.backprop_into_targets:
                             targets_cur = tf.stop_gradient(targets_cur)
 
@@ -1371,8 +1384,8 @@ class DNNSeg(object):
 
                     k = int(targets_cur.shape[-1])
 
-                    if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
-                        targets_cur = tf.round(targets_cur)
+                    # if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
+                    #     targets_cur = tf.round(targets_cur)
 
                     lag_dict = mask_and_lag(
                         targets_cur,
@@ -1434,6 +1447,7 @@ class DNNSeg(object):
                         time_ids_fwd_cur = tf.boolean_mask(time_ids_fwd_cur, weights_masked_cur)
 
                     if initialize_decoder:
+                        encoder_states = self.encoder_hidden_state_targets
                         if self.lm_use_upper and l < self.layers_encoder - 1:
                             if self.lm_boundaries_as_attn:
                                 # Decode using an attention-weighted sum of encoder layers.
@@ -1456,14 +1470,14 @@ class DNNSeg(object):
                                 attn = tf.stack([self.X_mask] + segs, axis=-1)
                                 attn = tf.cumprod(attn, axis=-1)
                                 # attn = tf.Print(attn, [attn, tf.shape(attn)], summarize=100)
-                                decoder_in = self.encoder_hidden_states[l:]
+                                decoder_in = encoder_states[l:]
                                 decoder_in = tf.concat([x * attn[..., i:i+1] for i, x in enumerate(decoder_in)], axis=-1)
                                 # decoder_in = tf.Print(decoder_in, [tf.shape(decoder_in)])
                             else:
-                                decoder_in = tf.concat(self.encoder_hidden_states[l:], axis=-1)
+                                decoder_in = tf.concat(encoder_states[l:], axis=-1)
                                 # decoder_in = tf.concat(self.encoder_hidden_states[l:l+1], axis=-1)
                         else:
-                            decoder_in = self.encoder_hidden_states[l]
+                            decoder_in = encoder_states[l]
 
                         if l == 0:
                             decoder_in = [decoder_in]
@@ -1495,7 +1509,7 @@ class DNNSeg(object):
                                     activation = self.decoder_input_projection_activation_inner
                                 name_cur = 'decoder_in_projection_l%d_d%d' % (l, d)
 
-                                if self.decoder_resnet_n_layers_inner:
+                                if self.decoder_resnet_n_layers_inner and self.decoder_resnet_n_layers_inner > 1:
                                     kernel_layer = DenseResidualLayer(
                                         training=self.training,
                                         units=units,
@@ -1845,7 +1859,7 @@ class DNNSeg(object):
                             session=self.sess
                         )(decoder)
 
-                    if i > 0 and self.decoder_resnet_n_layers_inner:
+                    if i > 0 and self.decoder_resnet_n_layers_inner and self.decoder_resnet_n_layers_inner > 1:
                         if self.decoder_type.lower() == 'rnn':
                             # Possible to-do: implement this using a MaskedLSTMCell
                             decoder = RNNResidualLayer(
@@ -2697,14 +2711,13 @@ class DNNSeg(object):
                     smoothing_algorithm = 'rbf'
 
                 stderr('Converting predictions into tables of segments...\n')
-                segment_tables = data.get_segment_tables_from_segmenter_states(
+                segment_tables = data.get_segment_tables(
                     segmentations,
                     parent_segment_type=segtype,
                     states=states,
                     smoothing_algorithm=smoothing_algorithm,
                     mask=X_mask,
-                    padding=self.input_padding,
-                    discretize=False
+                    padding=self.input_padding
                 )
 
 
@@ -3377,7 +3390,7 @@ class DNNSeg(object):
             if verbose:
                 stderr('Evaluating utterance classifier...\n')
 
-            n = data.get_n('val')
+            n = data.get_n(self.val_data_name)
             if self.pad_seqs:
                 if not np.isfinite(self.eval_minibatch_size):
                     minibatch_size = n
@@ -3385,9 +3398,9 @@ class DNNSeg(object):
                     minibatch_size = self.eval_minibatch_size
             else:
                 minibatch_size = 1
-            n_minibatch = data.get_n_minibatch('val', minibatch_size)
+            n_minibatch = data.get_n_minibatch(self.val_data_name, minibatch_size)
 
-            data_feed = data.get_data_feed('val', minibatch_size=minibatch_size, randomize=False)
+            data_feed = data.get_data_feed(self.val_data_name, minibatch_size=minibatch_size, randomize=False)
             labels = data.labels(one_hot=False, segment_type=segtype)
 
             with self.sess.as_default():
@@ -3458,7 +3471,7 @@ class DNNSeg(object):
                     else:
                         k = 2 ** self.units_encoder[-1]
 
-                    summary, eval_dict = self._evaluate_classifier_inner(
+                    eval_dict, summary = self._evaluate_classifier_inner(
                         labels,
                         labels_pred,
                         k=k,
@@ -3577,26 +3590,19 @@ class DNNSeg(object):
 
             summary += rand_eval_summary
 
-        return summary, eval_dict
+        return eval_dict, summary
 
-    def score_acoustics(self, data, tables):
+    def score_acoustics(self, data, segment_tables):
         segmentation_scores = []
+        summary = ''
 
         if self.data_type.lower() == 'acoustic':
-            summary = ''
-
-            for i, f in enumerate(tables):
+            for i, segment_table in enumerate(segment_tables):
                 summary += '  Layer %s\n' % (i + 1)
-                n = 0
-                lengths = []
-                for fileID in data.fileIDs:
-                    n += len(tables[i][fileID])
-                    lengths.append(tables[i][fileID].end - tables[i][fileID].start)
-                lengths = float(pd.concat(lengths, axis=0).mean())
-                summary += '    Num segments: %d\n' % n
-                summary += '    Mean segment length: %.4fs\n\n' % lengths
+                summary += '    Num segments: %d\n' % len(segment_table)
+                summary += '    Mean segment length: %.4fs\n\n' % (segment_table.end - segment_table.start).mean()
 
-                s = data.score_segmentation('phn', f, tol=0.02)[0]
+                s = data.score_segmentation('phn', segment_table, tol=0.02)[0]
                 B_P, B_R, B_F = f_measure(s['b_tp'], s['b_fp'], s['b_fn'])
                 W_P, W_R, W_F = f_measure(s['w_tp'], s['w_fp'], s['w_fn'])
                 summary += '    Phonemes:\n'
@@ -3618,7 +3624,7 @@ class DNNSeg(object):
                     }
                 })
 
-                s = data.score_segmentation('wrd', f, tol=0.03)[0]
+                s = data.score_segmentation('wrd', segment_table, tol=0.03)[0]
                 B_P, B_R, B_F = f_measure(s['b_tp'], s['b_fp'], s['b_fn'])
                 W_P, W_R, W_F = f_measure(s['w_tp'], s['w_fp'], s['w_fn'])
                 summary += '    Words:\n'
@@ -3641,7 +3647,7 @@ class DNNSeg(object):
                 data.dump_segmentations_to_textgrid(
                     outdir=self.outdir,
                     suffix='_l%d' % (i + 1),
-                    segments=[f, 'phn', 'wrd']
+                    segments=[segment_table, 'phn', 'wrd']
                 )
 
         else:
@@ -3649,14 +3655,16 @@ class DNNSeg(object):
 
         return segmentation_scores, summary
 
-    def score_text(self, data, tables):
+    def score_text(self, data, segment_tables):
         segmentation_scores = []
+        summary = ''
         if self.data_type.lower() == 'text':
-            summary = ''
-            for i, f in enumerate(tables):
+            for i, segment_table in enumerate(segment_tables):
                 summary += '  Layer %s\n' % (i + 1)
+                summary += '    Num segments: %d\n' % len(segment_tables)
+                summary += '    Mean segment length: %.4f characters\n\n' % (segment_table.end - segment_table.start).mean()
 
-                s = data.score_text_segmentation('wrd', f)[0]
+                s = data.score_text_segmentation('wrd', segment_table)[0]
                 B_P, B_R, B_F = f_measure(s['b_tp'], s['b_fp'], s['b_fn'])
                 W_P, W_R, W_F = f_measure(s['w_tp'], s['w_fp'], s['w_fn'])
                 L_P, L_R, L_F = f_measure(s['l_tp'], s['l_fp'], s['l_fn'])
@@ -3688,7 +3696,7 @@ class DNNSeg(object):
                 data.dump_segmentations_to_textfile(
                     outdir=self.outdir,
                     suffix='_l%d' % (i + 1),
-                    segments=[f],
+                    segments=[segment_table],
                     parent_segments='vad'
                 )
         else:
@@ -3707,6 +3715,8 @@ class DNNSeg(object):
             ix2label=None,
             verbose=True
     ):
+        report_classeval = False
+
         if 'hmlstm' in self.encoder_type.lower():
             summary = ''
 
@@ -3717,12 +3727,10 @@ class DNNSeg(object):
                 segtype = self.segtype
 
             if whole_file:
-                data_name = 'val_files'
                 minibatch_size = 1
-                n_minibatch = data.get_n(data_name)
+                n_minibatch = data.get_n(self.val_data_name)
             else:
-                data_name = 'val'
-                n = data.get_n(data_name)
+                n = data.get_n(self.val_data_name)
                 if self.pad_seqs:
                     if not np.isfinite(self.eval_minibatch_size):
                         minibatch_size = n
@@ -3730,9 +3738,9 @@ class DNNSeg(object):
                         minibatch_size = self.eval_minibatch_size
                 else:
                     minibatch_size = 1
-                n_minibatch = data.get_n_minibatch('val', minibatch_size)
+                n_minibatch = data.get_n_minibatch(self.val_data_name, minibatch_size)
 
-            data_feed = data.get_data_feed(data_name, minibatch_size=minibatch_size, randomize=False)
+            data_feed = data.get_data_feed(self.val_data_name, minibatch_size=minibatch_size, randomize=False)
             n_layers = len(self.segmentation_probs)
 
             with self.sess.as_default():
@@ -3744,29 +3752,22 @@ class DNNSeg(object):
                         pb = tf.contrib.keras.utils.Progbar(n_minibatch)
 
                     if self.streaming or whole_file:
-                        X_mask = None
                         padding = None
 
-                        segmentation_probs = [[] for _ in range(n_layers)]
+                        # Lists are ragged shape [N_LAYERS, N_FILES, N_TIMESTEPS]
                         segmentations = [[] for _ in range(n_layers)]
-                        if self.data_type.lower() == 'acoustic':
-                            true_labels = []
-                        else:
-                            true_labels = None
-                        true_boundaries = []
                         states = [[] for _ in range(n_layers)]
 
                         for i, file in enumerate(data_feed):
                             X_batch = file['X']
                             fixed_boundaries_batch = file['fixed_boundaries']
-                            oracle_labels_batch = file['oracle_labels']
                             oracle_boundaries_batch = file['oracle_boundaries']
                             speaker_batch = file['speaker']
-                            splits = np.where(np.concatenate([np.zeros((1,)), fixed_boundaries_batch[0,:-1]]))[0]
 
                             fd_minibatch = {
                                 self.X: X_batch,
                                 self.fixed_boundaries_placeholder: fixed_boundaries_batch,
+                                self.oracle_boundaries_placeholder: oracle_boundaries_batch,
                                 self.training: False
                             }
 
@@ -3776,61 +3777,31 @@ class DNNSeg(object):
                             if fixed_boundaries_batch is not None:
                                 fd_minibatch[self.fixed_boundaries_placeholder] = fixed_boundaries_batch
 
-                            if oracle_boundaries_batch is not None and self.oracle_boundaries:
-                                fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
-
-                            segmentation_probs_cur, segmentations_cur, states_cur = self.sess.run(
+                            segmentations_cur, states_cur = self.sess.run(
                                 [
-                                    self.segmentation_probs,
                                     self.segmentations,
-                                    self.encoder_hidden_states
+                                    self.encoder_hidden_state_targets
                                 ],
                                 feed_dict=fd_minibatch
                             )
 
                             for l in range(n_layers):
-                                segmentation_probs_l = segmentation_probs_cur[l][0]
-                                segmentation_probs_l = np.split(segmentation_probs_l, splits)
-                                segmentation_probs[l] += segmentation_probs_l
-
-                                segmentations_l = segmentations_cur[l][0]
-                                segmentations_l = np.split(segmentations_l, splits)
-                                segmentations[l] += segmentations_l
-
-                                if l == 0:
-                                    if oracle_labels_batch is not None:
-                                        true_labels_cur = oracle_labels_batch[0]
-                                        true_labels_cur = np.split(true_labels_cur, splits)
-                                        true_labels += true_labels_cur
-
-                                    if oracle_boundaries_batch is not None:
-                                        true_boundaries_cur = oracle_boundaries_batch[0]
-                                        true_boundaries_cur = np.split(true_boundaries_cur, splits)
-                                        true_boundaries += true_boundaries_cur
-
-                                states_l = states_cur[l][0]
-                                states_l = np.split(states_l,splits)
-                                states[l] += states_l
+                                states[l].append(states_cur[l][0])
+                                segmentations[l].append(segmentations_cur[l][0])
 
                             if verbose:
                                 pb.update(i+1, values=[])
 
                     else:
                         padding = self.input_padding
-                        segmentation_probs = [[] for _ in range(n_layers)]
                         segmentations = [[] for _ in range(n_layers)]
                         states = [[] for _ in range(n_layers)]
-                        X_mask = []
-
-                        true_labels=None
 
                         for i, batch in enumerate(data_feed):
                             X_batch = batch['X']
                             X_mask_batch = batch['X_mask']
                             speaker_batch = batch['speaker']
                             fixed_boundaries_batch = batch['fixed_boundaries']
-                            oracle_labels_batch = None
-                            oracle_boundaries_batch = batch['oracle_boundaries']
 
                             fd_minibatch = {
                                 self.X: X_batch,
@@ -3846,12 +3817,8 @@ class DNNSeg(object):
                             if fixed_boundaries_batch is not None:
                                 fd_minibatch[self.fixed_boundaries_placeholder] = fixed_boundaries_batch
 
-                            if oracle_boundaries_batch is not None:
-                                fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
-
-                            [segmentation_probs_cur, segmentations_cur, states_cur] = self.sess.run(
+                            [segmentations_cur, states_cur] = self.sess.run(
                                 [
-                                    self.segmentation_probs,
                                     self.segmentations,
                                     self.encoder_hidden_states
                                 ],
@@ -3860,23 +3827,16 @@ class DNNSeg(object):
 
                             X_mask.append(X_mask_batch)
                             for l in range(n_layers):
-                                segmentation_probs[l].append(segmentation_probs_cur[l])
                                 segmentations[l].append(segmentations_cur[l])
                                 states[l].append(states_cur[l])
 
                             if verbose:
                                 pb.update(i+1, values=[])
 
-                        X_mask = np.concatenate(X_mask)
-
-                        new_segmentation_probs = []
                         new_segmentations = []
                         new_states = []
 
                         for l in range(n_layers):
-                            new_segmentation_probs.append(
-                                np.concatenate(segmentation_probs[l], axis=0)
-                            )
                             new_segmentations.append(
                                 np.concatenate(segmentations[l], axis=0)
                             )
@@ -3884,19 +3844,17 @@ class DNNSeg(object):
                                 np.concatenate(states[l], axis=0)
                             )
 
-                        segmentation_probs = new_segmentation_probs
                         segmentations = new_segmentations
                         states = new_states
 
                     if verbose:
-                        stderr('Computing segmentation tables...\n')
+                        stderr('Computing segment tables...\n')
 
                     if self.encoder_boundary_discretizer or self.segment_at_peaks \
                             or self.oracle_boundaries or self.boundary_prob_discretization_threshold:
                         smoothing_algorithm = None
                         n_points = None
                     else:
-                        segmentations = segmentation_probs
                         smoothing_algorithm = 'rbf'
                         n_points = 1000
 
@@ -3905,107 +3863,167 @@ class DNNSeg(object):
                     else:
                         state_activation = self.encoder_inner_activation
 
-                    tables = data.get_segment_tables_from_segmenter_states(
-                        segmentations,
+                    pred_tables = data.get_segment_tables(
+                        segmentations=segmentations,
                         parent_segment_type=segtype,
                         states=states,
-                        true_labels=true_labels,
+                        add_phn_labels=True,
+                        add_wrd_labels=True,
                         state_activation=state_activation,
                         smoothing_algorithm=smoothing_algorithm,
                         smoothing_algorithm_params=None,
                         n_points=n_points,
-                        mask=X_mask,
+                        padding=padding
+                    )
+
+                    if self.data_type.lower() == 'acoustic':
+                        phn_tables = data.get_segment_tables(
+                            timestamps='phn',
+                            parent_segment_type=segtype,
+                            states=states,
+                            add_phn_labels=True,
+                            add_wrd_labels=False,
+                            state_activation=state_activation,
+                            smoothing_algorithm=smoothing_algorithm,
+                            smoothing_algorithm_params=None,
+                            n_points=n_points,
+                            padding=padding
+                        )
+
+                        if self.feature_map is not None:
+                            phn_tables = [pd.merge(x, self.feature_map, left_on=['phn_label'], right_on=['symbol']) for x in phn_tables]
+                        if self.label_map is not None:
+                            for table in phn_tables:
+                                ipa = pd.Series(table.phn_label).replace(self.label_map)
+                                table['IPA'] = ipa
+                        phn_tables = [x.sort_values(['speaker', 'fileID', 'start']) for x in phn_tables]
+                    else:
+                        phn_tables = None
+
+                    wrd_tables = data.get_segment_tables(
+                        timestamps='wrd',
+                        parent_segment_type=segtype,
+                        states=states,
+                        add_phn_labels=False,
+                        add_wrd_labels=True,
+                        state_activation=state_activation,
+                        smoothing_algorithm=smoothing_algorithm,
+                        smoothing_algorithm_params=None,
+                        n_points=n_points,
                         padding=padding
                     )
 
                     if verbose:
-                        stderr('Evaluating segmentations...\n')
+                        stderr('Evaluating segmentation...\n')
 
                     summary += '\nSEGMENTATION EVAL:\n\n'
 
                     if self.data_type.lower() == 'acoustic':
-                        scores_cur, summary_cur = self.score_acoustics(data, tables)
+                        scores_cur, summary_cur = self.score_acoustics(data, pred_tables)
                     else:
-                        scores_cur, summary_cur = self.score_text(data, tables)
+                        scores_cur, summary_cur = self.score_text(data, pred_tables)
 
                     scores = {
                         'segmentation_scores': scores_cur
                     }
                     summary += summary_cur
 
-                    # summary += '\nCLASSIFICATION EVAL:\n\n'
+                    if verbose:
+                        stderr('Evaluating classification...\n')
+
+                    if report_classeval:
+                        summary += '\nCLASSIFICATION EVAL:\n\n'
                     scores['classification_scores'] = []
-                    for l in range(len(tables)):
-                        if self.data_type.lower() == 'acoustic':
-                            segtypes = ['phn', 'wrd']
-                        else:
-                            segtypes = ['wrd']
+                    if self.data_type.lower() == 'acoustic':
+                        segtypes = ['phn', 'wrd']
+                    else:
+                        segtypes = ['wrd']
+                    for l in range(len(pred_tables)):
                         scores['classification_scores'].append({})
                         for s in segtypes:
+                            if report_classeval:
+                                summary += 'LAYER %d, GOLD=%s\n' % (l + 1, s)
+
                             scores['classification_scores'][l][s] = {'goldseg': {}, 'predseg': {}}
-                            true = {}
-                            for f in data.fileIDs:
-                                true[f] = data.data[f].segments(s)
-                            # summary += 'LAYER %d, GOLD=%s\n' % (l + 1, s)
-                            for g in ['goldseg', 'predseg']:
-                                # if g == 'goldseg':
-                                #     summary += '  Using gold segmentations\n'
-                                # else:
-                                #     summary += '  Using predicted segmentations\n'
-                                aligned = data.align_gold_labels_to_segments(true, tables[l], use_gold_segs=g=='goldseg')
-                                summary_cur, eval_dict_cur = self._evaluate_classifier_inner(
-                                    aligned.gold_label,
-                                    aligned.label,
-                                    # k=2**self.units_encoder[l],
-                                    plot=plot,
-                                    random_baseline=random_baseline,
-                                    ix2label=None,
-                                    verbose=False
+
+                            if s == 'phn':
+                                seg_table = phn_tables[l]
+                            else:
+                                seg_table = wrd_tables[l]
+
+                            if report_classeval:
+                                summary += '  Using gold segmentations\n'
+                            goldseg_score, summary_cur = self._evaluate_classifier_inner(
+                                seg_table[s + '_label'],
+                                seg_table.label,
+                                plot=plot,
+                                random_baseline=random_baseline,
+                                ix2label=None,
+                                verbose=False
+                            )
+                            scores['classification_scores'][l][s]['goldseg'] = goldseg_score
+                            if report_classeval:
+                                summary += summary_cur
+
+                            if report_classeval:
+                                summary += '  Using predicted segmentations\n'
+                            predseg_score, summary_cur = self._evaluate_classifier_inner(
+                                pred_tables[l][s + '_label'],
+                                pred_tables[l].label,
+                                plot=plot,
+                                random_baseline=random_baseline,
+                                ix2label=None,
+                                verbose=False
+                            )
+                            scores['classification_scores'][l][s]['predseg'] = predseg_score
+                            if report_classeval:
+                                summary += summary_cur
+
+                    if save_embeddings:
+                        if verbose:
+                            stderr('Saving segment tables...\n')
+                        for l in range(self.layers_encoder - 1):
+                            pred_tables[l].to_csv(
+                                self.outdir + '/embeddings_pred_segs_l%d.csv' % l,
+                                sep=' ',
+                                index=False
+                            )
+                            wrd_tables[l].to_csv(
+                                self.outdir + '/embeddings_gold_wrd_segs_l%d.csv' % l,
+                                sep=' ',
+                                index=False
+                            )
+                            matched_wrd = data.extract_matching_segment_embeddings(
+                                'wrd',
+                                pred_tables[l],
+                                tol=0.02
+                            )
+                            matched_wrd.to_csv(
+                                self.outdir + '/embeddings_matched_wrd_segs_l%d.csv' % l,
+                                sep=' ',
+                                index=False
+                            )
+
+                            if self.data_type.lower() == 'acoustic':
+                                phn_tables[l].to_csv(
+                                    self.outdir + '/embeddings_gold_phn_segs_l%d.csv' % l, sep=' ',
+                                    index=False
                                 )
-                                # summary += summary_cur
-                                scores['classification_scores'][l][s][g] = eval_dict_cur
+                                matched_phn = data.extract_matching_segment_embeddings(
+                                    'phn',
+                                    pred_tables[l],
+                                    tol=0.02
+                                )
+                                matched_phn.to_csv(
+                                    self.outdir + '/embeddings_matched_phn_segs_l%d.csv' % l,
+                                    sep=' ',
+                                    index=False
+                                )
 
                     stderr(summary)
 
                     with open(self.outdir + '/initial_classifier_eval.txt', 'w') as f:
                         f.write(summary)
-
-                    if save_embeddings and self.data_type.lower() == 'acoustic':
-                        true_tables = data.get_segment_tables_from_segmenter_states(
-                            [true_boundaries] * n_layers,
-                            parent_segment_type=segtype,
-                            states=states,
-                            true_labels=true_labels,
-                            discretize=False,
-                            state_activation=state_activation,
-                            smoothing_algorithm=smoothing_algorithm,
-                            smoothing_algorithm_params=None,
-                            n_points=n_points,
-                            mask=X_mask,
-                            padding=padding
-                        )
-
-                        pred_tables = data.get_segment_tables_from_segmenter_states(
-                            segmentations,
-                            parent_segment_type=segtype,
-                            states=states,
-                            true_labels=true_labels,
-                            discretize=False,
-                            state_activation=state_activation,
-                            smoothing_algorithm=smoothing_algorithm,
-                            smoothing_algorithm_params=None,
-                            n_points=n_points,
-                            mask=X_mask,
-                            padding=padding
-                        )
-
-                        for l in range(self.layers_encoder - 1):
-                            pred_seg_embeddings = data.extract_segment_embeddings(pred_tables[l])
-                            pred_seg_embeddings.to_csv(self.outdir + '/embeddings_pred_segs_l%d.csv' % l, sep=' ', index=False)
-                            true_seg_embeddings = data.extract_segment_embeddings(true_tables[l])
-                            true_seg_embeddings.to_csv(self.outdir + '/embeddings_true_segs_l%d.csv' % l, sep=' ', index=False)
-                            matching_seg_embeddings = data.extract_matching_segment_embeddings('phn', pred_tables[l], tol=0.02)
-                            matching_seg_embeddings.to_csv(self.outdir + '/embeddings_matched_segs_l%d.csv' % l, sep=' ', index=False)
 
                     self.set_predict_mode(False)
 
@@ -4085,7 +4103,7 @@ class DNNSeg(object):
     ):
         assert (info_dict is not None or data is not None), "Either **info_dict** or **data** must be provided."
         if info_dict is None:
-            data_feed_train = data.get_data_feed('train', minibatch_size=self.minibatch_size, randomize=True)
+            data_feed_train = data.get_data_feed(self.train_data_name, minibatch_size=self.minibatch_size, randomize=True)
             batch = next(data_feed_train)
 
             if self.streaming:
@@ -4357,7 +4375,7 @@ class DNNSeg(object):
                     data_type=self.data_type
             )
 
-            n_train = train_data.get_n('train')
+            n_train = train_data.get_n(self.train_data_name)
 
         t1 = time.time()
 
@@ -4410,22 +4428,21 @@ class DNNSeg(object):
                     n_pb = n_minibatch
 
                 # if not self.initial_evaluation_complete.eval(session=self.sess):
-                # if True:
-                if False:
-                    if self.task != 'streaming_autoencoder':
-                        self.run_checkpoint(
-                            val_data,
-                            save=False,
-                            log=self.log_freq > 0,
-                            evaluate=self.eval_freq > 0,
-                            n_plot=n_plot,
-                            ix2label=ix2label,
-                            save_embeddings=True,
-                            check_numerics=False,
-                            verbose=verbose
-                        )
-                        self.sess.run(self.set_initial_evaluation_complete)
-                        self.save()
+                if True:
+                # if False:
+                    self.run_checkpoint(
+                        val_data,
+                        save=False,
+                        log=self.log_freq > 0,
+                        evaluate=self.eval_freq > 0,
+                        n_plot=n_plot,
+                        ix2label=ix2label,
+                        save_embeddings=True,
+                        check_numerics=False,
+                        verbose=verbose
+                    )
+                    self.sess.run(self.set_initial_evaluation_complete)
+                    self.save()
 
                 while self.global_step.eval(session=self.sess) < n_iter:
                     self.set_update_mode(verbose=False)
@@ -4488,7 +4505,7 @@ class DNNSeg(object):
                         segment_embeddings, segment_spans = self.collect_correspondence_targets(data=train_data)
 
                     data_feed_train = train_data.get_data_feed(
-                        'train',
+                        self.train_data_name,
                         minibatch_size=minibatch_size,
                         randomize=True,
                         n_samples=self.n_samples
@@ -4798,7 +4815,7 @@ class DNNSeg(object):
         if segtype is None:
             segtype = self.segtype
 
-        data_feed = data.get_data_feed('val', minibatch_size=n_plot, randomize=True)
+        data_feed = data.get_data_feed(self.plot_data_name, minibatch_size=n_plot, randomize=True)
         batch = next(data_feed)
 
         if self.streaming:
@@ -5809,12 +5826,36 @@ class DNNSegMLE(DNNSeg):
                             varset[s_key].append(x)
                             varset[b_key].append(x)
 
-                self.train_ops = {
-                    'all': self.optim.minimize(self.full_loss, global_step=self.global_batch_step)
-                }
+                if self.weight_update_mode.lower() == 'all':
+                    train_ops = {
+                        'all': self.optim.minimize(self.full_loss, global_step=self.global_batch_step)
+                    }
+                elif self.weight_update_mode.lower() == 'boundary':
+                    train_ops = {
+                        'boundary': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary'])
+                    }
+                elif self.weight_update_mode.lower() == 'state':
+                    train_ops = {
+                        'state': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
+                    }
+                elif self.weight_update_mode.lower().startswith('alternating'):
+                    train_ops = {
+                        'boundary': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
+                        'state': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
+                    }
+                elif self.weight_update_mode.lower().startswith('layerwise'):
+                    layer_matcher = re.compile('\_l[0-9]+\_')
+                    for k in varset:
+                        if layer_matcher.search(k):
+                            self.train_ops[k] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset[k])
+                else:
+                    float(self.weight_update_mode)
+                    train_ops = {
+                        'boundary': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
+                        'state': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
+                    }
 
-                for k in varset:
-                    self.train_ops[k] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset[k])
+                self.train_ops = train_ops
 
     def run_train_step(
             self,
