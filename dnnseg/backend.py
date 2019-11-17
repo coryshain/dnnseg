@@ -1323,25 +1323,24 @@ class HMLSTMCell(LayerRNNCell):
                             )
                         )
 
-                    if not self._oracle_boundary:
-                        # Build boundary (and, if necessary, boundary kernel)
-                        if l < self._num_layers - 1 and self._infer_boundary:
-                            if self._implementation == 1 and not self._layer_normalization and self._use_bias:
-                                bias_boundary = bias[:, -self._num_boundary_neurons:]
-                                self._bias_boundary.append(bias_boundary)
-                            elif self._implementation == 2:
-                                boundary_in_dim = self._num_units[l]
+                    # Build boundary (and, if necessary, boundary kernel)
+                    if l < self._num_layers - 1 and self._infer_boundary:
+                        if self._implementation == 1 and not self._layer_normalization and self._use_bias:
+                            bias_boundary = bias[:, -self._num_boundary_neurons:]
+                            self._bias_boundary.append(bias_boundary)
+                        elif self._implementation == 2:
+                            boundary_in_dim = self._num_units[l]
 
-                                self._kernel_boundary.append(
-                                    self.initialize_kernel(
-                                        l,
-                                        boundary_in_dim,
-                                        self._num_boundary_neurons,
-                                        self._boundary_initializer,
-                                        prefinal_mode='in',
-                                        name='boundary'
-                                    )
+                            self._kernel_boundary.append(
+                                self.initialize_kernel(
+                                    l,
+                                    boundary_in_dim,
+                                    self._num_boundary_neurons,
+                                    self._boundary_initializer,
+                                    prefinal_mode='in',
+                                    name='boundary'
                                 )
+                            )
 
                     # Build language model kernel(s)
                     if self._lm:

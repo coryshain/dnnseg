@@ -4428,8 +4428,8 @@ class DNNSeg(object):
                     n_pb = n_minibatch
 
                 # if not self.initial_evaluation_complete.eval(session=self.sess):
-                if True:
-                # if False:
+                # if True:
+                if False:
                     self.run_checkpoint(
                         val_data,
                         save=False,
