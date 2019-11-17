@@ -3767,9 +3767,11 @@ class DNNSeg(object):
                             fd_minibatch = {
                                 self.X: X_batch,
                                 self.fixed_boundaries_placeholder: fixed_boundaries_batch,
-                                self.oracle_boundaries_placeholder: oracle_boundaries_batch,
                                 self.training: False
                             }
+                            
+                            if self.oracle_boundaries:
+                                fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
 
                             if self.speaker_emb_dim:
                                 fd_minibatch[self.speaker] = speaker_batch
