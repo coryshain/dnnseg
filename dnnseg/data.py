@@ -184,7 +184,9 @@ def extract_states_at_timestamps(
         discretize=False,
         as_categories=True
 ):
-    ix = np.minimum(np.floor(timestamps / seconds_per_step), len(states) - 1).astype('int')
+    # ix = np.minimum(np.floor(timestamps / seconds_per_step), len(states) - 1).astype('int')
+    ix = np.maximum(np.round(timestamps / seconds_per_step).astype('int') - 1, 0).astype('int')
+
     out = states[ix]
 
     if discretize:
@@ -1103,7 +1105,6 @@ def cache_data(
         resample_inputs=False,
         resample_targets_bwd=False,
         resample_targets_fwd=False,
-        oracle_boundaries=None,
         task='segmenter',
         data_type='acoustic'
 ):
@@ -1125,8 +1126,7 @@ def cache_data(
                     use_normalization_mask=use_normalization_mask,
                     predict_deltas=predict_deltas,
                     target_bwd_resampling=resample_targets_bwd,
-                    target_fwd_resampling=resample_targets_fwd,
-                    oracle_boundaries=oracle_boundaries
+                    target_fwd_resampling=resample_targets_fwd
                 )
         else:
             if not val_data.cached('utt'):
@@ -1143,8 +1143,7 @@ def cache_data(
                     input_resampling=resample_inputs,
                     target_padding=target_padding,
                     target_resampling=resample_targets_bwd,
-                    reverse_targets=reverse_targets,
-                    oracle_boundaries=oracle_boundaries
+                    reverse_targets=reverse_targets
                 )
 
     if val_data is not None:
@@ -1162,8 +1161,7 @@ def cache_data(
                     use_normalization_mask=use_normalization_mask,
                     predict_deltas=predict_deltas,
                     target_bwd_resampling=resample_targets_bwd,
-                    target_fwd_resampling=resample_targets_fwd,
-                    oracle_boundaries=oracle_boundaries
+                    target_fwd_resampling=resample_targets_fwd
                 )
         else:
             if not val_data.cached('utt'):
@@ -1182,20 +1180,15 @@ def cache_data(
                     input_resampling=resample_inputs,
                     target_padding=target_padding,
                     target_resampling=resample_targets_bwd,
-                    reverse_targets=reverse_targets,
-                    oracle_boundaries=oracle_boundaries
+                    reverse_targets=reverse_targets
                 )
         if task.lower() == 'segmenter' and not val_data.cached('files'):
-            oracle_boundaries = oracle_boundaries
-            if oracle_boundaries is None and data_type.lower() == 'acoustic':
-                oracle_boundaries = 'phn'
             val_data.cache_files_data(
                 'files',
                 mask=segtype,
                 normalization=data_normalization,
                 reduction_axis=reduction_axis,
-                use_normalization_mask=use_normalization_mask,
-                oracle_boundaries=oracle_boundaries
+                use_normalization_mask=use_normalization_mask
             )
 
 
@@ -1506,8 +1499,7 @@ class Dataset(object):
             target_padding='post',
             target_resampling=None,
             reverse_targets=True,
-            predict_deltas=False,
-            oracle_boundaries=None
+            predict_deltas=False
     ):
         assert reduction_axis.lower() != 'freq', 'Reduction axis %s not supported for utterance mode.' % reduction_axis
         X, X_mask, file_ix = self.inputs(
@@ -1532,16 +1524,19 @@ class Dataset(object):
         )
         speaker = self.segments(segments).speaker.values
 
-        if oracle_boundaries:
-            inner_segment_type = oracle_boundaries
-            oracle_boundaries, _ = self.one_hot_boundaries(
-                inner_segments=inner_segment_type,
-                outer_segments=segments,
-                padding=input_padding,
-                max_len=max_len
-            )
-        else:
-            oracle_boundaries = None
+        phn_boundaries, phn_labels, _ = self.timecourses(
+            inner_segments='phn',
+            outer_segments=segments,
+            padding=input_padding,
+            max_len=max_len
+        )
+
+        wrd_boundaries, wrd_labels, _ = self.timecourses(
+            inner_segments='wrd',
+            outer_segments=segments,
+            padding=input_padding,
+            max_len=max_len
+        )
 
         shift = []
         scale = []
@@ -1574,7 +1569,10 @@ class Dataset(object):
             'shift': shift,
             'scale': scale,
             'speaker': speaker,
-            'oracle_boundaries': oracle_boundaries
+            'phn_boundaries': phn_boundaries,
+            'phn_labels': phn_labels,
+            'wrd_boundaries': wrd_boundaries,
+            'wrd_labels': wrd_labels
         }
 
         self.cache[name] = cache_dict
@@ -1592,7 +1590,6 @@ class Dataset(object):
             target_bwd_resampling=None,
             target_fwd_resampling = None,
             predict_deltas=False,
-            oracle_boundaries=None,
             mask=None
     ):
         left_pad = max(window_len_input, window_len_bwd) - 1
@@ -1639,8 +1636,6 @@ class Dataset(object):
 
         file_ix = []
         time_ix = []
-
-        n_feats = feats_targets.shape[-1]
 
         for i, l in enumerate(file_lengths):
             file_ix_cur = np.ones(l, dtype='int') * i
@@ -1716,29 +1711,47 @@ class Dataset(object):
             speaker.append(self.data[f].speaker)
         speaker = np.array(speaker)
 
-        if oracle_boundaries:
-            oracle_boundaries, _ = self.one_hot_boundaries(
-                inner_segments=oracle_boundaries,
-                outer_segments=None,
-                padding=None
-            )
-            oracle_boundaries_tmp = {}
-            for i, f in enumerate(self.fileIDs):
-                oracle_boundaries_tmp[f] = oracle_boundaries[i]
-            oracle_boundaries = oracle_boundaries_tmp
-            oracle_boundaries, _, _ = self.features(
-                features=oracle_boundaries,
-                boundaries_as_features=True,
-                mask=mask,
-                pad_left=left_pad,
-                pad_right=right_pad
-            )
-            oracle_boundaries_tmp = []
-            for x in oracle_boundaries:
-                oracle_boundaries_tmp.append(x[0])
-            oracle_boundaries = pad_sequence(oracle_boundaries_tmp, padding='post')
-        else:
-            oracle_boundaries = None
+        phn_boundaries, phn_labels, _ = self.timecourses(
+            inner_segments='phn',
+            outer_segments=None,
+            padding=None
+        )
+        phn_boundaries_tmp = {}
+        for i, f in enumerate(self.fileIDs):
+            phn_boundaries_tmp[f] = phn_boundaries[i]
+        phn_boundaries = phn_boundaries_tmp
+        phn_boundaries, _, _ = self.features(
+            features=phn_boundaries,
+            boundaries_as_features=True,
+            mask=mask,
+            pad_left=left_pad,
+            pad_right=right_pad
+        )
+        phn_boundaries_tmp = []
+        for x in phn_boundaries:
+            phn_boundaries_tmp.append(x[0])
+        phn_boundaries = pad_sequence(phn_boundaries_tmp, padding='post')
+
+        wrd_boundaries, wrd_labels, _ = self.timecourses(
+            inner_segments='wrd',
+            outer_segments=None,
+            padding=None
+        )
+        wrd_boundaries_tmp = {}
+        for i, f in enumerate(self.fileIDs):
+            wrd_boundaries_tmp[f] = wrd_boundaries[i]
+        wrd_boundaries = wrd_boundaries_tmp
+        wrd_boundaries, _, _ = self.features(
+            features=wrd_boundaries,
+            boundaries_as_features=True,
+            mask=mask,
+            pad_left=left_pad,
+            pad_right=right_pad
+        )
+        wrd_boundaries_tmp = []
+        for x in wrd_boundaries:
+            wrd_boundaries_tmp.append(x[0])
+        wrd_boundaries = pad_sequence(wrd_boundaries_tmp, padding='post')
 
         cache_dict = {
             'type': 'streaming',
@@ -1753,7 +1766,10 @@ class Dataset(object):
             'time_ix': time_ix,
             'speaker': speaker,
             'fixed_boundaries': fixed_boundaries,
-            'oracle_boundaries': oracle_boundaries,
+            'phn_boundaries': phn_boundaries,
+            # 'phn_labels': phn_labels,
+            'wrd_boundaries': wrd_boundaries,
+            # 'wrd_labels': wrd_labels,
             'window_len_input': window_len_input,
             'window_len_bwd': window_len_bwd,
             'window_len_fwd': window_len_fwd,
@@ -1770,8 +1786,7 @@ class Dataset(object):
             mask,
             normalization=None,
             reduction_axis='time',
-            use_normalization_mask=False,
-            oracle_boundaries=None
+            use_normalization_mask=False
     ):
         feats, boundaries, _ = self.features(
             mask=mask,
@@ -1806,37 +1821,89 @@ class Dataset(object):
             ))
         speaker = np.array(speaker)
 
-        if oracle_boundaries:
-            oracle_boundaries, _ = self.one_hot_boundaries(
-                inner_segments=oracle_boundaries,
-                outer_segments=None,
-                padding=None
-            )
-            if mask:
-                oracle_boundaries_tmp = []
-                for i, f in enumerate(self.fileIDs):
-                    oracle_boundaries_cur, _, _ = self.data[f].segment_and_stack(
-                        segments=mask,
-                        features=oracle_boundaries[i],
-                        boundaries_as_features=True,
-                        padding=None
-                    )
-                    oracle_boundaries_cur = np.concatenate(
-                        oracle_boundaries_cur,
-                        axis=1
-                    )
-                    oracle_boundaries_tmp.append(oracle_boundaries_cur)
+        phn_boundaries, phn_labels, _ = self.timecourses(
+            inner_segments='phn',
+            outer_segments=None,
+            padding=None
+        )
+        if mask:
+            phn_boundaries_tmp = []
+            phn_labels_tmp = []
+            for i, f in enumerate(self.fileIDs):
+                phn_boundaries_cur, _, _ = self.data[f].segment_and_stack(
+                    segments=mask,
+                    features=phn_boundaries[i],
+                    boundaries_as_features=True,
+                    padding=None
+                )
+                phn_labels_cur, _, _ = self.data[f].segment_and_stack(
+                    segments=mask,
+                    features=phn_labels[i],
+                    boundaries_as_features=False,
+                    padding=None
+                )
 
-                oracle_boundaries = oracle_boundaries_tmp
-        else:
-            oracle_boundaries = None
+                phn_boundaries_cur = np.concatenate(
+                    phn_boundaries_cur,
+                    axis=1
+                )
+                phn_labels_cur = np.concatenate(
+                    phn_labels_cur,
+                    axis=1
+                )
+
+                phn_boundaries_tmp.append(phn_boundaries_cur)
+                phn_labels_tmp.append(phn_labels_cur)
+
+            phn_boundaries = phn_boundaries_tmp
+            phn_labels = phn_labels_tmp
+
+        wrd_boundaries, wrd_labels, _ = self.timecourses(
+            inner_segments='wrd',
+            outer_segments=None,
+            padding=None
+        )
+        if mask:
+            wrd_boundaries_tmp = []
+            wrd_labels_tmp = []
+            for i, f in enumerate(self.fileIDs):
+                wrd_boundaries_cur, _, _ = self.data[f].segment_and_stack(
+                    segments=mask,
+                    features=wrd_boundaries[i],
+                    boundaries_as_features=True,
+                    padding=None
+                )
+                wrd_labels_cur, _, _ = self.data[f].segment_and_stack(
+                    segments=mask,
+                    features=wrd_labels[i],
+                    boundaries_as_features=False,
+                    padding=None
+                )
+
+                wrd_boundaries_cur = np.concatenate(
+                    wrd_boundaries_cur,
+                    axis=1
+                )
+                wrd_labels_cur = np.concatenate(
+                    wrd_labels_cur,
+                    axis=1
+                )
+
+                wrd_boundaries_tmp.append(wrd_boundaries_cur)
+                wrd_labels_tmp.append(wrd_labels_cur)
+
+            wrd_boundaries = wrd_boundaries_tmp
+            wrd_labels = wrd_labels_tmp
 
         cache_dict = {
             'type': 'files',
             'n': n,
             'file_lengths': file_lengths,
             'feats': feats,
-            'oracle_boundaries': oracle_boundaries,
+            'phn_boundaries': phn_boundaries,
+            'phn_labels': phn_labels,
+            'wrd_boundaries': wrd_boundaries,
+            'wrd_labels': wrd_labels,
             'fixed_boundaries': boundaries,
             'file_ix': file_ix,
             'shift': shift,
@@ -1897,7 +1964,10 @@ class Dataset(object):
         shift = self.cache[name]['shift']
         scale = self.cache[name]['scale']
         speaker = self.cache[name]['speaker']
-        oracle_boundaries = self.cache[name]['oracle_boundaries']
+        phn_boundaries = self.cache[name]['phn_boundaries']
+        phn_labels = self.cache[name]['phn_labels']
+        wrd_boundaries = self.cache[name]['wrd_boundaries']
+        wrd_labels = self.cache[name]['wrd_labels']
 
         while i < n:
             indices = ix[i:i + minibatch_size]
@@ -1914,7 +1984,10 @@ class Dataset(object):
                 'shift': shift[indices],
                 'scale': scale[indices],
                 'speaker': speaker[indices],
-                'oracle_boundaries': None if oracle_boundaries is None else oracle_boundaries[indices],
+                'phn_boundaries': phn_boundaries[indices],
+                'phn_labels': phn_labels[indices],
+                'wrd_boundaries': wrd_boundaries[indices],
+                'wrd_labels': wrd_labels[indices],
                 'indices': indices
             }
 
@@ -1939,7 +2012,10 @@ class Dataset(object):
         scale = self.cache[name]['scale']
         time_ix = self.cache[name]['time_ix']
         speaker = self.cache[name]['speaker']
-        oracle_boundaries = self.cache[name]['oracle_boundaries']
+        phn_boundaries = self.cache[name]['phn_boundaries']
+        # phn_labels = self.cache[name]['phn_labels']
+        wrd_boundaries = self.cache[name]['wrd_boundaries']
+        # wrd_labels = self.cache[name]['wrd_labels']
         window_len_input = self.cache[name]['window_len_input']
         window_len_bwd = self.cache[name]['window_len_bwd']
         window_len_fwd = self.cache[name]['window_len_fwd']
@@ -1988,10 +2064,10 @@ class Dataset(object):
             else:
                 frame_slice = slice(0, len(self.ix2char))
 
-            if oracle_boundaries is not None:
-                oracle_boundaries_cur = oracle_boundaries[file_ix_cur[..., None], history_ix]
-            else:
-                oracle_boundaries_cur = None
+            phn_boundaries_cur = phn_boundaries[file_ix_cur[..., None], history_ix]
+            # phn_labels_cur = phn_labels[file_ix_cur[..., None], history_ix]
+            wrd_boundaries_cur = wrd_boundaries[file_ix_cur[..., None], history_ix]
+            # wrd_labels_cur = wrd_labels[file_ix_cur[..., None], history_ix]
 
             y_bwd_cur = feats_targets[file_ix_cur[..., None], bwd_context_ix, frame_slice]
             if target_bwd_resampling:
@@ -2010,7 +2086,10 @@ class Dataset(object):
             out = {
                 'X': X_cur,
                 'X_mask': np.any(X_cur, axis=-1),
-                'oracle_boundaries': oracle_boundaries_cur,
+                'phn_boundaries': phn_boundaries_cur,
+                # 'phn_labels': phn_labels_cur,
+                'wrd_boundaries': wrd_boundaries_cur,
+                # 'wrd_labels': wrd_labels_cur,
                 'fixed_boundaries': fixed_boundaries[file_ix_cur[..., None], history_ix],
                 'y_bwd': y_bwd_cur,
                 'y_bwd_mask': y_bwd_mask_cur,
@@ -2040,7 +2119,10 @@ class Dataset(object):
         shift = self.cache[name]['shift']
         scale = self.cache[name]['scale']
         speaker = self.cache[name]['speaker']
-        oracle_boundaries = self.cache[name]['oracle_boundaries']
+        phn_boundaries = self.cache[name]['phn_boundaries']
+        phn_labels = self.cache[name]['phn_labels']
+        wrd_boundaries = self.cache[name]['wrd_boundaries']
+        wrd_labels = self.cache[name]['wrd_labels']
 
         i = 0
         if randomize:
@@ -2050,15 +2132,18 @@ class Dataset(object):
 
         while i < n:
             index = ix[i]
-            if oracle_boundaries is None:
-                oracle_boundaries_cur = None
-            else:
-                oracle_boundaries_cur = oracle_boundaries[index]
+            phn_boundaries_cur = phn_boundaries[index]
+            phn_labels_cur = phn_labels[index]
+            wrd_boundaries_cur = wrd_boundaries[index]
+            wrd_labels_cur = wrd_labels[index]
 
             out = {
                 'X': feats[index],
-                'oracle_boundaries': oracle_boundaries_cur,
                 'fixed_boundaries': fixed_boundaries[index],
+                'phn_boundaries': phn_boundaries_cur,
+                'phn_labels': phn_labels_cur,
+                'wrd_boundaries': wrd_boundaries_cur,
+                'wrd_labels': wrd_labels_cur,
                 'file_ix': file_ix[index],
                 'shift': shift[index],
                 'scale': scale[index],
@@ -2135,7 +2220,7 @@ class Dataset(object):
             resample=resample
         )
 
-    def one_hot_boundaries(
+    def timecourses(
             self,
             inner_segments='wrd',
             outer_segments='vad',
@@ -2143,33 +2228,49 @@ class Dataset(object):
             max_len=None,
             reverse=False
     ):
-        features = {}
+        bounds = {}
+        labels = {}
         for f in self.fileIDs:
-            features[f] = self.data[f].one_hot_boundaries(segments=inner_segments)[..., None]
+            bounds_cur, labels_cur = self.data[f].timecourses(segments=inner_segments)
+            bounds[f] = bounds_cur[..., None]
+            labels[f] = labels_cur[..., None]
 
         if outer_segments is None:
-            out = []
+            bounds_out = []
+            labels_out = []
             mask = []
             for f in self.fileIDs:
-                feats_cur = features[f]
+                bounds_cur = bounds[f]
+                labels_cur = labels[f]
                 if max_len:
-                    feats_cur = feats_cur[:max_len]
+                    bounds_cur = bounds_cur[:max_len]
+                    labels_cur = labels_cur[:max_len]
                 if reverse:
-                    feats_cur = feats_cur[::-1]
-                out.append(feats_cur)
-                mask.append(np.ones((len(feats_cur),)))
+                    bounds_cur = bounds_cur[::-1]
+                    labels_cur = labels_cur[::-1]
+                bounds_out.append(bounds_cur)
+                labels_out.append(labels_cur)
+                mask.append(np.ones((len(bounds_cur),)))
 
         else:
-            out, mask, _ = self.segment_and_stack(
-                features=features,
+            bounds_out, mask, _ = self.segment_and_stack(
+                features=bounds,
                 boundaries_as_features=True,
                 segments=outer_segments,
                 max_len=max_len,
                 padding=padding,
                 reverse=reverse
             )
+            labels_out, _, _ = self.segment_and_stack(
+                features=labels,
+                boundaries_as_features=False,
+                segments=outer_segments,
+                max_len=max_len,
+                padding=padding,
+                reverse=reverse
+            )
 
-        return out, mask
+        return bounds_out, labels_out, mask
 
     def segments(self, segment_type='vad'):
         return pd.concat([self.data[f].segments(segment_type=segment_type) for f in self.fileIDs], axis=0)
@@ -2322,12 +2423,11 @@ class Dataset(object):
 
     def get_segment_tables(
             self,
-            segmentations=None,
-            timestamps=None,
+            segmentations,
+            states,
+            phn_labels=None,
+            wrd_labels=None,
             parent_segment_type='vad',
-            states=None,
-            add_phn_labels=False,
-            add_wrd_labels=False,
             state_activation='tanh',
             smoothing_algorithm=None,
             smoothing_algorithm_params=None,
@@ -2335,9 +2435,6 @@ class Dataset(object):
             n_points=None,
             padding=None
     ):
-        assert not (segmentations is None and timestamps is None), 'Either segmentations or timestamps must be provided.'
-        assert not (segmentations is None and states is None), 'Either segmentations or states (or both) must be provided.'
-
         if seconds_per_step is None:
             seconds_per_step = self.seconds_per_step
 
@@ -2354,13 +2451,12 @@ class Dataset(object):
             F = self.data[f]
 
             dfs = F.get_segment_tables(
-                segmentations=None if segmentations is None else [s[i] for s in segmentations],
-                timestamps=timestamps,
+                segmentations=[s[i] for s in segmentations],
+                states=[s[i] for s in states],
+                phn_labels=None if phn_labels is None else phn_labels[i],
+                wrd_labels=None if wrd_labels is None else wrd_labels[i],
                 parent_segment_type=parent_segment_type,
                 fixed_boundaries=fixed_boundaries[i],
-                states=None if states is None else [s[i] for s in states],
-                add_phn_labels=add_phn_labels,
-                add_wrd_labels=add_wrd_labels,
                 state_activation=state_activation,
                 smoothing_algorithm=smoothing_algorithm,
                 smoothing_algorithm_params=smoothing_algorithm_params,
@@ -2820,12 +2916,26 @@ class Datafile(object):
 
         return aligned
 
-    def segments_to_one_hot(self, segments):
-        one_hot = np.zeros(len(self))
-        ix = np.round(segments.end * self.steps_per_second).astype('int') - 1
-        one_hot[ix] = 1
+    def segments_to_timecourses(self, segments):
+        bounds = np.zeros(len(self))
+        starts = segments.start.values
+        ends = segments.end.values
+        has_labels = hasattr(segments, 'label')
+        if has_labels:
+            label = segments.label.values
+            labels = np.full(len(self), '', dtype=object)
+        else:
+            labels = np.full(len(self), '', dtype=object)
+        for i in range(len(segments)):
+            s = np.round(starts[i] * self.steps_per_second).astype('int')
+            e = np.maximum(np.round(ends[i] * self.steps_per_second).astype('int') - 1, 0)
+            bounds[e] += 1
+            if has_labels:
+                labels[s:e+1] = label[i]
 
-        return one_hot
+        bounds = np.clip(bounds, 0, 1)
+
+        return bounds, labels
 
     def segments_to_mask(self, segments):
         mask = np.zeros(len(self), dtype=bool)
@@ -2836,11 +2946,11 @@ class Datafile(object):
         
         return mask
 
-    def one_hot_boundaries(self, segments='vad'):
+    def timecourses(self, segments='vad'):
         segments = self.segments(segments)
-        one_hot = self.segments_to_one_hot(segments)
+        bounds, labels = self.segments_to_timecourses(segments)
 
-        return one_hot
+        return bounds, labels
 
     def segment_and_stack(
             self,
@@ -2967,13 +3077,12 @@ class Datafile(object):
 
     def get_segment_tables(
             self,
-            segmentations=None,
-            timestamps=None,
+            segmentations,
+            states,
+            phn_labels=None,
+            wrd_labels=None,
             parent_segment_type='vad',
             fixed_boundaries=None,
-            states=None,
-            add_phn_labels=False,
-            add_wrd_labels=False,
             state_activation='tanh',
             smoothing_algorithm=None,
             smoothing_algorithm_params=None,
@@ -2982,9 +3091,6 @@ class Datafile(object):
             padding=None,
             snap_ends=True
     ):
-        assert not (segmentations is None and timestamps is None), 'Either segmentations or timestamps must be provided.'
-        assert not (segmentations is None and states is None), 'Either segmentations or states (or both) must be provided.'
-
         if seconds_per_step is None:
             seconds_per_step = self.seconds_per_step
 
@@ -3002,17 +3108,7 @@ class Datafile(object):
         parent_starts = parent_segs.start.as_matrix()
         parent_ends = parent_segs.end.as_matrix()
 
-        if segmentations is not None:
-            n_layers = len(segmentations)
-        else:
-            n_layers = len(states)
-
-        out = []
-
-        if timestamps is None:
-            use_segmentations = True
-        else:
-            use_segmentations = False
+        n_layers = len(segmentations)
 
         if fixed_boundaries is not None:
             splits = np.where(
@@ -3024,62 +3120,34 @@ class Datafile(object):
         else:
             splits = None
 
-        if use_segmentations:
-            timestamps_by_vad = []
-
-            for l in range(n_layers):
-                segmentations_cur = segmentations[l]
-                if splits is not None:
-                    segmentations_cur = np.split(
-                        segmentations_cur,
-                        splits
-                    )
-
-                if len(segmentations_cur) > 0:
-                    timestamps_by_vad.append(
-                        extract_segment_timestamps_batch(
-                            segmentations_cur,
-                            algorithm=smoothing_algorithm,
-                            algorithm_params=smoothing_algorithm_params,
-                            seconds_per_step=seconds_per_step,
-                            n_points=n_points,
-                            padding=padding
-                        )
-                    )
-                else:
-                    timestamps_by_vad.append(np.zeros(0))
-        else:
-            timestamps_by_vad = timestamps_to_timestamps_by_vad(
-                self.segments(timestamps).end,
-                parent_starts,
-                parent_ends
-            )
-            timestamps_by_vad = [timestamps_by_vad] * n_layers
+        out = []
 
         for l in range(n_layers):
-            if states is not None:
-                states_cur = states[l]
-                if splits is not None:
-                    states_cur = np.split(
-                        states_cur,
-                        splits
-                    )
+            # Get segment timestamps for boundary eval
+            segmentations_cur = segmentations[l]
+            if splits is not None:
+                segmentations_cur = np.split(
+                    segmentations_cur,
+                    splits
+                )
 
-                states_extracted = extract_states_at_timestamps_batch(
-                    timestamps_by_vad[l],
-                    states_cur,
+            if len(segmentations_cur) > 0:
+                timestamps_by_vad = extract_segment_timestamps_batch(
+                    segmentations_cur,
+                    algorithm=smoothing_algorithm,
+                    algorithm_params=smoothing_algorithm_params,
                     seconds_per_step=seconds_per_step,
-                    activation=state_activation,
-                    as_categories=True,
+                    n_points=n_points,
                     padding=padding
                 )
+            else:
+                timestamps_by_vad = np.zeros(0)
 
             starts = []
             ends = []
-            embeddings_cur = []
 
-            if len(timestamps_by_vad[l]) > 0:
-                for j, s in enumerate(timestamps_by_vad[l]):
+            if len(timestamps_by_vad) > 0:
+                for j, s in enumerate(timestamps_by_vad):
                     s = np.concatenate([[0.], s], axis=0)
                     segs = s + parent_starts[j]
                     starts_cur = segs[:-1]
@@ -3092,33 +3160,20 @@ class Datafile(object):
                     ends_cur = ends_cur[select]
                     starts.append(starts_cur)
                     ends.append(ends_cur)
-                    if states is not None:
-                        embeddings_cur.append(states_extracted[j][select])
 
                 starts = np.concatenate(starts, axis=0)
                 ends = np.concatenate(ends, axis=0)
 
-                if states is not None:
-                    embeddings_cur = np.concatenate(embeddings_cur, axis=0)
-                else:
-                    embeddings_cur = 0
+                # Get segment labels for classification eval
+                if phn_labels is not None:
+                    phn_lab = phn_labels[np.where(segmentations[l])]
+                if wrd_labels is not None:
+                    wrd_lab = wrd_labels[np.where(segmentations[l])]
 
-                if add_phn_labels:
-                    phn_labels_extracted = get_labels_by_timestamp(
-                        ends,
-                        self.phn_segments.start,
-                        self.phn_segments.end,
-                        self.phn_segments.label,
-                    )
+                # Get segment embeddings for classification eval
+                embeddings = states[l][np.where(segmentations[l])]
 
-                if add_wrd_labels is not None:
-                    wrd_labels_extracted = get_labels_by_timestamp(
-                        ends,
-                        self.wrd_segments.start,
-                        self.wrd_segments.end,
-                        self.wrd_segments.label,
-                    )
-
+                # Construct data table
                 df = {
                     'start': starts,
                     'end': ends
@@ -3130,19 +3185,19 @@ class Datafile(object):
                     threshold = 0.5
                 else:
                     threshold = 0.0
-                label = (embeddings_cur > threshold).astype('int')
+                label = (embeddings > threshold).astype('int')
                 label = binary_to_string_np(label)
 
                 df['label'] = label
-                if add_phn_labels:
-                    df['phn_label'] = phn_labels_extracted
+                if phn_labels is not None:
+                    df['phn_label'] = phn_lab
                     columns.append('phn_label')
-                if add_wrd_labels:
-                    df['wrd_label'] = wrd_labels_extracted
+                if wrd_labels is not None:
+                    df['wrd_label'] = wrd_lab
                     columns.append('wrd_label')
 
-                for j in range(embeddings_cur.shape[1]):
-                    df['d%s' % j] = embeddings_cur[:, j]
+                for j in range(embeddings.shape[1]):
+                    df['d%s' % j] = embeddings[:, j]
                     columns.append('d%s' % j)
 
                 df['fileID'] = self.ID
@@ -3151,9 +3206,9 @@ class Datafile(object):
                 df = pd.DataFrame(df, columns=columns)
             else:
                 columns = ['fileID', 'speaker', 'start', 'end', 'label']
-                if add_phn_labels:
+                if phn_labels:
                     columns.append('phn_label')
-                if add_wrd_labels:
+                if wrd_labels:
                     columns.append('wrd_label')
                 df = pd.DataFrame(columns=columns)
 
@@ -3357,7 +3412,7 @@ class AcousticDatafile(Datafile):
             self.vad_path = vad_path
             self.vad_segments = pd.read_csv(self.vad_path, sep=' ')
             self.vad_segments.speaker = self.vad_segments.speaker.astype('str')
-            self.vad_segments.sort_values('start', inplace=True)
+            self.vad_segments.sort_values('end', inplace=True)
             self.vad_segments['label'] = 0
             if self.speaker is None and 'speaker' in self.vad_segments.columns:
                 self.speaker = self.vad_segments.speaker.iloc[0]
@@ -3379,7 +3434,7 @@ class AcousticDatafile(Datafile):
             self.phn_path = phn_path
             self.phn_segments = pd.read_csv(self.phn_path, sep=' ')
             self.phn_segments.speaker = self.phn_segments.speaker.astype('str')
-            self.phn_segments.sort_values('start', inplace=True)
+            self.phn_segments.sort_values('end', inplace=True)
             if self.speaker is None and 'speaker' in self.phn_segments.columns:
                 self.speaker = self.phn_segments.speaker.iloc[0]
         else:
@@ -3403,7 +3458,7 @@ class AcousticDatafile(Datafile):
             self.wrd_path = wrd_path
             self.wrd_segments = pd.read_csv(self.wrd_path, sep=' ')
             self.wrd_segments.speaker = self.wrd_segments.speaker.astype('str')
-            self.wrd_segments.sort_values('start', inplace=True)
+            self.wrd_segments.sort_values('end', inplace=True)
             if self.speaker is None and 'speaker' in self.wrd_segments.columns:
                 self.speaker = self.wrd_segments.speaker.iloc[0]
         else:
@@ -3630,14 +3685,14 @@ class TextDatafile(Datafile):
         return out
 
     def segmentations_to_string(self, segments, parent_segments=None):
-        segment_ends = self.one_hot_boundaries(segments=segments)
+        bounds, _ = self.timecourses(segments=segments)
         if parent_segments is not None:
             utts, _, _ = self.segment_and_stack(
                 segments=parent_segments,
                 padding=None,
             )
             bounds, _, _ = self.segment_and_stack(
-                features=segment_ends,
+                features=bounds,
                 boundaries_as_features=True,
                 segments=parent_segments,
                 padding=None,

@@ -3757,11 +3757,24 @@ class DNNSeg(object):
                         # Lists are ragged shape [N_LAYERS, N_FILES, N_TIMESTEPS]
                         segmentations = [[] for _ in range(n_layers)]
                         states = [[] for _ in range(n_layers)]
+                        phn_boundaries = []
+                        phn_labels = []
+                        wrd_boundaries = []
+                        wrd_labels = []
 
                         for i, file in enumerate(data_feed):
                             X_batch = file['X']
                             fixed_boundaries_batch = file['fixed_boundaries']
-                            oracle_boundaries_batch = file['oracle_boundaries']
+                            phn_boundaries_batch = np.squeeze(file['phn_boundaries'])
+                            phn_boundaries.append(phn_boundaries_batch)
+                            phn_labels_batch = np.squeeze(file['phn_labels'])
+                            phn_labels.append(phn_labels_batch)
+                            wrd_boundaries_batch = np.squeeze(file['wrd_boundaries'])
+                            wrd_boundaries.append(wrd_boundaries_batch)
+                            wrd_labels_batch = np.squeeze(file['wrd_labels'])
+                            wrd_labels.append(wrd_labels_batch)
+                            if self.oracle_boundaries:
+                                oracle_boundaries_batch = file[self.oracle_boundaries + '_boundaries']
                             speaker_batch = file['speaker']
 
                             fd_minibatch = {
@@ -3769,7 +3782,7 @@ class DNNSeg(object):
                                 self.fixed_boundaries_placeholder: fixed_boundaries_batch,
                                 self.training: False
                             }
-                            
+
                             if self.oracle_boundaries:
                                 fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
 
@@ -3788,8 +3801,8 @@ class DNNSeg(object):
                             )
 
                             for l in range(n_layers):
-                                states[l].append(states_cur[l][0])
-                                segmentations[l].append(segmentations_cur[l][0])
+                                states[l].append(np.squeeze(states_cur[l]))
+                                segmentations[l].append(np.squeeze(segmentations_cur[l]))
 
                             if verbose:
                                 pb.update(i+1, values=[])
@@ -3869,8 +3882,8 @@ class DNNSeg(object):
                         segmentations=segmentations,
                         parent_segment_type=segtype,
                         states=states,
-                        add_phn_labels=True,
-                        add_wrd_labels=True,
+                        phn_labels=phn_labels,
+                        wrd_labels=wrd_labels,
                         state_activation=state_activation,
                         smoothing_algorithm=smoothing_algorithm,
                         smoothing_algorithm_params=None,
@@ -3880,11 +3893,11 @@ class DNNSeg(object):
 
                     if self.data_type.lower() == 'acoustic':
                         phn_tables = data.get_segment_tables(
-                            timestamps='phn',
-                            parent_segment_type=segtype,
+                            segmentations=[phn_boundaries] * (self.layers_encoder - 1),
                             states=states,
-                            add_phn_labels=True,
-                            add_wrd_labels=False,
+                            phn_labels=phn_labels,
+                            wrd_labels=None,
+                            parent_segment_type=segtype,
                             state_activation=state_activation,
                             smoothing_algorithm=smoothing_algorithm,
                             smoothing_algorithm_params=None,
@@ -3903,11 +3916,11 @@ class DNNSeg(object):
                         phn_tables = None
 
                     wrd_tables = data.get_segment_tables(
-                        timestamps='wrd',
-                        parent_segment_type=segtype,
+                        segmentations=[wrd_boundaries] * (self.layers_encoder - 1),
                         states=states,
-                        add_phn_labels=False,
-                        add_wrd_labels=True,
+                        phn_labels=None,
+                        wrd_labels=wrd_labels,
+                        parent_segment_type=segtype,
                         state_activation=state_activation,
                         smoothing_algorithm=smoothing_algorithm,
                         smoothing_algorithm_params=None,
@@ -4108,19 +4121,12 @@ class DNNSeg(object):
             data_feed_train = data.get_data_feed(self.train_data_name, minibatch_size=self.minibatch_size, randomize=True)
             batch = next(data_feed_train)
 
-            if self.streaming:
-                X_batch = batch['X']
-                X_mask_batch = batch['X_mask']
-                speaker_batch = batch['speaker']
-                fixed_boundaries_batch = batch['fixed_boundaries']
-                oracle_boundaries_batch = batch['oracle_boundaries']
-
-            else:
-                X_batch = batch['X']
-                X_mask_batch = batch['X_mask']
-                speaker_batch = batch['speaker']
-                fixed_boundaries_batch = batch['fixed_boundaries']
-                oracle_boundaries_batch = batch['oracle_boundaries']
+            X_batch = batch['X']
+            X_mask_batch = batch['X_mask']
+            speaker_batch = batch['speaker']
+            fixed_boundaries_batch = batch['fixed_boundaries']
+            if self.oracle_boundaries:
+                oracle_boundaries_batch = batch[self.oracle_boundaries + '_boundaries']
 
             to_run = []
             to_run_names = []
@@ -4142,7 +4148,7 @@ class DNNSeg(object):
             elif fixed_boundaries_batch is not None:
                 feed_dict[self.fixed_boundaries_placeholder] = fixed_boundaries_batch
 
-            if oracle_boundaries_batch is not None:
+            if self.oracle_boundaries:
                 feed_dict[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
 
 
@@ -4372,7 +4378,6 @@ class DNNSeg(object):
                     resample_inputs=self.resample_inputs,
                     resample_targets_bwd=self.resample_targets_bwd,
                     resample_targets_fwd=self.resample_targets_fwd,
-                    oracle_boundaries=self.oracle_boundaries,
                     task=self.task,
                     data_type=self.data_type
             )
@@ -4525,7 +4530,8 @@ class DNNSeg(object):
                             y_fwd_mask_batch = batch['y_fwd_mask']
                             speaker_batch = batch['speaker']
                             fixed_boundaries_batch = batch['fixed_boundaries']
-                            oracle_boundaries_batch = batch['oracle_boundaries']
+                            if self.oracle_boundaries:
+                                oracle_boundaries_batch = batch[self.oracle_boundaries + '_boundaries']
 
                             if self.min_len:
                                 minibatch_num = self.global_batch_step.eval(self.sess)
@@ -4534,7 +4540,7 @@ class DNNSeg(object):
 
                                 X_batch = X_batch[:,start_ix:]
                                 X_mask_batch = X_mask_batch[:,start_ix:]
-                                if oracle_boundaries_batch is not None:
+                                if self.oracle_boundaries:
                                     oracle_boundaries_batch = oracle_boundaries_batch[:,start_ix:]
                                 if fixed_boundaries_batch is not None:
                                     fixed_boundaries_batch = fixed_boundaries_batch[:,start_ix:]
@@ -4546,8 +4552,9 @@ class DNNSeg(object):
                             y_bwd_batch = batch['y']
                             y_bwd_mask_batch = batch['y_mask']
                             speaker_batch = batch['speaker']
-                            oracle_boundaries_batch = batch['oracle_boundaries']
                             fixed_boundaries_batch = batch['fixed_boundaries']
+                            if self.oracle_boundaries:
+                                oracle_boundaries_batch = batch[self.oracle_boundaries + '_boundaries']
                             i_pb = i
 
                         fd_minibatch = {
@@ -4571,7 +4578,7 @@ class DNNSeg(object):
                                 fd_minibatch[self.correspondence_hidden_state_placeholders[l]] = segment_embeddings[l]
                                 fd_minibatch[self.correspondence_feature_placeholders[l]] = segment_spans[l]
 
-                        if oracle_boundaries_batch is not None:
+                        if self.oracle_boundaries:
                             fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
                         if fixed_boundaries_batch is not None:
                             fd_minibatch[self.fixed_boundaries_placeholder] = fixed_boundaries_batch
@@ -4824,7 +4831,8 @@ class DNNSeg(object):
             X_plot = batch['X']
             X_mask_plot = batch['X_mask']
             fixed_boundaries_plot = batch['fixed_boundaries']
-            oracle_boundaries_plot = batch['oracle_boundaries']
+            if self.oracle_boundaries:
+                oracle_boundaries_plot = batch[self.oracle_boundaries + '_boundaries']
             speaker_plot = batch['speaker']
             if self.predict_backward:
                 targs_bwd = batch['y_bwd']
@@ -4848,7 +4856,7 @@ class DNNSeg(object):
                 if fixed_boundaries_plot is not None:
                     fixed_boundaries_plot = fixed_boundaries_plot[:, start_ix:]
 
-                if oracle_boundaries_plot is not None:
+                if self.oracle_boundaries:
                     oracle_boundaries_plot = oracle_boundaries_plot[:, start_ix:]
 
         else:
@@ -4859,7 +4867,8 @@ class DNNSeg(object):
             targs_fwd = None
             speaker_plot = batch['speaker']
             fixed_boundaries_plot = None
-            oracle_boundaries_plot = batch['oracle_boundaries']
+            if self.oracle_boundaries:
+                oracle_boundaries_plot = batch[self.oracle_boundaries + '_boundaries']
             ix = batch['indices']
 
         with self.sess.as_default():
@@ -4932,7 +4941,7 @@ class DNNSeg(object):
                     if fixed_boundaries_plot is not None:
                         fd_minibatch[self.fixed_boundaries_placeholder] = fixed_boundaries_plot
 
-                    if oracle_boundaries_plot is not None:
+                    if self.oracle_boundaries:
                         fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_plot
 
                     if self.streaming:

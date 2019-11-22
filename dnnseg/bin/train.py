@@ -131,7 +131,6 @@ if __name__ == '__main__':
         resample_inputs=p['resample_inputs'],
         resample_targets_bwd=p['resample_targets_bwd'],
         resample_targets_fwd=p['resample_targets_fwd'],
-        oracle_boundaries=p['oracle_boundaries'],
         task=p['task'],
         data_type=p['data_type']
     )
@@ -149,62 +148,90 @@ if __name__ == '__main__':
             for l in range(layers_encoder - 1):
                 segmentations_cur = [(np.random.random((1, f.shape[1])) > 0.8).astype(float) for _ in
                                      range(layers_encoder - 1)]
-                states_cur = [(np.random.random((1, f.shape[1], 2)) > 0.5).astype(float) for _ in
+                states_cur = [(np.random.random((1, f.shape[1], 7)) > 0.5).astype(float) for _ in
                               range(layers_encoder - 1)]
                 splits_cur = np.where(np.concatenate([np.zeros((1,)), s[0, :-1]]))[0]
 
                 segmentations[l].append(segmentations_cur[l][0])
                 states[l].append(states_cur[l][0])
 
-        segmentations = [data.cache['files']['oracle_boundaries']] * (layers_encoder - 1)
-        print(segmentations)
-        input()
+        segmentations = [[np.squeeze(x) for x in data.cache['files']['phn_boundaries']]] * (layers_encoder - 1)
 
-        pred_table = data.get_segment_tables(
+        data_feed = data.get_data_feed('files', minibatch_size=128, randomize=False)
+        phn_boundaries = []
+        phn_labels = []
+        wrd_boundaries = []
+        wrd_labels = []
+
+        for file in data_feed:
+            X_batch = file['X']
+            fixed_boundaries_batch = file['fixed_boundaries']
+            phn_boundaries_batch = np.squeeze(file['phn_boundaries'])
+            phn_boundaries.append(phn_boundaries_batch)
+            phn_labels_batch = np.squeeze(file['phn_labels'])
+            phn_labels.append(phn_labels_batch)
+            wrd_boundaries_batch = np.squeeze(file['wrd_boundaries'])
+            wrd_boundaries.append(wrd_boundaries_batch)
+            wrd_labels_batch = np.squeeze(file['wrd_labels'])
+            wrd_labels.append(wrd_labels_batch)
+
+        pred_tables = data.get_segment_tables(
             segmentations=segmentations,
             parent_segment_type='vad',
             states=states,
-            add_phn_labels=True,
-            add_wrd_labels=True,
+            phn_labels=phn_labels,
+            wrd_labels=wrd_labels,
             state_activation='sigmoid',
             smoothing_algorithm=None,
             smoothing_algorithm_params=None,
             n_points=None,
-            padding='pre'
+            padding=None
         )
 
-        phn_table = data.get_segment_tables(
-            timestamps='phn',
-            parent_segment_type='vad',
+        phn_tables = data.get_segment_tables(
+            segmentations=[phn_boundaries] * (layers_encoder - 1),
             states=states,
-            add_phn_labels=True,
-            add_wrd_labels=False,
-            state_activation='sigmoid',
-            smoothing_algorithm=None,
-            smoothing_algorithm_params=None,
-            n_points=None,
-            padding='pre'
-        )
-
-        wrd_table = data.get_segment_tables(
-            timestamps='wrd',
+            phn_labels=phn_labels,
+            wrd_labels=None,
             parent_segment_type='vad',
-            states=states,
-            add_phn_labels=False,
-            add_wrd_labels=True,
             state_activation='sigmoid',
             smoothing_algorithm=None,
             smoothing_algorithm_params=None,
             n_points=None,
-            padding='pre'
+            padding=None
         )
 
-        print(pred_table[0].head())
-        input()
-        print(phn_table[0].head())
-        input()
-        print(wrd_table[0].head())
-        input()
+        wrd_tables = data.get_segment_tables(
+            segmentations=[wrd_boundaries] * (layers_encoder - 1),
+            states=states,
+            phn_labels=None,
+            wrd_labels=wrd_labels,
+            parent_segment_type='vad',
+            state_activation='sigmoid',
+            smoothing_algorithm=None,
+            smoothing_algorithm_params=None,
+            n_points=None,
+            padding=None
+        )
+
+        pred_tables[l].to_csv(
+            p['outdir'] + '/embeddings_pred_segs_l%d.csv' % l,
+            sep=' ',
+            index=False
+        )
+        phn_tables[l].to_csv(
+            p['outdir'] + '/embeddings_gold_phn_segs_l%d.csv' % l,
+            sep=' ',
+            index=False
+        )
+        wrd_tables[l].to_csv(
+            p['outdir'] + '/embeddings_gold_wrd_segs_l%d.csv' % l,
+            sep=' ',
+            index=False
+        )
+
+        exit()
+
 
     stderr('Initializing DNNSeg...\n\n')
 
