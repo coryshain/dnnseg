@@ -2820,37 +2820,53 @@ class Datafile(object):
         if mask is not None:
             data = data[mask]
         if reduction_axis.lower() == 'time':
-            return np.linalg.norm(data, ord=order, axis=0, keepdims=True)
-        if reduction_axis.lower() == 'freq':
-            return np.linalg.norm(data, ord=order, axis=1, keepdims=True)
-        if reduction_axis.lower() == 'both':
-            return np.linalg.norm(data, ord=order, axis=None, keepdims=True)
-        return np.linalg.norm(data, ord=order, axis=reduction_axis, keepdims=True)
+            out = np.linalg.norm(data, ord=order, axis=0, keepdims=True)
+        elif reduction_axis.lower() == 'freq':
+            out = np.linalg.norm(data, ord=order, axis=1, keepdims=True)
+        elif reduction_axis.lower() == 'both':
+            out = np.linalg.norm(data, ord=order, axis=None, keepdims=True)
+        else:
+            out = np.linalg.norm(data, ord=order, axis=reduction_axis, keepdims=True)
+            
+        return out
 
     def normalization_shift(self, normalization, reduction_axis, mask=None):
         if isinstance(mask, str):
             mask = self.segments_to_mask(self.segments(mask))
-        
+
+        data = self.data()
+        if mask is not None:
+            data = data[mask]
+
         if reduction_axis.lower() == 'time':
             shape = (1, self.data().shape[1])
         elif reduction_axis.lower() == 'freq':
             shape = (self.data().shape[0], 1)
         else:
             shape = tuple()
+
         if not normalization:
             out = np.zeros(shape)
-        elif normalization.lower() in ['center', 'standardize']:
+        elif normalization.lower() in ['center', 'standardize'] or normalization.lower().endswith('center'):
             out = self.mean(reduction_axis, mask=mask)
         elif normalization.lower() == 'range':
             out = self.min(reduction_axis, mask=mask)
+        elif normalization.lower() == 'norm_and_standardize':
+            norm = np.linalg.norm(data, ord=2, axis=1, keepdims=True)
+            mean = (data / norm).mean()
+            out = norm * mean
         else:
             out = np.zeros(shape)
 
         return out
 
-    def normalization_scale(self, normalization, reduction_axis, mask=None, epsilon=1e-4, magnitude=1):
+    def normalization_scale(self, normalization, reduction_axis, mask=None, epsilon=None, magnitude=None):
         if isinstance(mask, str):
             mask = self.segments_to_mask(self.segments(mask))
+
+        data = self.data()
+        if mask is not None:
+            data = data[mask]
         
         if reduction_axis.lower() == 'time':
             shape = (1, self.data().shape[1])
@@ -2866,14 +2882,23 @@ class Datafile(object):
             out = self.range(reduction_axis, mask=mask)
         elif normalization.lower() == 'sum':
             out = self.sum(reduction_axis, mask=mask)
+        elif normalization.lower() == 'norm_and_standardize':
+            norm = np.linalg.norm(data, ord=2, axis=1, keepdims=True)
+            scale = (data / norm).std()
+            out = norm * scale
         else:
+            if normalization.endswith('center'):
+                normalization = normalization[:-6]
             try:
                 normalization = int(normalization)
             except Exception:
                 pass
             out = self.norm(reduction_axis, order=normalization, mask=mask)
 
-        out = (out + epsilon) / magnitude
+        if epsilon:
+            out += epsilon
+        if magnitude:
+            out /= magnitude
 
         return out
 
@@ -2969,6 +2994,8 @@ class Datafile(object):
         if features is None:
             feats = self.data()
             if normalization is not None:
+                if normalization.lower() == 'norm_and_standardize':
+                    assert reduction_axis.lower() == 'freq', 'norm_and_standardize requires reduction_axis to be ``freq``, saw %s.' % reduction_axis
                 if use_normalization_mask:
                     normalization_mask = segments
                 else:
