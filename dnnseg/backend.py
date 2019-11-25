@@ -1724,7 +1724,10 @@ class HMLSTMCell(LayerRNNCell):
                     h_prob_clean = (h_prob_clean + 1) / 2
 
                     # Discrete states in {0,1}
-                    h_discrete = self._state_discretizer(h_prob) * 2 - 1
+                    if self._state_discretizer:
+                        h_discrete = self._state_discretizer(h_prob) * 2 - 1
+                    else:
+                        h_discrete = round_straight_through(h_prob_clean, session=self._session) * 2 - 1
                     h_discrete_clean = round_straight_through(h_prob_clean, session=self._session) * 2 - 1
 
                     if l < (self._num_layers - 1 + self._discretize_final) and self._state_discretizer:
