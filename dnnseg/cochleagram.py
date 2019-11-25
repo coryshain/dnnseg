@@ -24,28 +24,13 @@ def wav_to_cochleagram(path, sr=16000, offset=10, low_lim=50, hi_lim=None, sampl
     n_pcm = len(wav)
     downsample = int(1000 / offset)
     mod = int(sr / downsample)
-    excess = (n_pcm - 1) % mod
+    excess = (n_pcm) % mod
     if excess > 0:
         pad_len = mod - excess
     else:
         pad_len = 0
     if pad_len > 0:
         wav = np.pad(wav, ((0, pad_len),), 'constant')
-
-    print(path)
-    print(sr)
-    print(offset)
-    print(low_lim)
-    print(hi_lim)
-    print(sample_factor)
-    print(n_coef)
-    print(order)
-    print('---')
-    print(n_pcm)
-    print(excess)
-    print(pad_len)
-    print(len(wav))
-    input()
 
     if hi_lim is None:
         hi_lim = min(int(sr/2), 20000)
