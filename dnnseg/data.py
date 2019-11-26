@@ -110,7 +110,7 @@ def extract_segment_timestamps(
         if len(seg_ix) > 0:
             timestamps = (seg_ix + 1) * seconds_per_step
         else:
-            timestamps = np.array([max_len])
+            timestamps = np.zeros((0,))
 
     else:
         raise ValueError('Smoothing algorithm %s not supported at this time' %algorithm)
@@ -772,11 +772,9 @@ def extract_matching_segment_embeddings(true, pred, tol=0.02):
 
         out['gold_label'] = out.label
     else:
-        out = true[np.zeros(len(true))].reset_index(drop=True)
-        for c in range(len(embedding_columns)):
-            out[embedding_columns[c]] = np.zeros((0,))
-        out['predStart'] = np.zeros((0,))
-        out['predEnd'] = np.zeros((0,))
+        columns = list(true.columns)
+        columns += embedding_columns + ['predStart', 'predEnd']
+        out = pd.DataFrame(columns=columns)
 
     return out
 
@@ -3138,12 +3136,7 @@ class Datafile(object):
         n_layers = len(segmentations)
 
         if fixed_boundaries is not None:
-            splits = np.where(
-                np.concatenate([
-                    np.zeros((1,)),
-                    fixed_boundaries[0, :-1]
-                ])
-            )[0]
+            splits = np.where(fixed_boundaries[0])[0] + 1
         else:
             splits = None
 
@@ -3157,6 +3150,8 @@ class Datafile(object):
                     segmentations_cur,
                     splits
                 )
+                if len(segmentations_cur) > 0 and len(segmentations_cur[-1]) == 0:
+                    segmentations_cur = segmentations_cur[:-1]
 
             if len(segmentations_cur) > 0:
                 timestamps_by_vad = extract_segment_timestamps_batch(
@@ -3175,18 +3170,17 @@ class Datafile(object):
 
             if len(timestamps_by_vad) > 0:
                 for j, s in enumerate(timestamps_by_vad):
-                    s = np.concatenate([[0.], s], axis=0)
-                    segs = s + parent_starts[j]
-                    starts_cur = segs[:-1]
-                    ends_cur = segs[1:]
-                    if snap_ends:
-                        ends_cur[-1] = parent_ends[j]
-                    select = ends_cur > starts_cur
+                    if len(s) > 0:
+                        s = np.concatenate([[0.], s], axis=0)
+                        segs = s + parent_starts[j]
+                        starts_cur = segs[:-1]
+                        ends_cur = segs[1:]
+                        if snap_ends:
+                            ends_cur[-1] = parent_ends[j]
+                        assert np.all(ends_cur >= starts_cur), 'Ends should be no earlier than starts. Saw respective start and end vectors:\n%s\n%s\n' % (starts_cur, ends_cur)
 
-                    starts_cur = starts_cur[select]
-                    ends_cur = ends_cur[select]
-                    starts.append(starts_cur)
-                    ends.append(ends_cur)
+                        starts.append(starts_cur)
+                        ends.append(ends_cur)
 
                 starts = np.concatenate(starts, axis=0)
                 ends = np.concatenate(ends, axis=0)

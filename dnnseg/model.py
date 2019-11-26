@@ -302,7 +302,9 @@ class DNNSeg(object):
         self.label_map = None
         if self.label_map_file:
             if os.path.exists(self.label_map_file):
-                self.label_map = pd.read_csv(self.label_map_file)
+                label_map = pd.read_csv(self.label_map_file)
+                label_map = dict(zip(label_map.source, label_map.target))
+                self.label_map = label_map
             else:
                 stderr('Label map file %s does not exist. Label mapping will not be used.' %self.label_map_file)
                 
