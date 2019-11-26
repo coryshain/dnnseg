@@ -48,7 +48,7 @@ def compute_hypercube(yml):
         name = []
         for y in x:
             new += y[2:]
-            name.append(''.join(y[:2]))
+            name.append(''.join([str(n) for n in y[:2]]))
         new = dict(new)
         name = '_'.join(name)
 
