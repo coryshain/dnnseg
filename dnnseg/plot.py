@@ -36,9 +36,6 @@ def plot_acoustic_features(
     if titles is None:
         titles = [None] * inputs.shape[0]
 
-    if label_map is not None:
-        label_map = dict(zip(label_map.source,label_map.target))
-
     compute_keys = plot_keys is None
 
     # Add plot labels if plots are provided as lists

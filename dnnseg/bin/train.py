@@ -4,6 +4,7 @@ import shutil
 import time
 import pickle
 import numpy as np
+import pandas as pd
 import argparse
 
 sys.setrecursionlimit(2000)
@@ -199,6 +200,17 @@ if __name__ == '__main__':
             smoothing_algorithm_params=None,
             n_points=None,
             padding=None
+        )
+
+        if os.path.exists(p['feature_map_file']):
+            feature_map = pd.read_csv(p['feature_map_file'])
+        if os.path.exists(p['label_map_file']):
+            label_map = pd.read_csv(p['label_map_file'])
+
+        matched_phn = data.extract_matching_segment_embeddings(
+            'phn',
+            pred_tables[0],
+            tol=0.02
         )
 
         wrd_tables = data.get_segment_tables(
