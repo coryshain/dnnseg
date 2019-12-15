@@ -156,7 +156,7 @@ if __name__ == '__main__':
                 segmentations[l].append(segmentations_cur[l][0])
                 states[l].append(states_cur[l][0])
 
-        segmentations = [[np.squeeze(x) for x in data.cache['files']['phn_boundaries']]] * (layers_encoder - 1)
+        # segmentations = [[np.squeeze(x) for x in data.cache['files']['phn_boundaries']]] * (layers_encoder - 1)
 
         data_feed = data.get_data_feed('files', minibatch_size=128, randomize=False)
         phn_boundaries = []

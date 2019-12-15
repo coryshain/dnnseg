@@ -302,11 +302,17 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Concatenate speaker embedding to inputs to encoder. Ignored if **speaker_emb_dim** is ``None`` or ``0``."
     ),
     Kwarg(
-        'speaker_adversarial_loss_scale',
+        'append_speaker_emb_to_decoder_inputs',
+        False,
+        bool,
+        "Concatenate speaker embedding to inputs to decoder. Ignored if **speaker_emb_dim** is ``None`` or ``0``."
+    ),
+    Kwarg(
+        'speaker_adversarial_gradient_scale',
         None,
         [float, None],
         "Scale of adversarial loss for residualizing speaker information out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no speaker adversarial training.",
-        aliases=['adversarial_loss_scale']
+        aliases=['adversarial_gradient_scale']
     ),
     Kwarg(
         'speaker_revnet_n_layers',
@@ -345,11 +351,11 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of passthru neurons to apply at the first layer of the encoder. Passthru neurons are dimensions of the underlying hidden state that get passed directly to the decoder without discretization or other constraints, and are adversarially regressed out of the rest of the hidden state. If ``None`` or ``0``, no passthru used."
     ),
     Kwarg(
-        'passthru_adversarial_loss_scale',
+        'passthru_adversarial_gradient_scale',
         None,
         [float, None],
         "Scale of adversarial loss for residualizing contents of passthru neurons out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no passthru adversarial training.",
-        aliases=['adversarial_loss_scale']
+        aliases=['adversarial_gradient_scale']
     ),
     Kwarg(
         'emb_dim',
@@ -430,6 +436,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Whether to backprop into weight mask on losses (matters in ``masked_neighbor`` setting for LM loss)."
+    ),
+    Kwarg(
+        'round_loss_weights',
+        False,
+        bool,
+        "Whether to round (discretize) loss weights to {0,1}."
     ),
     Kwarg(
         'xent_state_predictions',
@@ -614,13 +626,25 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'n_units_encoder',
         None,
         [int, str, None],
-        "Number of units to use in non-final encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
+        "Number of units to use in layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** space-delimited integers, one for each layer in order from bottom to top. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
+    ),
+    Kwarg(
+        'n_features_encoder',
+        None,
+        [str, None],
+        "Number of features to use in encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** space-delimited integers, one for each layer in order from bottom to top. If ``None``, encoder units will be used directly as features without transformation. Ignored unless the encoder is an HM-LSTM."
     ),
     Kwarg(
         'hmlstm_kernel_depth',
         1,
         int,
         "Depth of deep kernel in HM-LSTM transition model."
+    ),
+    Kwarg(
+        'hmlstm_featurizer_kernel_depth',
+        1,
+        int,
+        "Depth of deep kernel in HM-LSTM featurizer."
     ),
     Kwarg(
         'hmlstm_prefinal_mode',
@@ -702,16 +726,30 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to force segmentation probabilities to 1 at the ends of VAD regions."
     ),
     Kwarg(
-        'n_boundary_neurons',
+        'neurons_per_boundary',
         1,
         int,
         "Number of boundary neurons to use in segmenter."
     ),
     Kwarg(
+        'feature_neuron_agg_fn',
+        'logsumexp',
+        str,
+        "Name of aggregation function to use over feature neurons when **n_feature_neurons** > 1.",
+        aliases=['neuron_agg_fn']
+    ),
+    Kwarg(
+        'neurons_per_feature',
+        1,
+        int,
+        "Number of per-feature neurons to use in encoder."
+    ),
+    Kwarg(
         'boundary_neuron_agg_fn',
         'logsumexp',
         str,
-        "Name of aggregation function to use over boundary neurons when **n_boundary_neurons** > 1."
+        "Name of aggregation function to use over boundary neurons when **n_boundary_neurons** > 1.",
+        aliases=['neuron_agg_fn']
     ),
     Kwarg(
         'recurrent_at_forget',
@@ -926,6 +964,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [float, None],
         "Standard deviation of Gaussian 'whiteout' noise to inject into the pre-gated encoder outputs."
+    ),
+    Kwarg(
+        'encoder_feature_noise_sd',
+        None,
+        [float, None],
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder feature pre-activations."
     ),
     Kwarg(
         'boundary_rate_extremeness_regularizer_scale',

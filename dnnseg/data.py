@@ -7,10 +7,14 @@ import numpy as np
 import scipy.signal
 import pandas as pd
 from scipy.interpolate import Rbf
+from scipy import spatial
 from sklearn.manifold import LocallyLinearEmbedding, MDS, SpectralEmbedding, TSNE
 from sklearn.decomposition import PCA
 
 from .util import stderr
+
+
+is_embedding_dimension = re.compile('d([0-9]+)')
 
 
 def binary_to_integer_np(b, int_type='int32'):
@@ -322,8 +326,6 @@ def timestamps_to_timestamps_by_vad(time, s_vad, e_vad):
         out.append(np.array(out_cur))
 
     return out
-
-
 
 
 def binary_segments_to_intervals_inner(binary_segments, mask, src_segments=None, labels=None, seconds_per_step=0.01):
@@ -808,6 +810,77 @@ def project_matching_segments(df, method='tsne'):
     df['projection2'] = projections[:, 1]
 
     return df
+
+
+def compute_class_similarity(table, class_column_name='phn_label'):
+    embedding_cols = [x for x in table.columns if is_embedding_dimension.match(x)]
+    gb = {x:y[embedding_cols] for x, y in table.groupby(class_column_name)}
+    classes = sorted(list(gb.keys()))
+    min_val = 0
+    max_val = len(embedding_cols)
+
+    scores = np.zeros((len(classes), len(classes)))
+
+    for i in range(len(classes)):
+        for j in range(i, len(classes)):
+            # num = np.dot(
+            #     gb[classes[i]].values,
+            #     gb[classes[j]].values.T
+            # )
+            # denom = np.dot(
+            #     np.linalg.norm(gb[classes[i]].values, axis=-1, keepdims=True),
+            #     np.linalg.norm(gb[classes[j]].values, axis=-1, keepdims=True).T
+            # )
+            
+            # sim = np.clip(-0.99999999, 0.99999999, num / np.maximum(denom, 1e-5))
+            # sim = np.arctanh(sim)
+            # n_cells = np.prod(sim.shape)
+            # if i == j:
+            #     np.fill_diagonal(sim, 0.)
+            #     n_cells -= sim.shape[0]
+            # mu = sim.sum() / n_cells
+            # mu = np.tanh(mu)
+
+            # sim = num / np.maximum(denom, 1e-5)
+            
+            sim = spatial.distance.cdist(gb[classes[i]].values, gb[classes[j]].values, metric='cityblock')
+            
+            n_cells = np.prod(sim.shape)
+            if i == j:
+                np.fill_diagonal(sim, 0.)
+                n_cells -= sim.shape[0]
+            sim = (max_val - sim) / max_val
+            mu = sim.sum() / n_cells
+
+            score = mu
+
+            # print(sim.shape)
+            # print(sim.max())
+            # print(sim.min())
+            # print(fisher_z.max())
+            # print(fisher_z.min())
+            # print(mu_z)
+            # print(mu)
+            # print((num / np.maximum(denom, 1e-5)).mean())
+            # input()
+
+            # fp = np.dot(gb[classes[i]].values, 1 - gb[classes[j]].values.T).sum()
+            # fn = np.dot(1 - gb[classes[i]].values, gb[classes[j]].values.T).sum()
+            #
+            # p = tp / max(tp + fp, 1e-5)
+            # r = tp / max(tp + fn, 1e-5)
+            #
+            # f = 2 * p * r / max(p + r, 1e-5)
+            # score = f
+
+            scores[i, j] = score
+            scores[j, i] = score
+
+    classes = [x + '   ' for x in classes]
+
+    scores = pd.DataFrame(scores, index=classes, columns=classes)
+
+    return scores
 
 
 def precision_recall(n_matched, n_true, n_pred):
@@ -3177,7 +3250,7 @@ class Datafile(object):
                         ends_cur = segs[1:]
                         if snap_ends:
                             ends_cur[-1] = parent_ends[j]
-                        assert np.all(ends_cur >= starts_cur), 'Ends should be no earlier than starts. Saw respective start and end vectors:\n%s\n%s\n' % (starts_cur, ends_cur)
+                        assert np.all(ends_cur - starts_cur >= -1e-5), 'Ends should be no earlier than starts. Saw respective start and end vectors:\n%s\n%s\n' % (starts_cur, ends_cur)
 
                         starts.append(starts_cur)
                         ends.append(ends_cur)

@@ -1,5 +1,8 @@
 import sys
+import re
 import numpy as np
+import scipy.cluster.hierarchy as spc
+from scipy import sparse
 import librosa
 import librosa.display
 import pandas as pd
@@ -9,6 +12,9 @@ from matplotlib import ticker, pyplot as plt
 import seaborn as sns
 from .data import extract_segment_timestamps
 from .util import stderr
+
+
+is_embedding_dimension = re.compile('d([0-9]+)')
 
 
 def plot_acoustic_features(
@@ -315,21 +321,17 @@ def plot_label_histogram(labels, title=None, bins='auto', label_map=None, dir='.
 
     plt.close(fig)
 
-def plot_label_heatmap(labels, preds, title=None, label_map=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
-    if label_map is not None:
-        label_map = dict(zip(label_map.source,label_map.target))
 
+def plot_label_heatmap(seg_table, class_column_name='IPA', title=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
     fig = plt.figure()
     ax = fig.add_subplot(1, 1, 1)
+
+    labels = seg_table[class_column_name]
+    preds = seg_table.label
 
     df = pd.crosstab(labels, preds)
 
     df = pd.DataFrame(np.array(df) / np.array(df).sum(axis=0, keepdims=True), index=df.index, columns=df.columns)
-    if label_map is not None:
-        index = pd.Series(df.index).replace(label_map)
-    else:
-        index = df.index
-    df.index = index
     df.index.name = None
 
     fig.set_size_inches(1 + .5 * len(df.columns), .27 * len(df.index))
@@ -351,24 +353,13 @@ def plot_label_heatmap(labels, preds, title=None, label_map=None, cmap='Blues', 
 
     plt.close(fig)
 
-def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
-    if label_map is not None:
-        label_map = dict(zip(label_map.source,label_map.target))
 
-    df = {'label': labels}
-    for bit in range(label_probs.shape[1]):
-        df['%d' %bit] = label_probs[:,bit]
-
-    df = pd.DataFrame(df)
-    df = df[~df['label'].isin(['SPN', 'SIL'])]
-    df = df.groupby('label').mean()
-
-    if label_map is not None:
-        index = pd.Series(df.index).replace(label_map)
-    else:
-        index = df.index
-
-    df.index = index
+def plot_binary_unit_heatmap(seg_table, class_column_name='IPA', cmap='Blues', dir='./', prefix='', suffix='.png'):
+    embedding_cols = [x for x in seg_table.columns if is_embedding_dimension.match(x)]
+    df = seg_table[[class_column_name] + embedding_cols]
+    df[class_column_name] += '   '
+    # df = df[~df[class_column_name].isin(['SPN', 'SIL'])]
+    df = df.groupby(class_column_name, as_index=True).mean()
     df.index.name = None
 
     width = 1 + .3 * len(df.columns)
@@ -389,6 +380,52 @@ def plot_binary_unit_heatmap(labels, label_probs, title=None, label_map=None, cm
         stderr('IO error when saving plot. Skipping plotting...\n')
 
     plt.close('all')
+
+
+def plot_class_similarity(
+        similarity_matrix,
+        title=None,
+        cmap='Blues',
+        dir='./',
+        prefix='',
+        suffix='.png'
+):
+    width = .3 * len(similarity_matrix.columns)
+    height = .3 * len(similarity_matrix.index)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+
+    fig.set_size_inches(width, height)
+
+    # sparse_sim = sparse.csc_matrix(similarity_matrix.values)
+    # idx = sparse.csgraph.reverse_cuthill_mckee(sparse_sim, symmetric_mode=True)
+
+    pdist = spc.distance.pdist(similarity_matrix)
+    linkage = spc.linkage(pdist, method='single')
+    idx = spc.fcluster(linkage, 0.5 * pdist.max())
+
+    classes = list(similarity_matrix.columns)
+    classes = [classes[i] for i in list((np.argsort(idx)))]
+    similarity_matrix = similarity_matrix.reindex(classes, axis=0)
+    similarity_matrix = similarity_matrix.reindex(classes, axis=1)
+
+    ax.pcolormesh(similarity_matrix, cmap=cmap, vmin=0., vmax=1.)
+    ax.set_xticks(np.arange(0.5, len(similarity_matrix.columns), 1), minor=False)
+    ax.set_xticklabels(similarity_matrix.columns)
+    ax.set_yticks(np.arange(0.5, len(similarity_matrix.index), 1), minor=False)
+    ax.set_yticklabels(similarity_matrix.index)
+
+    if title is not None:
+        fig.suptitle(title)
+    # fig.tight_layout()
+
+    try:
+        fig.savefig(dir + '/' + prefix + 'confusion_matrix' + suffix)
+    except:
+        stderr('IO error when saving plot. Skipping plotting...\n')
+
+    plt.close(fig)
 
 
 def plot_projections(
