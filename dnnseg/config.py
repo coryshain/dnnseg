@@ -33,7 +33,7 @@ class Config(object):
             self.outdir = './dnnseg_model/'
         if not os.path.exists(self.outdir):
             os.makedirs(self.outdir)
-        if os.path.realpath(path) != os.path.realpath(self.outdir + '/config.ini'):
+        if not os.path.samefile(path, self.outdir + '/config.ini'):
             shutil.copy2(path, self.outdir + '/config.ini')
 
         # Process config settings

@@ -819,10 +819,18 @@ def compute_class_similarity(table, class_column_name='phn_label'):
     min_val = 0
     max_val = len(embedding_cols)
 
-    scores = np.zeros((len(classes), len(classes)))
+    valid = []
+    valid_names = []
 
     for i in range(len(classes)):
-        for j in range(i, len(classes)):
+        if len(gb[classes[i]].values) > 1:
+            valid.append(gb[classes[i]].values)
+            valid_names.append(classes[i])
+
+    scores = np.zeros((len(valid), len(valid)))
+
+    for i in range(len(valid)):
+        for j in range(i, len(valid)):
             # num = np.dot(
             #     gb[classes[i]].values,
             #     gb[classes[j]].values.T
@@ -843,7 +851,7 @@ def compute_class_similarity(table, class_column_name='phn_label'):
 
             # sim = num / np.maximum(denom, 1e-5)
             
-            sim = spatial.distance.cdist(gb[classes[i]].values, gb[classes[j]].values, metric='cityblock')
+            sim = spatial.distance.cdist(valid[i], valid[j], metric='cityblock')
             
             n_cells = np.prod(sim.shape)
             if i == j:
@@ -876,7 +884,7 @@ def compute_class_similarity(table, class_column_name='phn_label'):
             scores[i, j] = score
             scores[j, i] = score
 
-    classes = [x + '   ' for x in classes]
+    classes = [x + '   ' for x in valid_names]
 
     scores = pd.DataFrame(scores, index=classes, columns=classes)
 
