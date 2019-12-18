@@ -834,6 +834,8 @@ class HMLSTMCell(LayerRNNCell):
             boundary_neuron_agg_fn='logsumexp',
             neurons_per_feature=1,
             feature_neuron_agg_fn='logsumexp',
+            cumulative_boundary_prob=False,
+            forget_at_boundary=True,
             recurrent_at_forget=False,
             kernel_depth=2,
             featurizer_kernel_depth=2,
@@ -994,6 +996,8 @@ class HMLSTMCell(LayerRNNCell):
                     fn_agg_fn = getattr(tf, 'reduce_' + feature_neuron_agg_fn)
                 self._feature_neuron_agg_fn = fn_agg_fn
 
+                self._cumulative_boundary_prob = cumulative_boundary_prob
+                self._forget_at_boundary = forget_at_boundary
                 self._recurrent_at_forget = recurrent_at_forget
 
                 self._kernel_depth = kernel_depth
@@ -1604,14 +1608,20 @@ class HMLSTMCell(LayerRNNCell):
                     # z_behind: Previous boundary probability at current layer (implicitly 1 if final layer)
                     if l < self._num_layers - 1:
                         z_behind = layer.z
+                        z_prob_behind = layer.z_prob
                     else:
                         z_behind = None
+                        z_prob_behind = None
 
                     # Compute probability of update, copy, and flush operations operations.
                     if z_behind is None:
                         z_behind_cur = 0
                     else:
                         z_behind_cur = z_behind
+                    if z_prob_behind is None:
+                        z_prob_behind_cur = 0
+                    else:
+                        z_prob_behind_cur = z_prob_behind
 
                     if z_below is None:
                         z_below_cur = 1
@@ -1781,8 +1791,12 @@ class HMLSTMCell(LayerRNNCell):
 
                     # Merge cell operations. If boundaries are hard, selects between update, copy, and flush.
                     # If boundaries are soft, sums update copy and flush proportionally to their probs.
-                    c = update_prob * c_update + flush_prob * c_flush + copy_prob * c_copy
-                    c_clean = update_prob * c_update_clean + flush_prob * c_flush_clean + copy_prob * c_copy
+                    if self._forget_at_boundary:
+                        c = update_prob * c_update + flush_prob * c_flush + copy_prob * c_copy
+                        c_clean = update_prob * c_update_clean + flush_prob * c_flush_clean + copy_prob * c_copy
+                    else:
+                        c = z_below_cur * c_update + (1 - z_below_cur) * c_copy
+                        c_clean = z_below_cur * c_update_clean + (1 - z_below_cur) * c_copy
 
                     # Compute the gated output of non-copy cell state
                     h = c
@@ -1961,6 +1975,11 @@ class HMLSTMCell(LayerRNNCell):
                                 z_logit = self._boundary_neuron_agg_fn(z_logit, axis=-1, keepdims=True)
 
                             z_prob = self._boundary_activation(z_logit)
+
+                            if self._cumulative_boundary_prob:
+                                z_prob_prev = z_prob_behind_cur * (1 - z_behind_cur)
+                                z_prob_range = 1 - z_prob_prev
+                                z_prob = z_prob_prev + z_prob * z_prob_range
 
                             if self._oracle_boundary:
                                 z_prob = tf.maximum(z_prob, z_prob_oracle)
@@ -2163,6 +2182,8 @@ class HMLSTMSegmenter(object):
             boundary_neuron_agg_fn='logsumexp',
             neurons_per_feature=1,
             feature_neuron_agg_fn='logsumexp',
+            cumulative_boundary_prob=False,
+            forget_at_boundary=True,
             recurrent_at_forget=False,
             kernel_depth=2,
             featurizer_kernel_depth=2,
@@ -2260,6 +2281,8 @@ class HMLSTMSegmenter(object):
                 self.boundary_neuron_agg_fn = boundary_neuron_agg_fn
                 self.num_feature_neurons = neurons_per_feature
                 self.feature_neuron_agg_fn = feature_neuron_agg_fn
+                self.cumulative_boundary_prob = cumulative_boundary_prob
+                self.forget_at_boundary = forget_at_boundary
                 self.recurrent_at_forget = recurrent_at_forget
                 self.kernel_depth = kernel_depth
                 self.featurizer_kernel_depth = featurizer_kernel_depth
@@ -2360,6 +2383,8 @@ class HMLSTMSegmenter(object):
                     boundary_neuron_agg_fn=self.boundary_neuron_agg_fn,
                     neurons_per_feature=self.num_feature_neurons,
                     feature_neuron_agg_fn=self.feature_neuron_agg_fn,
+                    cumulative_boundary_prob=self.cumulative_boundary_prob,
+                    forget_at_boundary=self.forget_at_boundary,
                     recurrent_at_forget=self.recurrent_at_forget,
                     kernel_depth=self.kernel_depth,
                     featurizer_kernel_depth=self.featurizer_kernel_depth,

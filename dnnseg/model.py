@@ -842,6 +842,8 @@ class DNNSeg(object):
                         boundary_neuron_agg_fn=self.boundary_neuron_agg_fn,
                         neurons_per_feature=self.neurons_per_feature,
                         feature_neuron_agg_fn=self.feature_neuron_agg_fn,
+                        cumulative_boundary_prob=self.cumulative_boundary_prob,
+                        forget_at_boundary=self.forget_at_boundary,
                         recurrent_at_forget=self.recurrent_at_forget,
                         kernel_depth=self.hmlstm_kernel_depth,
                         featurizer_kernel_depth=self.hmlstm_featurizer_kernel_depth,

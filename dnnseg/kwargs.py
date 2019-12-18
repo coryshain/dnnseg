@@ -752,6 +752,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['neuron_agg_fn']
     ),
     Kwarg(
+        'cumulative_boundary_prob',
+        False,
+        bool,
+        "Whether to accumulate boundary probs over time (if not, full boundary prob is generated at each timestep)."
+    ),
+    Kwarg(
+        'forget_at_boundary',
+        True,
+        bool,
+        "Whether to flush the cell state at boundaries, as done in Chung et al 17."
+    ),
+    Kwarg(
         'recurrent_at_forget',
         True,
         bool,
