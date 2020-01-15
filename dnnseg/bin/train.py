@@ -2,7 +2,6 @@ import sys
 import os
 import shutil
 import time
-import pickle
 import numpy as np
 import pandas as pd
 import argparse
@@ -36,23 +35,19 @@ if __name__ == '__main__':
     else:
         data_name = 'data.obj'
 
-    if not args.preprocess and os.path.exists(p.train_data_dir + '/' + data_name):
-        stderr('Loading saved training data...\n')
-        sys.stderr.flush()
-        with open(p.train_data_dir + '/' + data_name, 'rb') as f:
-            train_data = pickle.load(f)
-    else:
-        train_data = Dataset(
-            p.train_data_dir,
-            datatype=p['data_type'].lower(),
-            filter_type=p['filter_type'].lower(),
-            n_coef=p['n_coef'],
-            order=p['order'],
-        )
-        if p.save_preprocessed_data:
-            stderr('Saving preprocessed training data...\n')
-            with open(p.train_data_dir + '/' + data_name, 'wb') as f:
-                pickle.dump(train_data, f, protocol=2)
+    preprocessed = True
+    train_data_dirs = p.train_data_dir.split()
+
+    data_dirs = p.train_data_dir.split(';')
+    train_data = Dataset(
+        data_dirs,
+        datatype=p['data_type'].lower(),
+        filter_type=p['filter_type'].lower(),
+        n_coef=p['n_coef'],
+        order=p['order'],
+        force_preprocess=args.preprocess,
+        save_preprocessed_data=p.save_preprocessed_data
+    )
     if p['oracle_boundaries'] and p['oracle_boundaries'].lower() == 'rnd':
         assert p['random_oracle_segmentation_rate'], 'random_oracle_segmentation_rate must be provided when oracle_boundaries=="rnd".'
         train_data.initialize_random_segmentation(p['random_oracle_segmentation_rate'])
@@ -63,28 +58,21 @@ if __name__ == '__main__':
     stderr('=' * 50 + '\n\n')
 
     if p.train_data_dir != p.val_data_dir:
-        if not args.preprocess and os.path.exists(p.val_data_dir + '/' + data_name):
-            stderr('Loading saved validation data...\n')
-            sys.stderr.flush()
-            with open(p.val_data_dir + '/' + data_name, 'rb') as f:
-                val_data = pickle.load(f)
-        else:
-            val_data = Dataset(
-                p.val_data_dir,
-                datatype=p['data_type'].lower(),
-                filter_type=p['filter_type'].lower(),
-                n_coef=p['n_coef'],
-                order=p['order'],
-            )
-            if p.save_preprocessed_data:
-                stderr('Saving preprocessed dev data...\n')
-                with open(p.val_data_dir + '/' + data_name, 'wb') as f:
-                    pickle.dump(val_data, f, protocol=2)
+        data_dirs = p.val_data_dir.split(';')
+        val_data = Dataset(
+            data_dirs,
+            datatype=p['data_type'].lower(),
+            filter_type=p['filter_type'].lower(),
+            n_coef=p['n_coef'],
+            order=p['order'],
+            force_preprocess=args.preprocess,
+            save_preprocessed_data=p.save_preprocessed_data
+        )
 
-            stderr('=' * 50 + '\n')
-            stderr('VALIDATION DATA SUMMARY\n\n')
-            stderr(val_data.summary(indent=2))
-            stderr('=' * 50 + '\n\n')
+        stderr('=' * 50 + '\n')
+        stderr('VALIDATION DATA SUMMARY\n\n')
+        stderr(val_data.summary(indent=2))
+        stderr('=' * 50 + '\n\n')
 
     else:
         val_data = None

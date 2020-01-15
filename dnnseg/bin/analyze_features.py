@@ -29,6 +29,7 @@ if __name__ == '__main__':
     argparser.add_argument('-n', '--n_estimators', type=int, default=100, help='Number of estimators (trees) in random forest.')
     argparser.add_argument('-f', '--n_folds', type=int, default=5, help='Number of folds in cross-validation (>= 2).')
     argparser.add_argument('-l', '--layers', default=None, nargs='+', help='IDs of layers to plot (0, ..., L). If unspecified, plots all available layers.')
+    argparser.add_argument('-b', '--compare_to_baseline', action='store_true', help='Whether to compute scores for a matched random baseline.')
     argparser.add_argument('-i', '--images', action='store_true', help='Dump representative images of decision trees.')
     argparser.add_argument('-v', '--verbose', action='store_true', help='Report progress to standard error.')
     args = argparser.parse_args()
@@ -106,9 +107,14 @@ if __name__ == '__main__':
 
                     if args.direction.lower() == 'pred2gold':
                         X = df[input_col_names] > 0.5
-                        X_baseline = np.random.random(X.shape) > 0.5
+                        if args.compare_to_baseline:
+                            base_rates = X.values.sum(axis=0, keepdims=True)
+                            X_baseline = np.random.random(X.shape) > base_rates
+                            inputs = [X, X_baseline]
+                        else:
+                            inputs = [X]
 
-                        for i, X_cur in enumerate([X, X_baseline]):
+                        for i, X_cur in enumerate(inputs):
                             if len(target_col_names_cur):
                                 for target_col in target_col_names_cur:
                                     perm, perm_inv = get_random_permutation(len(X))
@@ -218,100 +224,106 @@ if __name__ == '__main__':
 
                     elif args.direction.lower() == 'gold2pred':
                         X = df[target_col_names_cur] > 0.5
+                        y = df[input_col_names]
+                        if args.compare_to_baseline:
+                            base_rates = y.values.sum(axis=0, keepdims=True)
+                            y_baseline = np.random.random(y.shape) > base_rates
+                            targets = [y, y_baseline]
+                        else:
+                            targets = [y]
 
                         if len(input_col_names) > 0:
-                            for latent_dim in input_col_names:
-                                perm, perm_inv = get_random_permutation(len(X))
-                                fold_size = math.ceil(float(len(X)) / args.n_folds)
-                                y = df[latent_dim]
+                            for target in targets:
+                                for latent_dim in input_col_names:
+                                    perm, perm_inv = get_random_permutation(len(X))
+                                    fold_size = math.ceil(float(len(X)) / args.n_folds)
+                                    y_cur = target[latent_dim]
+                                    score = 0
+                                    predictions = []
+                                    gold = []
 
-                                score = 0
-                                predictions = []
-                                gold = []
+                                    for j in range(0, len(X), fold_size):
+                                        if args.classifier_type.lower() == 'random_forest':
+                                            classifier = RandomForestClassifier(
+                                                n_estimators=args.n_estimators,
+                                                criterion='entropy',
+                                                class_weight='balanced',
+                                                max_depth=args.max_depth,
+                                                min_impurity_decrease=args.min_impurity_decrease
+                                            )
+                                        elif args.classifier_type.lower() in ['mlr', 'logreg', 'logistic_regression']:
+                                            classifier = LogisticRegression(
+                                                class_weight='balanced',
+                                                C = args.regularization_scale,
+                                                solver='lbfgs',
+                                                multi_class='auto'
+                                            )
 
-                                for j in range(0, len(X), fold_size):
-                                    if args.classifier_type.lower() == 'random_forest':
-                                        classifier = RandomForestClassifier(
-                                            n_estimators=args.n_estimators,
-                                            criterion='entropy',
-                                            class_weight='balanced',
-                                            max_depth=args.max_depth,
-                                            min_impurity_decrease=args.min_impurity_decrease
+                                        train_select = np.zeros(len(X)).astype('bool')
+                                        train_select[j:j + fold_size] = True
+                                        train_select = train_select[perm_inv]
+
+                                        cv_select = np.ones(len(X)).astype('bool')
+                                        cv_select[j:j + fold_size] = False
+                                        cv_select = cv_select[perm_inv]
+
+                                        X_train = X[train_select]
+                                        y_train = y_cur[train_select]
+                                        X_cv = X[cv_select]
+                                        y_cv = y_cur[cv_select]
+
+                                        classifier.fit(X_train, y_train)
+                                        predictions.append(classifier.predict(X_cv))
+                                        gold.append(y_cv)
+
+                                    predictions = np.concatenate(predictions, axis=0)
+                                    gold = np.concatenate(gold, axis=0)
+                                    precision[latent_dim] = precision_score(gold, predictions)
+                                    recall[latent_dim] = recall_score(gold, predictions)
+                                    f1[latent_dim] = f1_score(gold, predictions)
+                                    accuracy[latent_dim] = accuracy_score(gold, predictions)
+
+                                    if args.verbose:
+                                        stderr('Cross-validation F1 for latent dimension "%s": %.4f\n' % (latent_dim, f1[latent_dim]))
+
+                                    if args.images:
+                                        tree_ix = np.random.randint(args.n_estimators)
+
+                                        graph = export_graphviz(
+                                            classifier[tree_ix],
+                                            feature_names=target_col_names,
+                                            class_names=['-%s' % latent_dim, '+%s' % latent_dim],
+                                            rounded=True,
+                                            proportion=False,
+                                            precision=2,
+                                            filled=True
                                         )
-                                    elif args.classifier_type.lower() in ['mlr', 'logreg', 'logistic_regression']:
-                                        classifier = LogisticRegression(
-                                            class_weight='balanced',
-                                            C = args.regularization_scale,
-                                            solver='lbfgs',
-                                            multi_class='auto'
-                                        )
 
-                                    train_select = np.zeros(len(X)).astype('bool')
-                                    train_select[j:j + fold_size] = True
-                                    train_select = train_select[perm_inv]
+                                        (graph,) = pydot.graph_from_dot_data(graph)
 
-                                    cv_select = np.ones(len(X)).astype('bool')
-                                    cv_select[j:j + fold_size] = False
-                                    cv_select = cv_select[perm_inv]
+                                        outfile = analysis_dir + analysis_dir + '/%s_decision_tree_%s.png' % (path[:-4], latent_dim)
+                                        graph.write_png(outfile)
 
-
-                                    X_train = X[train_select]
-                                    y_train = y[train_select]
-                                    X_cv = X[cv_select]
-                                    y_cv = y[cv_select]
-
-                                    classifier.fit(X_train, y_train)
-                                    predictions.append(classifier.predict(X_cv))
-                                    gold.append(y_cv)
-
-                                predictions = np.concatenate(predictions, axis=0)
-                                gold = np.concatenate(gold, axis=0)
-                                precision[latent_dim] = precision_score(gold, predictions)
-                                recall[latent_dim] = recall_score(gold, predictions)
-                                f1[latent_dim] = f1_score(gold, predictions)
-                                accuracy[latent_dim] = accuracy_score(gold, predictions)
+                                macro_avg = {
+                                    'precision': sum(precision[x] for x in precision) / sum(1 for _ in precision),
+                                    'recall': sum(recall[x] for x in recall) / sum(1 for _ in recall),
+                                    'f1': sum(f1[x] for x in f1) / sum(1 for _ in f1),
+                                    'accuracy': sum(accuracy[x] for x in accuracy) / sum(1 for _ in accuracy),
+                                }
 
                                 if args.verbose:
-                                    stderr('Cross-validation F1 for latent dimension "%s": %.4f\n' % (latent_dim, f1[latent_dim]))
+                                    stderr('Macro averages:\n')
+                                    stderr('  P:   %.4f\n' % macro_avg['precision'])
+                                    stderr('  R:   %.4f\n' % macro_avg['recall'])
+                                    stderr('  F1:  %.4f\n' % macro_avg['f1'])
+                                    stderr('  ACC: %.4f\n' % macro_avg['accuracy'])
 
-                                if args.images:
-                                    tree_ix = np.random.randint(args.n_estimators)
-
-                                    graph = export_graphviz(
-                                        classifier[tree_ix],
-                                        feature_names=target_col_names,
-                                        class_names=['-%s' % latent_dim, '+%s' % latent_dim],
-                                        rounded=True,
-                                        proportion=False,
-                                        precision=2,
-                                        filled=True
-                                    )
-
-                                    (graph,) = pydot.graph_from_dot_data(graph)
-
-                                    outfile = analysis_dir + analysis_dir + '/%s_decision_tree_%s.png' % (path[:-4], latent_dim)
-                                    graph.write_png(outfile)
-
-                            macro_avg = {
-                                'precision': sum(precision[x] for x in precision) / sum(1 for _ in precision),
-                                'recall': sum(recall[x] for x in recall) / sum(1 for _ in recall),
-                                'f1': sum(f1[x] for x in f1) / sum(1 for _ in f1),
-                                'accuracy': sum(accuracy[x] for x in accuracy) / sum(1 for _ in accuracy),
-                            }
-
-                            if args.verbose:
-                                stderr('Macro averages:\n')
-                                stderr('  P:   %.4f\n' % macro_avg['precision'])
-                                stderr('  R:   %.4f\n' % macro_avg['recall'])
-                                stderr('  F1:  %.4f\n' % macro_avg['f1'])
-                                stderr('  ACC: %.4f\n' % macro_avg['accuracy'])
-
-                            outfile = analysis_dir + '/%s_decision_tree_scores.txt' % path[:-4]
-                            with open(outfile, 'w') as f:
-                                f.write('feature precision recall f1 accuracy\n')
-                                for c in sorted(list(f1.keys())):
-                                    f.write('%s %s %s %s %s\n' % (c, precision[c], recall[c], f1[c], accuracy[c]))
-                                f.write('MACRO %s %s %s %s\n' % (macro_avg['precision'], macro_avg['recall'], macro_avg['f1'], macro_avg['accuracy']))
+                                outfile = analysis_dir + '/%s_decision_tree_scores.txt' % path[:-4]
+                                with open(outfile, 'w') as f:
+                                    f.write('feature precision recall f1 accuracy\n')
+                                    for c in sorted(list(f1.keys())):
+                                        f.write('%s %s %s %s %s\n' % (c, precision[c], recall[c], f1[c], accuracy[c]))
+                                    f.write('MACRO %s %s %s %s\n' % (macro_avg['precision'], macro_avg['recall'], macro_avg['f1'], macro_avg['accuracy']))
 
                     else:
                         raise ValueError('Direction parameter %s not recognized.' % args.direction)

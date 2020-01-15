@@ -17,6 +17,22 @@ from .util import stderr
 is_embedding_dimension = re.compile('d([0-9]+)')
 
 
+def get_cmap(i):
+    j = i % 6
+    if j == 0:
+        return 'Blues'
+    if j == 1:
+        return 'Greens'
+    if j == 2:
+        return 'Reds'
+    if j == 3:
+        return 'Purples'
+    if j == 4:
+        return 'Oranges'
+    if j == 5:
+        return 'Greys'
+
+
 def plot_acoustic_features(
         inputs,
         states=None,
@@ -25,12 +41,13 @@ def plot_acoustic_features(
         segmentations=None,
         targs=None,
         preds=None,
+        attn=None,
+        attn_keys=None,
         positional_encodings=None,
         plot_keys=None,
         sr=16000,
         hop_length=160,
         drop_zeros=False,
-        cmap='Blues',
         titles=None,
         label_map=None,
         directory='./',
@@ -57,6 +74,16 @@ def plot_acoustic_features(
             preds = {str(x):y for x, y in zip(range(len(preds)), preds)}
         if compute_keys:
             plot_keys = plot_keys.union(set(preds.keys()))
+    if attn is not None:
+        if isinstance(attn, list):
+            attn = {str(x):y for x, y in zip(range(len(attn)), attn)}
+        if compute_keys:
+            plot_keys = plot_keys.union(set(attn.keys()))
+    if attn_keys is not None:
+        if isinstance(attn_keys, list):
+            attn_keys = {str(x):y for x, y in zip(range(len(attn_keys)), attn_keys)}
+        if compute_keys:
+            plot_keys = plot_keys.union(set(attn_keys.keys()))
     if positional_encodings is not None:
         if isinstance(positional_encodings, list):
             positional_encodings = {str(x):y for x, y in zip(range(len(positional_encodings)), positional_encodings)}
@@ -89,6 +116,18 @@ def plot_acoustic_features(
     if preds is not None:
         i = 0
         for x in preds:
+            if x in plot_keys:
+                i += 1
+        n_plots += i
+    if attn is not None:
+        i = 0
+        for x in attn:
+            if x in plot_keys:
+                i += 1
+        n_plots += i
+    if attn_keys is not None:
+        i = 0
+        for x in attn_keys:
             if x in plot_keys:
                 i += 1
         n_plots += i
@@ -127,11 +166,17 @@ def plot_acoustic_features(
         if targs is not None and k in targs:
             axes['Targets ' + k] = axes_src[plot_ix]
             plot_ix += 1
-        if positional_encodings is not None and k in targs:
-            axes['Positional Encodings ' + k] = axes_src[plot_ix]
-            plot_ix += 1
-        if preds is not None and k in targs:
+        if preds is not None and k in preds:
             axes['Predictions ' + k] = axes_src[plot_ix]
+            plot_ix += 1
+        if attn is not None and k in attn:
+            axes['Top-Down Attention ' + k] = axes_src[plot_ix]
+            plot_ix += 1
+        if attn_keys is not None and k in attn_keys:
+            axes['Top-Down Attention Keys ' + k] = axes_src[plot_ix]
+            plot_ix += 1
+        if positional_encodings is not None and k in positional_encodings:
+            axes['Positional Encodings ' + k] = axes_src[plot_ix]
             plot_ix += 1
 
     for i in range(len(inputs)):
@@ -148,7 +193,7 @@ def plot_acoustic_features(
             hop_length=hop_length,
             fmax=8000,
             x_axis='time',
-            cmap=cmap,
+            cmap=get_cmap(0),
             ax=ax
         )
         ax.set_title('Inputs')
@@ -243,21 +288,24 @@ def plot_acoustic_features(
                     hop_length=hop_length,
                     fmax=8000,
                     x_axis='time',
-                    cmap=cmap,
+                    cmap=get_cmap(j + 1),
                     ax=ax
                 )
                 ax.set_title('Hidden States (%s)' %(j+1))
 
         for k in plot_keys:
-            for j, t in enumerate([targs, positional_encodings, preds]):
+            for j, t in enumerate([targs, preds, attn, attn_keys, positional_encodings]):
                 if t is not None and k in t:
-                    if j == 0:
-                        plot_name = 'Targets '
-                    elif j == 1:
-                        plot_name = 'Positional Encodings '
-                    else:
-                        plot_name = 'Predictions '
+                    plot_name = [
+                        'Targets ',
+                        'Predictions ',
+                        'Top-Down Attention ',
+                        'Top-Down Attention Keys ',
+                        'Positional Encodings ',
+                    ][j]
                     plot_name += k
+
+                    l = int(re.match('L([0-9]+)', k).group(1)) - 1
 
                     ax = axes[plot_name]
 
@@ -267,6 +315,11 @@ def plot_acoustic_features(
                         arr = arr[arr_select]
                     arr = np.swapaxes(arr, -2, -1)
 
+                    # print(i)
+                    # print(plot_name)
+                    # print(arr)
+                    # print()
+
                     if arr.shape[-1] > 0:
                         librosa.display.specshow(
                             arr,
@@ -274,7 +327,7 @@ def plot_acoustic_features(
                             hop_length=hop_length,
                             fmax=8000,
                             x_axis='time',
-                            cmap=cmap,
+                            cmap=get_cmap(l),
                             ax=ax
                         )
                     ax.set_title(plot_name)

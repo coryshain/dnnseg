@@ -458,6 +458,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of discovered segments to use to compute correspondence autoencoder auxiliary loss. If ``0`` or ``None``, do not use correpondence autoencoder."
     ),
     Kwarg(
+        'n_layers_correspondence_decoder',
+        2,
+        [int, None],
+        "Number of layers to use for correspondence decoder. If ``None``, inferred from length of **n_units_correspondence_decoder**."
+    ),
+    Kwarg(
+        'n_units_correspondence_decoder',
+        256,
+        [int, str, None],
+        "Number of units to use in correspondence decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_correspondence_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
+    ),
+    Kwarg(
         'resample_correspondence',
         25,
         int,
@@ -472,8 +484,14 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     Kwarg(
         'correspondence_loss_scale',
         None,
-        [float, None],
-        "Coefficient by which to scale correspondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
+        [float, str, None],
+        "Scale of layerwise encoder correspondence objective in the loss function. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no correspondence objective is used."
+    ),
+    Kwarg(
+        'correspondence_gradient_scale',
+        None,
+        [float, str, None],
+        "Scale of gradients by layer to layerwise encoder correspondence objective. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no correspondence objective is used."
     ),
     Kwarg(
         'correspondence_loss_implementation',
@@ -508,6 +526,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of layerwise encoder language modeling objective in the loss function. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
     ),
     Kwarg(
+        'lm_gradient_scale',
+        None,
+        [float, str, None],
+        "Scale of gradients by layer to layerwise encoder language modeling objective. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
+    ),
+    Kwarg(
+        'lm_target_gradient_scale',
+        None,
+        [float, str, None],
+        "Scale of gradients by layer to targets for layerwise encoder language modeling objective. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
+    ),
+    Kwarg(
         'lm_loss_type',
         'masked_neighbors',
         str,
@@ -536,6 +566,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Whether to condition LM predictions on upper layers."
+    ),
+    Kwarg(
+        'lm_decode_from_encoder_states',
+        False,
+        bool,
+        "Whether to decode from encoder hidden states. If ``False``, decode from encoder features/embeddings."
     ),
     Kwarg(
         'lm_boundaries_as_attn',
@@ -592,6 +628,30 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
 
     # Encoder
     Kwarg(
+        'n_layers_input_projection',
+        None,
+        [int, None],
+        "Number of layers to use for input projection. If ``None``, inferred from length of **n_units_input_projection**."
+    ),
+    Kwarg(
+        'n_units_input_projection',
+        None,
+        [int, str, None],
+        "Number of units to use in input projection layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_input_projection** space-delimited integers, one for each layer in order from bottom to top. If ``None`` no input projection."
+    ),
+    Kwarg(
+        'input_projection_activation_inner',
+        'elu',
+        [str, None],
+        "Activation function to use for internal layers of input projection."
+    ),
+    Kwarg(
+        'input_projection_activation',
+        None,
+        [str, None],
+        "Activation function to use for input projection."
+    ),
+    Kwarg(
         'encoder_type',
         'rnn',
         str,
@@ -633,6 +693,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [str, None],
         "Number of features to use in encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** space-delimited integers, one for each layer in order from bottom to top. If ``None``, encoder units will be used directly as features without transformation. Ignored unless the encoder is an HM-LSTM."
+    ),
+    Kwarg(
+        'n_embdims_encoder',
+        None,
+        [str, None],
+        "Number of embedding dimensions to use in encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** space-delimited integers, one for each layer in order from bottom to top. If ``None``, encoder bits will be used directly as features without embedding. Ignored unless the encoder is an HM-LSTM."
     ),
     Kwarg(
         'hmlstm_kernel_depth',
@@ -678,6 +744,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         [int, None],
         "Implement internal encoder layers as residual layers with **resnet_n_layers_inner** internal layers each. If ``None``, do not use residual layers.",
         aliases=['resnet_n_layers_inner']
+    ),
+    Kwarg(
+        'encoder_renormalize_preactivations',
+        False,
+        bool,
+        "Whether to compute HMLSTM preactivations as an average weighted by segmentation decisions."
     ),
 
     # Encoder boundaries
@@ -756,6 +828,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Whether to accumulate boundary probs over time (if not, full boundary prob is generated at each timestep)."
+    ),
+    Kwarg(
+        'cumulative_feature_prob',
+        False,
+        bool,
+        "Whether to accumulate feature probs over time (if not, full feature prob is generated at each timestep)."
     ),
     Kwarg(
         'forget_at_boundary',
@@ -921,6 +999,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "If ``str``, underscore-delimited name and scale of encoder state regularization. If ``float``, scale of encoder L2 state regularization. If ``None``, no encoder state regularization."
     ),
     Kwarg(
+        'encoder_feature_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder feature regularization. If ``float``, scale of encoder L2 feature regularization. If ``None``, no encoder feature regularization."
+    ),
+    Kwarg(
+        'encoder_bitwise_feature_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder bitwise feature regularization. If ``float``, scale of encoder L2 bitwise feature regularization. If ``None``, no encoder bitwise feature regularization."
+    ),
+    Kwarg(
         'encoder_cell_proposal_regularization',
         None,
         [str, float, None],
@@ -945,43 +1035,46 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to plug language model predictions into dropped timesteps when temporal dropout is on."
     ),
     Kwarg(
-        'encoder_bottomup_noise_sd',
+        'encoder_bottomup_noise_level',
         None,
         [float, None],
         "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder bottom-up inputs at each layer.",
-        aliases=['encoder_input_noise_sd']
+        aliases=['encoder_input_noise_level', 'encoder_bottomup_noise_sd', 'encoder_input_noise_sd']
     ),
     Kwarg(
-        'encoder_recurrent_noise_sd',
+        'encoder_recurrent_noise_level',
         None,
         [float, None],
         "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder recurrent inputs at each layer.",
-        aliases=['encoder_input_noise_sd']
+        aliases=['encoder_recurrent_noise_sd']
     ),
     Kwarg(
-        'encoder_topdown_noise_sd',
+        'encoder_topdown_noise_level',
         None,
         [float, None],
         "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder top-down inputs at each layer.",
-        aliases=['encoder_input_noise_sd']
+        aliases=['encoder_input_noise_level', 'encoder_topdown_noise_sd', 'encoder_input_noise_sd']
     ),
     Kwarg(
-        'encoder_boundary_noise_sd',
+        'encoder_boundary_noise_level',
         None,
         [float, None],
-        "Standard deviation of Gaussian 'whiteout' noise to inject into logits of boundary probabilities during training."
+        "Standard deviation of Gaussian 'whiteout' noise to inject into logits of boundary probabilities during training.",
+        aliases=['encoder_boundary_noise_sd']
     ),
     Kwarg(
-        'encoder_state_noise_sd',
+        'encoder_state_noise_level',
         None,
         [float, None],
-        "Standard deviation of Gaussian 'whiteout' noise to inject into the pre-gated encoder outputs."
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the pre-gated encoder outputs.",
+        aliases=['encoder_state_noise_sd']
     ),
     Kwarg(
-        'encoder_feature_noise_sd',
+        'encoder_feature_noise_level',
         None,
         [float, None],
-        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder feature pre-activations."
+        "Standard deviation of Gaussian 'whiteout' noise to inject into the encoder feature pre-activations.",
+        aliases=['encoder_feature_noise_sd']
     ),
     Kwarg(
         'boundary_rate_extremeness_regularizer_scale',
@@ -1094,6 +1187,36 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         [str, None],
         "Name of activation to use for recurrent activation in recurrent layers of the decoder. Ignored if decoder is not recurrent.",
         aliases=['recurrent_activation']
+    ),
+    Kwarg(
+        'decoder_n_query_units',
+        None,
+        [int, None],
+        "Number of dimensions in key/query component of attentional decoder. If ``None``, defaults to the dimensionality of the input key matrix."
+    ),
+    Kwarg(
+        'decoder_project_attn_keys',
+        True,
+        bool,
+        "Whether to project keys for computing attention weights."
+    ),
+    Kwarg(
+        'decoder_use_gold_attn_keys',
+        False,
+        bool,
+        "Whether to use gold or reconstructed segment IDs as keys for computing attention weights."
+    ),
+    Kwarg(
+        'decoder_discretize_keys',
+        False,
+        bool,
+        "Whether to discretize decoder keys in Seq2Seq decoder."
+    ),
+    Kwarg(
+        'decoder_discretize_outputs',
+        False,
+        bool,
+        "Whether to discretize previous decoder outputs as inputs to Seq2Seq decoder. At lowest layer, no discretization if acoustic mode, non-differentiable argmax discretization if text mode. For higher layers, discretize using differentiable binary stochastic neurons."
     ),
     Kwarg(
         'decoder_resnet_n_layers_inner',

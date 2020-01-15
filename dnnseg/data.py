@@ -3,6 +3,7 @@ import os
 import math
 import time
 import re
+import pickle
 import numpy as np
 import scipy.signal
 import pandas as pd
@@ -1279,13 +1280,17 @@ class Dataset(object):
 
     def __init__(
             self,
-            dir_path,
+            dir_paths,
             datatype='acoustic',
             clip_timesteps=None,
+            force_preprocess=False,
+            save_preprocessed_data=True,
             verbose=True,
             **kwargs
     ):
-        self.dir_path = dir_path
+        if not isinstance(dir_paths, list):
+            dir_paths = [dir_paths]
+        self.dir_paths = dir_paths
         self.datatype = datatype.lower()
         assert self.datatype in ['acoustic', 'text'], 'Unrecognized datatype requested: "%s"' % self.datatype
         self.clip_timesteps = clip_timesteps
@@ -1333,44 +1338,69 @@ class Dataset(object):
             else:
                 setattr(self, 'lower', False)
 
-        files = ['%s/%s' % (self.dir_path, x) for x in os.listdir(self.dir_path) if x.lower().endswith(suffix)]
-        n = len(files)
+        for dir_path in self.dir_paths:
+            filenames = ['%s/%s' % (dir_path, x) for x in os.listdir(dir_path) if x.lower().endswith(suffix)]
 
-        times = []
-        for i, f in enumerate(files):
-            t0 = time.time()
-            if verbose:
-                file_name = f.split('/')[-1]
-                if len(file_name) > 10:
-                    file_name = file_name[:7] + '...'
-                out_str = '\rProcessing file "%s" %d/%d' % (file_name, i + 1, n)
-                out_str += ' ' * (40 - len(out_str))
-                if i > 0:
-                    h = int(eta / 3600)
-                    r = int(eta % 3600)
-                    m = int(r / 60)
-                    s = int(r % 60)
-                    if h > 0:
-                        time_str = str(h) + ':%02d' % m + ':%02d' % s
-                    else:
-                        if m > 0:
-                            time_str = str(m) + ':' + '%02d' % s
-                        else:
-                            time_str = '%ds' % s
-                    out_str += '|    ETA - %s     ' % time_str
-                stderr(out_str)
+            if self.datatype == 'acoustic':
+                data_name = 'data_%s_f%s_d%s.obj' % (
+                    self.filter_type.lower(),
+                    self.n_coef,
+                    self.order
+                )
+            else:
+                data_name = 'data.obj'
+            data_path = os.path.join(dir_path, data_name)
+            if not force_preprocess and os.path.exists(data_path):
+                with open(data_path, 'rb') as f:
+                    dir_data = pickle.load(f)
+            else:
+                times = []
+                n = len(filenames)
+                dir_data = {}
+                for i, f in enumerate(filenames):
+                    t0 = time.time()
+                    if verbose:
+                        file_name = f.split('/')[-1]
+                        if len(file_name) > 10:
+                            file_name = file_name[:7] + '...'
+                        out_str = '\rProcessing file "%s" %d/%d' % (file_name, i + 1, n)
+                        out_str += ' ' * (40 - len(out_str))
+                        if i > 0:
+                            h = int(eta / 3600)
+                            r = int(eta % 3600)
+                            m = int(r / 60)
+                            s = int(r % 60)
+                            if h > 0:
+                                time_str = str(h) + ':%02d' % m + ':%02d' % s
+                            else:
+                                if m > 0:
+                                    time_str = str(m) + ':' + '%02d' % s
+                                else:
+                                    time_str = '%ds' % s
+                            out_str += '|    ETA - %s     ' % time_str
+                        stderr(out_str)
 
-            new_data = datafile(
-                f,
-                clip_timesteps=clip_timesteps,
-                **data_kwargs
-            )
+                    new_data = datafile(
+                        f,
+                        clip_timesteps=clip_timesteps,
+                        **data_kwargs
+                    )
 
-            self.data[new_data.ID] = new_data
-            t1 = time.time()
-            times.append(t1 - t0)
-            mean_time = sum(times) / len(times)
-            eta = (n - i + 1) * mean_time
+                    assert new_data.ID not in self.data, 'Multiple identically named files encountered (%s). Please ensure that all filenames are unique.' % new_data.ID
+
+                    dir_data[new_data.ID] = new_data
+                    if save_preprocessed_data:
+                        with open(data_path, 'wb') as f:
+                            pickle.dump(dir_data, f, protocol=2)
+
+                    t1 = time.time()
+                    times.append(t1 - t0)
+                    mean_time = sum(times) / len(times)
+                    eta = (n - i + 1) * mean_time
+
+
+
+            self.data.update(dir_data)
 
         if verbose:
             stderr('\n')
@@ -2747,7 +2777,7 @@ class Dataset(object):
     def summary(self, indent=0, summarize_components=False):
         out = ' ' * indent + 'DATASET SUMMARY:\n\n'
         out += ' ' * indent + 'Data type: %s\n' % self.datatype
-        out += ' ' * (indent + 2) + 'Source directory: %s\n' %self.dir_path
+        out += ' ' * (indent + 2) + 'Source directory: %s\n' %self.dir_paths
         length = sum([len(self.data[f]) for f in self.data])
 
         if self.datatype == 'acoustic':
