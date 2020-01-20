@@ -92,6 +92,7 @@ class DNNSeg(object):
         self.regularizer_map = {}
         
         if self.n_units_input_projection:
+            self.project_inputs = True
             if isinstance(self.n_units_input_projection, str):
                 self.units_input_projection = [int(x) for x in self.n_units_input_projection.split()]
             elif isinstance(self.n_units_input_projection, int):
@@ -111,6 +112,7 @@ class DNNSeg(object):
     
             assert len(self.units_input_projection) == self.layers_input_projection, 'Misalignment in number of layers between n_layers_input_projection and n_units_input_projection.'
         else:
+            self.project_inputs = False
             self.layers_input_projection = None
             self.units_input_projection = None
 
@@ -186,25 +188,54 @@ class DNNSeg(object):
                 self.units_decoder = [self.units_decoder[0]] * self.layers_decoder
 
             assert len(self.units_decoder) == self.n_layers_decoder, 'Misalignment in number of layers between n_layers_decoder and n_units_decoder.'
-        
-        if isinstance(self.n_units_correspondence_decoder, str):
-            self.units_correspondence_decoder = [int(x) for x in self.n_units_correspondence_decoder.split()]
-        elif isinstance(self.n_units_correspondence_decoder, int):
-            if self.n_layers_correspondence_decoder is None:
-                self.units_correspondence_decoder = [self.n_units_correspondence_decoder]
+            
+        if self.n_units_decoder_input_projection:
+            self.project_decoder_inputs = True
+            if isinstance(self.n_units_decoder_input_projection, str):
+                self.units_decoder_input_projection = [int(x) for x in self.n_units_decoder_input_projection.split()]
+            elif isinstance(self.n_units_decoder_input_projection, int):
+                if self.n_layers_decoder_input_projection is None:
+                    self.units_decoder_input_projection = [self.n_units_decoder_input_projection]
+                else:
+                    self.units_decoder_input_projection = [self.n_units_decoder_input_projection] * self.n_layers_decoder_input_projection
             else:
-                self.units_correspondence_decoder = [self.n_units_correspondence_decoder] * self.n_layers_correspondence_decoder
+                self.units_decoder_input_projection = self.n_units_decoder_input_projection
+    
+            if self.n_layers_decoder_input_projection is None:
+                self.layers_decoder_input_projection = len(self.units_decoder_input_projection)
+            else:
+                self.layers_decoder_input_projection = self.n_layers_decoder_input_projection
+            if len(self.units_decoder_input_projection) == 1:
+                self.units_decoder_input_projection = [self.units_decoder_input_projection[0]] * self.layers_decoder_input_projection
+    
+            assert len(self.units_decoder_input_projection) == self.layers_decoder_input_projection, 'Misalignment in number of layers between n_layers_decoder_input_projection and n_units_decoder_input_projection.'
         else:
-            self.units_correspondence_decoder = self.n_units_correspondence_decoder
+            self.project_decoder_inputs = False
+            self.layers_decoder_input_projection = None
+            self.units_decoder_input_projection = None
 
-        if self.n_layers_correspondence_decoder is None:
-            self.layers_correspondence_decoder = len(self.units_correspondence_decoder)
+        if self.n_units_correspondence_decoder:
+            self.use_correspondence_decoder = True
+            if isinstance(self.n_units_correspondence_decoder, str):
+                self.units_correspondence_decoder = [int(x) for x in self.n_units_correspondence_decoder.split()]
+            elif isinstance(self.n_units_correspondence_decoder, int):
+                if self.n_layers_correspondence_decoder is None:
+                    self.units_correspondence_decoder = [self.n_units_correspondence_decoder]
+                else:
+                    self.units_correspondence_decoder = [self.n_units_correspondence_decoder] * self.n_layers_correspondence_decoder
+            else:
+                self.units_correspondence_decoder = self.n_units_correspondence_decoder
+
+            if self.n_layers_correspondence_decoder is None:
+                self.layers_correspondence_decoder = len(self.units_correspondence_decoder)
+            else:
+                self.layers_correspondence_decoder = self.n_layers_correspondence_decoder
+            if len(self.units_correspondence_decoder) == 1:
+                self.units_correspondence_decoder = [self.units_correspondence_decoder[0]] * self.layers_correspondence_decoder
+
+            assert len(self.units_correspondence_decoder) == self.n_layers_correspondence_decoder, 'Misalignment in number of layers between n_layers_correspondence_decoder and n_units_correspondence_decoder.'
         else:
-            self.layers_correspondence_decoder = self.n_layers_correspondence_decoder
-        if len(self.units_correspondence_decoder) == 1:
-            self.units_correspondence_decoder = [self.units_correspondence_decoder[0]] * self.layers_correspondence_decoder
-
-        assert len(self.units_correspondence_decoder) == self.n_layers_correspondence_decoder, 'Misalignment in number of layers between n_layers_correspondence_decoder and n_units_correspondence_decoder.'
+            self.use_correspondence_decoder = False
 
         if self.segment_encoding_correspondence_regularizer_scale and \
                 self.encoder_type.lower() in ['cnn_hmlstm' ,'hmlstm'] and \
@@ -273,6 +304,9 @@ class DNNSeg(object):
 
         if self.lm_loss_scale:
             assert self.lm_order_bwd + self.lm_order_fwd > 0, 'When LM loss is turned on, order of language model must be > 0.'
+            self.use_lm_loss = False
+        else:
+            self.use_lm_loss = False
         if isinstance(self.lm_loss_scale, str):
             self.lm_loss_scale = [float(x) for x in self.lm_loss_scale.split()]
             if len(self.lm_loss_scale) == 1:
@@ -303,6 +337,10 @@ class DNNSeg(object):
             self.lm_target_gradient_scale = self.lm_target_gradient_scale
         assert len(self.lm_target_gradient_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_target_gradient_scale and n_units_encoder.'
 
+        if self.correspondence_loss_scale:
+            self.use_correspondence_loss = True
+        else:
+            self.use_correspondence_loss = False
         if isinstance(self.correspondence_loss_scale, str):
             self.correspondence_loss_scale = [float(x) for x in self.correspondence_loss_scale.split()]
             if len(self.correspondence_loss_scale) == 1:
@@ -647,7 +685,7 @@ class DNNSeg(object):
                 else:
                     self.inputs = X
 
-                if self.units_input_projection:
+                if self.project_inputs:
                     projection_in = self.inputs
                     projection_lambdas = []
                     depth = self.layers_input_projection
@@ -1539,6 +1577,8 @@ class DNNSeg(object):
     def _initialize_lm_masked_neighbors(self, initialize_decoder=True):
         with self.sess.as_default():
             with self.sess.graph.as_default():
+                C = 1 # Clipping factor
+
                 b = tf.shape(self.inputs)[0]
                 t = tf.shape(self.inputs)[1]
                 n_bwd = self.lm_order_bwd
@@ -1602,6 +1642,33 @@ class DNNSeg(object):
                     ppx_bwd = n_plot_bwd // 2
                 if isinstance(ppx_fwd, str) and ppx_fwd.lower() == 'mid':
                     ppx_fwd = n_plot_fwd // 2
+
+                if initialize_decoder and \
+                        self.decoder_positional_encoding_type is not None and \
+                        (not self.decoder_type.lower() == 'seq2seqattn' or
+                         self.decoder_add_positional_encoding_to_top):
+                    pe = construct_positional_encoding(
+                        tf.shape(self.X)[1],
+                        n_units=self.decoder_positional_encoding_units,
+                        n_batch=tf.shape(self.X)[1],
+                        positional_encoding_type=self.decoder_positional_encoding_type,
+                        positional_encoding_transform=self.decoder_positional_encoding_transform,
+                        positional_encoding_activation=self.decoder_positional_encoding_activation,
+                        inner_activation=self.decoder_inner_activation,
+                        batch_normalization_decay=self.decoder_batch_normalization_decay,
+                        conv_kernel_size=self.decoder_conv_kernel_size,
+                        training=self.training,
+                        name='decoder_positional_encoding',
+                        session=self.sess,
+                        float_type=self.FLOAT_TF
+                    )
+                    pe_expanded = pe[None, ...]
+
+                order = {
+                    'bwd': n_bwd,
+                    'fwd': n_fwd
+                }
+                direction = ['bwd', 'fwd']
 
                 for l in range(self.layers_encoder - 1, -1, -1):
                     if self.lm_loss_scale[l]:
@@ -1667,6 +1734,8 @@ class DNNSeg(object):
                         time_ids_at_pred = lag_dict['time_ids_at_pred']
                         batch_ids_at_pred = lag_dict['batch_ids_at_pred']
 
+                        b_targ = tf.shape(targets_bwd_cur)[0]
+
                         # if True and l == 0:
                         #     t = tf.cast(tf.range(1, 11), dtype=self.FLOAT_TF)[None, ..., None]
                         #     m = tf.ones([1, 10], dtype=self.FLOAT_TF)
@@ -1707,38 +1776,40 @@ class DNNSeg(object):
                             time_ids_fwd_cur = tf.boolean_mask(time_ids_fwd_cur, weights_masked_cur)
 
                         if initialize_decoder:
+                            # Compute all values needed to initialize the decoder(s)
+                            key_encodings = {}
+                            key_encodings_cell = {}
+                            pe_cur = {}
+                            decoder_in = {}
+                            decoder_cell_in = {}
+
+                            time_ids = {
+                                'bwd': time_ids_bwd_cur,
+                                'fwd': time_ids_fwd_cur
+                            }
+
                             if self.decoder_type.lower() == 'seq2seqattn':
-                                decoder_in = self.encoder_states[l]
-                                if self.lm_gradient_scale[l] is not None:
-                                    decoder_in = replace_gradient(
-                                        tf.identity,
-                                        lambda x: x * self.lm_gradient_scale[l],
-                                        session=self.sess
-                                    )(decoder_in)
-                                if l == 0:
-                                    decoder_in = [decoder_in]
-                                    if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
-                                        speaker_embeddings = tf.tile(
-                                            tf.expand_dims(self.speaker_embeddings, axis=1),
-                                            [1, tf.shape(self.inputs)[1], 1]
-                                        )
-                                        decoder_in.insert(0, speaker_embeddings)
-                                    if self.n_passthru_neurons:
-                                        decoder_in.insert(0, self.passthru_neurons)
-                                    if len(decoder_in) > 1:
-                                        decoder_in = tf.concat(decoder_in, axis=-1)
-                                    else:
-                                        decoder_in = decoder_in[0]
-                                decoder_in = tf.boolean_mask(decoder_in, mask_cur)
+                                # Define variables
+                                weights = {
+                                    'bwd': weights_bwd,
+                                    'fwd': weights_fwd
+                                }
+                                targets = {
+                                    'bwd': targets_bwd,
+                                    'fwd': targets_fwd
+                                }
+                                logits = {
+                                    'bwd': logits_bwd,
+                                    'fwd': logits_fwd
+                                }
 
-                                hidden_units = decoder_in.shape[-1]
-                                if l == 0:
-                                    output_units = self.X.shape[-1]
-                                elif self.features_encoder[l - 1]:
-                                    output_units = self.features_encoder[l - 1]
-                                else:
-                                    output_units = self.units_encoder[l - 1]
+                                key_val_mask = {}
+                                keys_gold = {}
+                                keys_pred = {}
+                                keys = {}
+                                values = {}
 
+                                # Define activation functions
                                 if l == 0:
                                     if self.data_type.lower() == 'text':
                                         if self.decoder_discretize_outputs:
@@ -1773,46 +1844,7 @@ class DNNSeg(object):
                                     sample_at_eval=self.sample_at_eval
                                 )
 
-                                states_init = decoder_in
-                                cell_states_init = tf.boolean_mask(self.encoder_cell_states[l][..., :hidden_units], mask_cur)
-                                if int(cell_states_init.shape[-1]) < hidden_units:
-                                    cell_states_init = tf.pad(
-                                        cell_states_init,
-                                        [(0,0), (0,0), (hidden_units - int(cell_states_init.shape[-1]),0)]
-                                    )
-                                pred_init = tf.zeros(
-                                    shape=[tf.shape(states_init)[0], output_units],
-                                    dtype=self.FLOAT_TF
-                                )
-
-                                if l == self.layers_encoder - 1:
-                                    t_bwd = 0
-                                    t_fwd = 0
-                                else:
-                                    t_bwd = n_bwd
-                                    t_fwd = n_fwd
-                                attn_bwd_init = tf.zeros(
-                                    shape=[tf.shape(states_init)[0], t_bwd],
-                                    dtype=self.FLOAT_TF
-                                )
-                                attn_fwd_init = tf.zeros(
-                                    shape=[tf.shape(states_init)[0], t_fwd],
-                                    dtype=self.FLOAT_TF
-                                )
-
-                                initial_state_bwd = AttentionalLSTMDecoderStateTuple(
-                                    h=states_init,
-                                    c=cell_states_init,
-                                    a=attn_bwd_init,
-                                    y=pred_init
-                                )
-                                initial_state_fwd = AttentionalLSTMDecoderStateTuple(
-                                    h=states_init,
-                                    c=cell_states_init,
-                                    a=attn_fwd_init,
-                                    y=pred_init
-                                )
-
+                                # Compute gather indices that align topdown and bottomup sequences
                                 if l < self.layers_encoder - 1:
                                     gather_ix = tf.py_func(
                                         align_values_to_batch,
@@ -1828,84 +1860,101 @@ class DNNSeg(object):
                                 else:
                                     gather_ix = None
 
-                                if n_bwd and l < self.layers_encoder - 1:
-                                    key_val_mask_bwd = weights_bwd[l + 1]
-                                    key_val_mask_bwd_expanded = key_val_mask_bwd[..., None]
-                                    if self.decoder_use_gold_attn_keys:
-                                        keys_bwd = targets_bwd[l + 1]
-                                        if self.lm_gradient_scale[l + 1] is not None:
-                                            keys_bwd = replace_gradient(
-                                                tf.identity,
-                                                lambda x: x * self.lm_gradient_scale[l + 1],
+                                # Compute backward and forward values
+                                for x in direction:
+                                    if order[x] and l < self.layers_encoder - 1:
+                                        pe_cur[x] = tf.zeros(
+                                            shape=[b_targ, order[x], 0],
+                                            dtype=self.FLOAT_TF
+                                        )
+                                        key_val_mask[x] = tf.gather(
+                                            tf.pad(weights[x][l + 1][:, : order[x] // C], [(0,1), (0,0)]),
+                                            gather_ix,
+                                            axis=0
+                                        )
+                                        keys_gold[x] = tf.gather(
+                                            tf.pad(targets[x][l + 1][:, : order[x] // C], [(0,1), (0,0), (0,0)]),
+                                            gather_ix,
+                                            axis=0
+                                        )
+                                        keys_pred[x] = tf.gather(
+                                            tf.pad(logits[x][l + 1][:, : order[x] // C], [(0,1), (0,0), (0,0)]),
+                                            gather_ix,
+                                            axis=0
+                                        )
+                                        keys_pred[x] = key_activation(keys_pred[x])
+
+                                        if self.decoder_encode_keys:
+                                            encoder_in = keys_gold[x]
+                                            if self.lm_gradient_scale[l] is not None:
+                                                encoder_in = replace_gradient(
+                                                    tf.identity,
+                                                    lambda x: x * self.lm_gradient_scale[l],
+                                                    session=self.sess
+                                                )(encoder_in)
+
+                                            key_encoder = RNNLayer(
+                                                training=self.training,
+                                                units=self.units_encoder[l],
+                                                activation=self.encoder_inner_activation,
+                                                recurrent_activation=self.encoder_recurrent_activation,
+                                                return_sequences=True,
+                                                return_cell_state=True,
+                                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                                name='decoder_key_encoder_%s_l%d' % (x, l),
                                                 session=self.sess
-                                            )(keys_bwd)
+                                            )
+
+                                            key_encoder_states, key_encodings_cell[x] = key_encoder(encoder_in, mask=key_val_mask[x])
+
+                                            key_encodings[x] = key_encoder_states[..., -1, :]
+                                            # keys[x] = (key_encoder_states * key_val_mask[x][..., None])
+                                            # values[x] = keys[x]
+
+                                        else:
+                                            key_encodings[x] = None
+                                            key_encodings_cell[x] = None
+
+                                        if self.decoder_use_gold_attn_keys:
+                                            keys[x] = keys_gold[x]
+                                            if self.lm_gradient_scale[l + 1] is not None:
+                                                keys[x] = replace_gradient(
+                                                    tf.identity,
+                                                    lambda x: x * self.lm_gradient_scale[l + 1],
+                                                    session=self.sess
+                                                )(keys[x])
+                                        else:
+                                            keys[x] = keys_pred[x]
+                                        values[x] = self.segmenter.embedding_fn[l + 1](keys[x])
+
                                     else:
-                                        keys_bwd = logits_bwd[l + 1]
-                                    keys_bwd = key_activation(keys_bwd)
-                                    # keys_bwd *= key_val_mask_bwd_expanded
-                                    values_bwd = self.segmenter.embedding_fn[l + 1](keys_bwd)
-                                    # values_bwd *= key_val_mask_bwd_expanded
+                                        # Construct decoder input timeseries
+                                        # Either a positional encoding or an empty dummy that defines output sequence length
+                                        if self.decoder_positional_encoding_type is not None and \
+                                                self.decoder_add_positional_encoding_to_top:
+                                            if self.decoder_positional_encoding_lock_to_data:
+                                                pe_cur[x] = tf.gather(pe, time_ids[x], axis=0)
+                                            else:
+                                                pe_cur[x] = tf.tile(
+                                                    pe_expanded[:, :order[x]],
+                                                    [b_targ, 1, 1]
+                                                )
+                                        else:
+                                            pe_cur[x] = tf.zeros(
+                                                shape=[b_targ, order[x], 0],
+                                                dtype=self.FLOAT_TF
+                                            )
 
-                                    keys_bwd = tf.gather(
-                                        tf.pad(keys_bwd, [(0,1), (0,0), (0,0)]),
-                                        gather_ix,
-                                        axis=0
-                                    )
-                                    values_bwd = tf.gather(
-                                        tf.pad(values_bwd, [(0,1), (0,0), (0,0)]),
-                                        gather_ix,
-                                        axis=0
-                                    )
-                                    key_val_mask_bwd = tf.gather(
-                                        tf.pad(key_val_mask_bwd, [(0,1), (0,0)]),
-                                        gather_ix,
-                                        axis=0
-                                    )
+                                        # Other attn vars are null
+                                        key_val_mask[x] = None
+                                        keys_gold[x] = None
+                                        keys_pred[x] = None
+                                        keys[x] = None
+                                        values[x] = None
+                                        key_encodings[x] = None
+                                        key_encodings_cell[x] = None
 
-                                else:
-                                    keys_bwd = None
-                                    values_bwd = None
-                                    key_val_mask_bwd = None
-
-                                if n_fwd and l < self.layers_encoder - 1:
-                                    key_val_mask_fwd = weights_fwd[l + 1]
-                                    key_val_mask_fwd_expanded = key_val_mask_fwd[..., None]
-                                    if self.decoder_use_gold_attn_keys:
-                                        keys_fwd = targets_fwd[l + 1]
-                                        if self.lm_gradient_scale[l + 1] is not None:
-                                            keys_fwd = replace_gradient(
-                                                tf.identity,
-                                                lambda x: x * self.lm_gradient_scale[l + 1],
-                                                session=self.sess
-                                            )(keys_fwd)
-                                    else:
-                                        keys_fwd = logits_fwd[l + 1]
-                                    keys_fwd = key_activation(keys_fwd)
-                                    # keys_fwd *= key_val_mask_fwd_expanded
-                                    values_fwd = self.segmenter.embedding_fn[l + 1](keys_fwd)
-                                    # values_fwd *= key_val_mask_fwd_expanded
-
-                                    keys_fwd = tf.gather(
-                                        tf.pad(keys_fwd, [(0, 1), (0, 0), (0, 0)]),
-                                        gather_ix,
-                                        axis=0
-                                    )
-                                    values_fwd = tf.gather(
-                                        tf.pad(values_fwd, [(0, 1), (0, 0), (0, 0)]),
-                                        gather_ix,
-                                        axis=0
-                                    )
-                                    key_val_mask_fwd = tf.gather(
-                                        tf.pad(key_val_mask_fwd, [(0, 1), (0, 0)]),
-                                        gather_ix,
-                                        axis=0
-                                    )
-
-                                else:
-                                    keys_fwd = None
-                                    values_fwd = None
-                                    key_val_mask_fwd = None
-
+                                # Set general decoder kwargs
                                 decoder_init_kwargs = {
                                     'training': self.training,
                                     'num_query_units': self.decoder_n_query_units,
@@ -1919,11 +1968,43 @@ class DNNSeg(object):
                                     'epsilon': self.epsilon,
                                     'session': self.sess
                                 }
+
+                                if self.decoder_encode_keys and l < self.layers_encoder - 1:
+                                    decoder_in.update(key_encodings)
+                                    decoder_cell_in.update(key_encodings_cell)
+                                else:
+                                    # Select decoder state source
+                                    # if l == self.layers_encoder - 1:
+                                    if l <= self.layers_encoder - 1:
+                                        decoder_in['all'] = self.encoder_states[l]
+                                        decoder_cell_in['all'] = self.encoder_cell_states[l]
+                                    else:
+                                        decoder_in['all'] = self.encoder_states[l + 1]
+                                        decoder_cell_in['all'] = self.encoder_cell_states[l + 1]
+
+                                    # Rescale gradients
+                                    if self.lm_gradient_scale[l] is not None:
+                                        decoder_in['all'] = replace_gradient(
+                                            tf.identity,
+                                            lambda x: x * self.lm_gradient_scale[l],
+                                            session=self.sess
+                                        )(decoder_in['all'])
+                                        decoder_cell_in['all'] = replace_gradient(
+                                            tf.identity,
+                                            lambda x: x * self.lm_gradient_scale[l],
+                                            session=self.sess
+                                        )(decoder_cell_in['all'])
+
+                                    # Drop frames
+                                    decoder_in['all'] = tf.boolean_mask(decoder_in['all'], mask_cur)
+                                    decoder_cell_in['all'] = tf.boolean_mask(decoder_cell_in['all'], mask_cur)
+
                             else:
                                 if self.lm_decode_from_encoder_states:
                                     encoder_features = self.encoder_states
                                 else:
                                     encoder_features = self.encoder_embeddings
+
                                 if self.lm_use_upper and l < self.layers_encoder - 1:
                                     if self.lm_boundaries_as_attn:
                                         # Decode using an attention-weighted sum of encoder layers.
@@ -1962,84 +2043,26 @@ class DNNSeg(object):
                                         session=self.sess
                                     )(decoder_in)
 
-                                if l == 0:
-                                    decoder_in = [decoder_in]
-                                    if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
-                                        speaker_embeddings = tf.tile(
-                                            tf.expand_dims(self.speaker_embeddings, axis=1),
-                                            [1, tf.shape(self.inputs)[1], 1]
-                                        )
-                                        decoder_in.insert(0, speaker_embeddings)
-                                    if self.n_passthru_neurons:
-                                        decoder_in.insert(0, self.passthru_neurons)
-                                    if len(decoder_in) > 1:
-                                        decoder_in = tf.concat(decoder_in, axis=-1)
-                                    else:
-                                        decoder_in = decoder_in[0]
                                 decoder_in = tf.boolean_mask(decoder_in, mask_cur)
 
-                                if self.n_layers_decoder_input_projection:
-                                    units = int(decoder_in.shape[-1])
-                                    projection_lambdas = []
-                                    depth = self.n_layers_decoder_input_projection
-                                    dense_kernel_initializer = 'identity_initializer'
-                                    resnet_kernel_initializer = 'glorot_uniform_initializer'
+                                decoder_in = {
+                                    'all': decoder_in
+                                }
+                                decoder_cell_in = None
 
-                                    for d in range(depth):
-                                        if d == depth - 1:
-                                            activation = None
+                                for x in direction:
+                                    if self.decoder_positional_encoding_type is not None:
+                                        if self.decoder_positional_encoding_lock_to_data:
+                                            pe_cur[x] = tf.gather(pe, time_ids[x], axis=0)
                                         else:
-                                            activation = self.decoder_input_projection_activation_inner
-                                        name_cur = 'decoder_in_projection_l%d_d%d' % (l, d)
-
-                                        if self.decoder_resnet_n_layers_inner and self.decoder_resnet_n_layers_inner > 1:
-                                            kernel_layer = DenseResidualLayer(
-                                                training=self.training,
-                                                units=units,
-                                                kernel_initializer=resnet_kernel_initializer,
-                                                layers_inner=self.decoder_resnet_n_layers_inner,
-                                                activation_inner=activation,
-                                                activation=activation,
-                                                batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                                project_inputs=False,
-                                                session=self.sess,
-                                                name=name_cur
+                                            pe_cur[x] = tf.tile(
+                                                pe_expanded[:, :order[x]],
+                                                [b_targ, 1, 1]
                                             )
-                                        else:
-                                            kernel_layer = DenseLayer(
-                                                training=self.training,
-                                                units=units,
-                                                kernel_initializer=dense_kernel_initializer,
-                                                activation=activation,
-                                                batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                                session=self.sess,
-                                                reuse=tf.AUTO_REUSE,
-                                                name=name_cur
-                                            )
+                                    else:
+                                        pe_cur[x] = None
 
-                                        projection_lambdas.append(make_lambda(kernel_layer, session=self.sess))
-
-                                    projection = compose_lambdas(projection_lambdas)
-
-                                    decoder_in = projection(decoder_in)
-
-                                if self.decoder_positional_encoding_lock_to_data:
-                                    pe = construct_positional_encoding(
-                                        tf.shape(self.X)[1],
-                                        n_units=self.decoder_positional_encoding_units,
-                                        n_batch=tf.shape(self.X)[1],
-                                        positional_encoding_type=self.decoder_positional_encoding_type,
-                                        positional_encoding_transform=self.decoder_positional_encoding_transform,
-                                        positional_encoding_activation=self.decoder_positional_encoding_activation,
-                                        inner_activation=self.decoder_inner_activation,
-                                        batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                        conv_kernel_size=self.decoder_conv_kernel_size,
-                                        training=self.training,
-                                        name='decoder_in_positional_encoding_l%d' % l,
-                                        session=self.sess,
-                                        float_type=self.FLOAT_TF
-                                    )
-
+                                # Set general decoder kwargs
                                 decoder_init_kwargs = {
                                     'frame_dim': k,
                                     'decoder_hidden_state_expansion_type': self.decoder_hidden_state_expansion_type,
@@ -2050,39 +2073,175 @@ class DNNSeg(object):
                                     'decoder_positional_encoding_activation': self.decoder_positional_encoding_activation
                                 }
 
-                            if n_bwd:
-                                if self.decoder_type.lower() == 'seq2seqattn':
-                                    pe_bwd_cur = None
-                                    dummy_bwd = tf.zeros(
-                                        shape=[tf.shape(targets_bwd_cur)[0], tf.shape(targets_bwd_cur)[1], 0],
+                            if l == 0:
+                                if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
+                                    speaker_embeddings = tf.boolean_mask(self.speaker_embeddings, mask_cur)
+                                else:
+                                    speaker_embeddings = None
+                                if self.n_passthru_neurons:
+                                    passthru_neurons = tf.boolean_mask(self.passthru_neurons, mask_cur)
+                                else:
+                                    passthru_neurons = None
+
+                            hidden_units = {}
+                            output_units = {}
+                            initial_state = {}
+
+                            for x in decoder_in:
+                                if l == 0:
+                                    in_cur = decoder_in[x]
+                                    in_cur = [in_cur]
+                                    if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
+                                        in_cur.append(speaker_embeddings)
+                                    if self.n_passthru_neurons:
+                                        in_cur.append(passthru_neurons)
+                                    if len(in_cur) > 1:
+                                        in_cur = tf.concat(in_cur, axis=-1)
+                                    else:
+                                        in_cur = in_cur[0]
+                                    decoder_in[x] = in_cur
+
+                                if self.project_decoder_inputs:
+                                    to_project = [decoder_in]
+                                    to_project_names = ['in']
+                                    if decoder_cell_in is not None:
+                                        to_project.append(decoder_cell_in)
+                                        to_project_names.append('cell_in')
+
+                                    for y, name in zip(to_project, to_project_names):
+                                        in_cur = y[x]
+                                        projection_lambdas = []
+                                        depth = self.layers_decoder_input_projection
+                                        dense_kernel_initializer = 'identity_initializer'
+                                        resnet_kernel_initializer = 'glorot_uniform_initializer'
+
+                                        for d in range(depth):
+                                            units = self.units_decoder_input_projection[d]
+                                            if d == depth - 1:
+                                                activation = self.decoder_input_projection_activation
+                                            else:
+                                                activation = self.decoder_input_projection_activation_inner
+                                            name_cur = 'decoder_%s_projection_l%d_d%d' % (name, l, d)
+
+                                            if self.decoder_resnet_n_layers_inner and self.decoder_resnet_n_layers_inner > 1:
+                                                kernel_layer = DenseResidualLayer(
+                                                    training=self.training,
+                                                    units=units,
+                                                    kernel_initializer=resnet_kernel_initializer,
+                                                    layers_inner=self.decoder_resnet_n_layers_inner,
+                                                    activation_inner=activation,
+                                                    activation=activation,
+                                                    batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                                    project_inputs=False,
+                                                    session=self.sess,
+                                                    name=name_cur
+                                                )
+                                            else:
+                                                kernel_layer = DenseLayer(
+                                                    training=self.training,
+                                                    units=units,
+                                                    kernel_initializer=dense_kernel_initializer,
+                                                    activation=activation,
+                                                    batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                                    session=self.sess,
+                                                    reuse=tf.AUTO_REUSE,
+                                                    name=name_cur
+                                                )
+
+                                            projection_lambdas.append(make_lambda(kernel_layer, session=self.sess))
+
+                                        projection = compose_lambdas(projection_lambdas)
+
+                                        in_cur = projection(in_cur)
+
+                                        y[x] = in_cur
+
+                                hidden_units[x] = decoder_in[x].shape[-1]
+                                if l == 0:
+                                    output_units[x] = self.X.shape[-1]
+                                elif self.features_encoder[l - 1]:
+                                    output_units[x] = self.features_encoder[l - 1]
+                                else:
+                                    output_units[x] = self.units_encoder[l - 1]
+
+                                if decoder_cell_in is not None:
+                                    decoder_cell_in[x] = decoder_cell_in[x][..., :hidden_units[x]]
+
+                                    if int(decoder_cell_in[x].shape[-1]) < hidden_units[x]:
+                                        decoder_cell_in[x] = tf.pad(
+                                            decoder_cell_in[x],
+                                            [(0, 0), (hidden_units[x] - int(decoder_cell_in[x].shape[-1]), 0)]
+                                        )
+
+                            if self.decoder_type.lower() == 'seq2seqattn':
+                                for x in direction:
+                                    if self.decoder_encode_keys and l < self.layers_encoder - 1:
+                                        states_init = decoder_in[x]
+                                        cell_states_init = decoder_cell_in[x]
+                                        pred_init = tf.zeros(
+                                            shape=[b_targ, output_units[x]],
+                                            dtype=self.FLOAT_TF
+                                        )
+                                    else:
+                                        states_init = decoder_in['all']
+                                        cell_states_init = decoder_cell_in['all']
+                                        pred_init = tf.zeros(
+                                            shape=[b_targ, output_units['all']],
+                                            dtype=self.FLOAT_TF
+                                        )
+
+                                    if l == self.layers_encoder - 1:
+                                        t_targ = 0
+                                    else:
+                                        t_targ = order[x] // C
+                                    attn_init = tf.zeros(
+                                        shape=[b_targ, t_targ],
                                         dtype=self.FLOAT_TF
                                     )
+                                    initial_state[x] = AttentionalLSTMDecoderStateTuple(
+                                        h=states_init,
+                                        c=cell_states_init,
+                                        a=attn_init,
+                                        y=pred_init
+                                    )
+
+                            # Initialize decoder(s)
+                            if n_bwd:
+                                if self.decoder_type.lower() == 'seq2seqattn':
+                                    if self.decoder_encode_keys and l < self.layers_encoder - 1:
+                                        x = 'bwd'
+                                    else:
+                                        x = 'all'
+
+                                    if self.decoder_positional_encoding_type is not None and \
+                                            self.decoder_add_positional_encoding_to_top:
+                                        pe_bwd_cur = pe_cur['bwd']
+                                    else:
+                                        pe_bwd_cur = None
 
                                     decoder_bwd[l] = AttentionalLSTMDecoderLayer(
-                                        hidden_units,
-                                        output_units,
-                                        keys=keys_bwd,
-                                        values=values_bwd,
-                                        key_val_mask=key_val_mask_bwd,
-                                        initial_state=initial_state_bwd,
+                                        hidden_units[x],
+                                        output_units[x],
+                                        keys=keys['bwd'],
+                                        values=values['bwd'],
+                                        key_val_mask=key_val_mask['bwd'],
+                                        initial_state=initial_state['bwd'],
                                         name='AttentionalDecoder_bwd_l%d' % l,
                                         **decoder_init_kwargs
                                     )
-                                    output_bwd_cur = decoder_bwd[l](dummy_bwd)
+
+                                    output_bwd_cur = decoder_bwd[l](pe_cur['bwd'])
                                     logits_bwd_cur = output_bwd_cur.y
                                     if l < self.layers_encoder - 1:
                                         decoder_attn_bwd_cur = output_bwd_cur.a * mask_bwd_cur[..., None]
-                                        decoder_attn_keys_bwd_cur = decoder_bwd[l].key_matrix * mask_bwd_cur[..., None]
+                                        decoder_attn_keys_bwd_cur = decoder_bwd[l].key_matrix * key_val_mask['bwd'][..., None]
                                     else:
                                         decoder_attn_bwd_cur = None
                                         decoder_attn_keys_bwd_cur = None
                                 else:
-                                    if self.decoder_positional_encoding_lock_to_data:
-                                        pe_bwd_in = tf.gather(pe, time_ids_bwd_cur, axis=0)
-                                    else:
-                                        pe_bwd_in = None
+                                    pe_bwd_in = pe_cur['bwd']
                                     logits_bwd_cur, pe_bwd_cur = self._initialize_decoder(
-                                        decoder_in,
+                                        decoder_in['all'],
                                         n_bwd,
                                         mask=weights_bwd_cur,
                                         positional_encoding=pe_bwd_in,
@@ -2100,37 +2259,39 @@ class DNNSeg(object):
 
                             if n_fwd:
                                 if self.decoder_type.lower() == 'seq2seqattn':
-                                    pe_fwd_cur = None
-                                    dummy_fwd = tf.zeros(
-                                        shape=[tf.shape(targets_fwd_cur)[0], tf.shape(targets_fwd_cur)[1], 0],
-                                        dtype=self.FLOAT_TF
-                                    )
+                                    if self.decoder_encode_keys and l < self.layers_encoder - 1:
+                                        x = 'fwd'
+                                    else:
+                                        x = 'all'
+
+                                    if self.decoder_positional_encoding_type is not None and \
+                                            self.decoder_add_positional_encoding_to_top:
+                                        pe_fwd_cur = pe_cur['fwd']
+                                    else:
+                                        pe_fwd_cur = None
 
                                     decoder_fwd[l] = AttentionalLSTMDecoderLayer(
-                                        hidden_units,
-                                        output_units,
-                                        keys=keys_fwd,
-                                        values=values_fwd,
-                                        key_val_mask=key_val_mask_fwd,
-                                        initial_state=initial_state_fwd,
+                                        hidden_units[x],
+                                        output_units[x],
+                                        keys=keys['fwd'],
+                                        values=values['fwd'],
+                                        key_val_mask=key_val_mask['fwd'],
+                                        initial_state=initial_state['fwd'],
                                         name='AttentionalDecoder_fwd_l%d' % l,
                                         **decoder_init_kwargs
                                     )
-                                    output_fwd_cur = decoder_fwd[l](dummy_fwd)
+                                    output_fwd_cur = decoder_fwd[l](pe_cur['fwd'])
                                     logits_fwd_cur = output_fwd_cur.y
                                     if l < self.layers_encoder - 1:
                                         decoder_attn_fwd_cur = output_fwd_cur.a * mask_fwd_cur[..., None]
-                                        decoder_attn_keys_fwd_cur = decoder_fwd[l].key_matrix * mask_fwd_cur[..., None]
+                                        decoder_attn_keys_fwd_cur = decoder_fwd[l].key_matrix * key_val_mask['fwd'][..., None]
                                     else:
                                         decoder_attn_fwd_cur = None
                                         decoder_attn_keys_fwd_cur = None
                                 else:
-                                    if self.decoder_positional_encoding_lock_to_data:
-                                        pe_fwd_in = tf.gather(pe, time_ids_fwd_cur, axis=0)
-                                    else:
-                                        pe_fwd_in = None
+                                    pe_fwd_in = pe_cur['fwd']
                                     logits_fwd_cur, pe_fwd_cur = self._initialize_decoder(
-                                        decoder_in,
+                                        decoder_in['all'],
                                         n_fwd,
                                         mask=weights_fwd_cur,
                                         positional_encoding=pe_fwd_in,
@@ -2233,7 +2394,7 @@ class DNNSeg(object):
                                         plot_attn_keys_bwd_cur = tf.scatter_nd(
                                             scatter_ix,
                                             plot_attn_keys_bwd_cur,
-                                            [b, t, n_bwd, tf.shape(plot_attn_keys_bwd_cur)[2]]
+                                            [b, t, n_bwd // C, tf.shape(plot_attn_keys_bwd_cur)[2]]
                                         )
 
                             if n_fwd:
@@ -2258,7 +2419,7 @@ class DNNSeg(object):
                                         plot_attn_keys_fwd_cur = tf.scatter_nd(
                                             scatter_ix,
                                             plot_attn_keys_fwd_cur,
-                                            [b, t, n_fwd, tf.shape(plot_attn_keys_fwd_cur)[2]]
+                                            [b, t, n_fwd // C, tf.shape(plot_attn_keys_fwd_cur)[2]]
                                         )
 
                         if self.plot_position_anchor.lower() == 'input':
@@ -2671,9 +2832,10 @@ class DNNSeg(object):
                     tf.summary.scalar('objective/reconstruction_loss', self.loss_reconstruction_summary, collections=['objective'])
                 if self.streaming and self.predict_forward:
                     tf.summary.scalar('objective/prediction_loss', self.loss_prediction_summary, collections=['objective'])
-                for l in range(self.layers_encoder - 1):
-                    if self.correspondence_loss_scale[l]:
-                        tf.summary.scalar('objective/correspondence_loss_l%d' % (l+1), self.correspondence_loss_summary[l], collections=['objective'])
+                if self.use_correspondence_loss:
+                    for l in range(self.layers_encoder - 1):
+                        if self.correspondence_loss_scale[l]:
+                            tf.summary.scalar('objective/correspondence_loss_l%d' % (l+1), self.correspondence_loss_summary[l], collections=['objective'])
                 if self.lm_loss_scale:
                     for l in range(self.layers_encoder):
                         tf.summary.scalar('objective/encoder_lm_loss_l%d' % (l+1), self.encoder_lm_loss_summary[l], collections=['objective'])
@@ -4824,7 +4986,8 @@ class DNNSeg(object):
                         if prediction_loss is not None:
                             fd_summary[self.loss_prediction_summary] = prediction_loss
 
-                        if correspondence_loss is not None:
+                        
+                        if self.use_correspondence_loss:
                             for l in range(self.layers_encoder - 1):
                                 if self.correspondence_loss_scale[l]:
                                     fd_summary[self.correspondence_loss_summary[l]] = correspondence_loss[l]
@@ -5170,7 +5333,7 @@ class DNNSeg(object):
                             reconstruction_loss_cur = info_dict['reconstruction_loss']
                         if self.streaming and self.predict_forward:
                             prediction_loss_cur = info_dict['prediction_loss']
-                        if self.correspondence_loss_scale:
+                        if self.use_correspondence_loss:
                             correspondence_loss_cur = [info_dict['correspondence_loss_l%d' % l] if 'correspondence_loss_l%d' % l in info_dict else 0. for l in range(self.layers_encoder - 1)]
                         if self.lm_loss_scale:
                             encoder_lm_loss_cur = [info_dict['encoder_lm_loss_l%d' % l] for l in range(self.layers_encoder)]
@@ -5193,8 +5356,9 @@ class DNNSeg(object):
                             reconstruction_loss_total += reconstruction_loss_cur
                         if self.streaming and self.predict_forward:
                             prediction_loss_total += prediction_loss_cur
-                        for l in range(len(correspondence_loss_total)):
-                            correspondence_loss_total[l] = correspondence_loss_total[l] + correspondence_loss_cur[l]
+                        if self.use_correspondence_loss:
+                            for l in range(len(correspondence_loss_total)):
+                                correspondence_loss_total[l] = correspondence_loss_total[l] + correspondence_loss_cur[l]
                         if self.lm_loss_scale:
                             for l in range(self.layers_encoder):
                                 encoder_lm_loss_total[l] = encoder_lm_loss_total[l] + encoder_lm_loss_cur[l]
@@ -5229,7 +5393,7 @@ class DNNSeg(object):
                                 reg_loss=reg_total / (i_pb + 1),
                                 reconstruction_loss=reconstruction_loss_total / (i_pb + 1) if (not self.streaming or self.predict_backward) else None,
                                 prediction_loss=prediction_loss_total / (i_pb + 1) if (self.streaming and self.predict_forward) else None,
-                                correspondence_loss=[x / (i_pb + 1) for x in correspondence_loss_total] if self.correspondence_loss_scale else None,
+                                correspondence_loss=[x / (i_pb + 1) for x in correspondence_loss_total] if self.use_correspondence_loss else None,
                                 encoder_lm_losses=[x / (i_pb + 1) for x in encoder_lm_loss_total] if self.lm_loss_scale else None,
                                 encoder_speaker_adversarial_losses=[x / (i_pb + 1) for x in encoder_speaker_adversarial_loss_total] if self.speaker_adversarial_gradient_scale else None,
                                 encoder_passthru_adversarial_losses=[x / (i_pb + 1) for x in encoder_passthru_adversarial_loss_total] if self.passthru_adversarial_gradient_scale else None,
@@ -5306,7 +5470,7 @@ class DNNSeg(object):
                                     reconstruction_loss_total = 0.
                                 if self.streaming and self.predict_forward:
                                     prediction_loss_total = 0.
-                                if self.correspondence_loss_scale:
+                                if self.use_correspondence_loss:
                                     correspondence_loss_total = [0.] * len(self.correspondence_loss_scale)
                                 if self.lm_loss_scale:
                                     encoder_lm_loss_total = [0.] * self.layers_encoder
@@ -6239,7 +6403,7 @@ class DNNSegMLE(DNNSeg):
 
                     loss += self.loss_prediction
 
-                if self.correspondence_loss_scale:
+                if self.use_correspondence_loss:
                     self.correspondence_losses = []
 
                     if self.n_correspondence:
@@ -6609,10 +6773,11 @@ class DNNSegMLE(DNNSeg):
                         else:
                             to_run.append(self.loss_reconstruction)
                             to_run_names.append('reconstruction_loss')
-                        for l in range(self.layers_encoder - 1):
-                            if self.correspondence_loss_scale[l]:
-                                to_run.append(self.correspondence_losses[l])
-                                to_run_names.append('correspondence_loss_l%d' % l)
+                        if self.use_correspondence_loss:
+                            for l in range(self.layers_encoder - 1):
+                                if self.correspondence_loss_scale[l]:
+                                    to_run.append(self.correspondence_losses[l])
+                                    to_run_names.append('correspondence_loss_l%d' % l)
                         if self.lm_loss_scale:
                             for l in range(self.layers_encoder):
                                 to_run.append(self.lm_losses[l])

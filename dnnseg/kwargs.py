@@ -1207,6 +1207,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to use gold or reconstructed segment IDs as keys for computing attention weights."
     ),
     Kwarg(
+        'decoder_encode_keys',
+        False,
+        bool,
+        "Whether to run an RNN encoder over the attention keys in order to compute the initial state for the seq2seq decoder. If ``False``, the encoder hidden state will be used for state initialization."
+    ),
+    Kwarg(
         'decoder_discretize_keys',
         False,
         bool,
@@ -1217,6 +1223,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Whether to discretize previous decoder outputs as inputs to Seq2Seq decoder. At lowest layer, no discretization if acoustic mode, non-differentiable argmax discretization if text mode. For higher layers, discretize using differentiable binary stochastic neurons."
+    ),
+    Kwarg(
+        'decoder_add_positional_encoding_to_top',
+        False,
+        bool,
+        "Whether to add positional encoding to top layer decoder in the seq2seq setting, since this layer has no attention keys."
     ),
     Kwarg(
         'decoder_resnet_n_layers_inner',
@@ -1260,13 +1272,25 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'n_layers_decoder_input_projection',
         None,
         [int, None],
-        "Number of hidden layers to use for projection of decoder inputs. If ``None``, no projection."
+        "Number of hidden layers to use for projection of decoder inputs. If ``None``, inferred from ``n_units_decoder_input_projection``."
+    ),
+    Kwarg(
+        'n_units_decoder_input_projection',
+        None,
+        [int, str, None],
+        "Number of units in hidden layers to use for projection of decoder inputs. If ``None``, no projection."
     ),
     Kwarg(
         'decoder_input_projection_activation_inner',
         'elu',
         [str, None],
         "Name of activation to use for prefinal layers in projection function of decoder inputs.",
+    ),
+    Kwarg(
+        'decoder_input_projection_activation',
+        'elu',
+        [str, None],
+        "Name of activation to use for final layer in projection function of decoder inputs.",
     ),
 
     # Decoder positional encoding

@@ -1892,6 +1892,7 @@ class HMLSTMCell(LayerRNNCell):
                     s = sum(s)
 
                     if self._renormalize_preactivations:
+                        print('Renormalizing!')
                         s /= normalizer
 
                     s_clean = s
@@ -3960,6 +3961,7 @@ class RNNLayer(object):
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             return_sequences=True,
+            return_cell_state=False,
             batch_normalization_decay=None,
             name=None,
             session=None
@@ -3975,6 +3977,7 @@ class RNNLayer(object):
         self.bias_initializer = get_initializer(bias_initializer, session=self.session)
         self.refeed_outputs = refeed_outputs
         self.return_sequences = return_sequences
+        self.return_cell_state = return_cell_state
         self.batch_normalization_decay = batch_normalization_decay
         self.name = name
 
@@ -3996,6 +3999,7 @@ class RNNLayer(object):
                     self.rnn_layer = RNN(
                         output_dim,
                         return_sequences=self.return_sequences,
+                        return_state=self.return_cell_state,
                         kernel_initializer=self.kernel_initializer,
                         recurrent_initializer=self.recurrent_initializer,
                         bias_initializer=self.bias_initializer,
@@ -4014,6 +4018,9 @@ class RNNLayer(object):
             with self.session.graph.as_default():
 
                 H = self.rnn_layer(inputs, mask=mask)
+                if self.return_cell_state:
+                    H, _, c = H
+
                 if self.batch_normalization_decay:
                     H = tf.contrib.layers.batch_norm(
                         H,
@@ -4024,6 +4031,9 @@ class RNNLayer(object):
                         is_training=self.training,
                         updates_collections=None
                     )
+
+                if self.return_cell_state:
+                    return H, c
 
                 return H
 
