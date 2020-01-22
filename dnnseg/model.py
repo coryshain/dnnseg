@@ -308,9 +308,13 @@ class DNNSeg(object):
         else:
             self.use_lm_loss = False
         if isinstance(self.lm_loss_scale, str):
-            self.lm_loss_scale = [float(x) for x in self.lm_loss_scale.split()]
-            if len(self.lm_loss_scale) == 1:
-                self.lm_loss_scale = [self.lm_loss_scale[0]] * self.layers_encoder
+            if self.lm_loss_scale.startswith('exp'):
+                base = int(self.lm_loss_scale[3])
+                self.lm_loss_scale = [1 / (base**l) for l in range(self.layers_encoder)]
+            else:
+                self.lm_loss_scale = [float(x) for x in self.lm_loss_scale.split()]
+                if len(self.lm_loss_scale) == 1:
+                    self.lm_loss_scale = [self.lm_loss_scale[0]] * self.layers_encoder
         elif isinstance(self.lm_loss_scale, float):
             self.lm_loss_scale = [self.lm_loss_scale] * self.layers_encoder
         else:
