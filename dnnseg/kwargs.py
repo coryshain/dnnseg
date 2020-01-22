@@ -1237,6 +1237,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to discretize previous decoder outputs as inputs to Seq2Seq decoder. At lowest layer, no discretization if acoustic mode, non-differentiable argmax discretization if text mode. For higher layers, discretize using differentiable binary stochastic neurons."
     ),
     Kwarg(
+        'decoder_initialize_state_from_above',
+        True,
+        bool,
+        "Whether to initialize the seq2seq decoder state using the layer above (which has seen the current layer's label sequence) or the current layer (which has seen the targets)."
+    ),
+    Kwarg(
         'backprop_into_refeed',
         True,
         bool,

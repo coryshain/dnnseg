@@ -1998,12 +1998,12 @@ class DNNSeg(object):
                                 else:
                                     # Select decoder state source
                                     if l == self.layers_encoder - 1:
-                                    # if l <= self.layers_encoder - 1:
                                         decoder_in['all'] = self.encoder_states[l]
                                         decoder_cell_in['all'] = self.encoder_cell_states[l]
                                     else:
-                                        decoder_in['all'] = self.encoder_states[l + 1]
-                                        decoder_cell_in['all'] = self.encoder_cell_states[l + 1]
+                                        select = l + self.decoder_initialize_state_from_above
+                                        decoder_in['all'] = self.encoder_states[select]
+                                        decoder_cell_in['all'] = self.encoder_cell_states[select]
 
                                     # Rescale gradients
                                     if self.lm_gradient_scale[l] is not None:
