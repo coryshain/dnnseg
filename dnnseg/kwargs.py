@@ -526,6 +526,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of layerwise encoder language modeling objective in the loss function. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
     ),
     Kwarg(
+        'normalize_lm_losses',
+        True,
+        bool,
+        "Whether to renormalize LM losses so that their weights sum to 1."
+    ),
+    Kwarg(
         'lm_gradient_scale',
         None,
         [float, str, None],
@@ -1207,22 +1213,34 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to use gold or reconstructed segment IDs as keys for computing attention weights."
     ),
     Kwarg(
+        'backprop_into_attn_keys',
+        True,
+        bool,
+        "Whether to backprop into seq2seq decoder keys."
+    ),
+    Kwarg(
         'decoder_encode_keys',
         False,
         bool,
         "Whether to run an RNN encoder over the attention keys in order to compute the initial state for the seq2seq decoder. If ``False``, the encoder hidden state will be used for state initialization."
     ),
     Kwarg(
-        'decoder_discretize_keys',
+        'decoder_discretize_attn_keys',
         False,
         bool,
-        "Whether to discretize decoder keys in Seq2Seq decoder."
+        "Whether to discretize decoder attention keys in Seq2Seq decoder."
     ),
     Kwarg(
-        'decoder_discretize_outputs',
+        'decoder_discretize_refeed',
         False,
         bool,
         "Whether to discretize previous decoder outputs as inputs to Seq2Seq decoder. At lowest layer, no discretization if acoustic mode, non-differentiable argmax discretization if text mode. For higher layers, discretize using differentiable binary stochastic neurons."
+    ),
+    Kwarg(
+        'backprop_into_refeed',
+        True,
+        bool,
+        "Whether to backpropagate into decoder outputs as inputs to Seq2Seq decoder."
     ),
     Kwarg(
         'decoder_add_positional_encoding_to_top',

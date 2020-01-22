@@ -345,6 +345,12 @@ def get_activation(activation, session=None, training=True, from_logits=True, sa
                         out = make_clipped_linear_activation(lb=lb, ub=ub, session=session)
                     elif activation.lower() == 'hard_sigmoid':
                         out = hard_sigmoid
+                    elif activation.lower() == 'round':
+                        def out(x):
+                            return tf.round(x)
+                    elif activation.lower() == 'stop_gradient':
+                        def out(x):
+                            return tf.stop_gradient(x)
                     elif activation.lower() == 'argmax':
                         def out(x):
                             dim = x.shape[-1]
@@ -1892,7 +1898,6 @@ class HMLSTMCell(LayerRNNCell):
                     s = sum(s)
 
                     if self._renormalize_preactivations:
-                        print('Renormalizing!')
                         s /= normalizer
 
                     s_clean = s

@@ -1812,29 +1812,51 @@ class DNNSeg(object):
                                 # Define activation functions
                                 if l == 0:
                                     if self.data_type.lower() == 'text':
-                                        if self.decoder_discretize_outputs:
+                                        if self.decoder_discretize_refeed:
                                             output_activation = 'argmax'
                                         else:
                                             output_activation = 'softmax'
                                     else:
-                                        output_activation = None
+                                        if self.backprop_into_refeed:
+                                            output_activation = None
+                                        else:
+                                            output_activation = 'stop_gradient'
                                 elif self.xent_state_predictions:
-                                    if self.decoder_discretize_outputs:
-                                        output_activation = 'bsn'
+                                    if self.decoder_discretize_refeed:
+                                        if self.backprop_into_refeed:
+                                            output_activation = 'bsn'
+                                        else:
+                                            output_activation = lambda x: tf.round(tf.sigmoid(x))
                                     else:
-                                        output_activation = 'sigmoid'
+                                        if self.backprop_into_refeed:
+                                            output_activation = 'sigmoid'
+                                        else:
+                                            output_activation = lambda x: tf.stop_gradient(tf.sigmoid(x))
                                 else:
-                                    output_activation = None
+                                    if self.backprop_into_refeed:
+                                        output_activation = None
+                                    else:
+                                        output_activation = 'stop_gradient'
 
                                 if self.decoder_use_gold_attn_keys:
                                     key_activation = None
                                 else:
-                                    if self.decoder_discretize_keys:
-                                        key_activation = 'bsn'
+                                    if self.decoder_discretize_attn_keys:
+                                        if self.backprop_into_attn_keys:
+                                            key_activation = 'bsn'
+                                        else:
+                                            key_activation = lambda x: tf.round(tf.sigmoid(x))
                                     elif self.xent_state_predictions:
-                                        key_activation = 'sigmoid'
+                                        if self.backprop_into_attn_keys:
+                                            key_activation = 'sigmoid'
+                                        else:
+                                            key_activation = lambda x: tf.stop_gradient(tf.sigmoid(x))
                                     else:
-                                        key_activation = None
+                                        if self.backprop_into_attn_keys:
+                                            key_activation = None
+                                        else:
+                                            key_activation = 'stop_gradient'
+
                                 key_activation = get_activation(
                                     key_activation,
                                     session=self.sess,
@@ -1925,6 +1947,7 @@ class DNNSeg(object):
                                                 )(keys[x])
                                         else:
                                             keys[x] = keys_pred[x]
+
                                         values[x] = self.segmenter.embedding_fn[l + 1](keys[x])
 
                                     else:
@@ -1974,8 +1997,8 @@ class DNNSeg(object):
                                     decoder_cell_in.update(key_encodings_cell)
                                 else:
                                     # Select decoder state source
-                                    # if l == self.layers_encoder - 1:
-                                    if l <= self.layers_encoder - 1:
+                                    if l == self.layers_encoder - 1:
+                                    # if l <= self.layers_encoder - 1:
                                         decoder_in['all'] = self.encoder_states[l]
                                         decoder_cell_in['all'] = self.encoder_cell_states[l]
                                     else:
@@ -6569,8 +6592,11 @@ class DNNSegMLE(DNNSeg):
                     # loss_fwd_weighted = tf.reduce_sum(loss_fwd * loss_weights_fwd, axis=-1)
                     lm_losses = tf.stack(lm_losses, axis=-1)
                     lm_losses_total = tf.reduce_sum(lm_losses, axis=-1, keepdims=True)
-                    lm_loss_weights = lm_losses / tf.maximum(lm_losses_total, self.epsilon)
-                    lm_losses_weighted = tf.reduce_sum(lm_losses * lm_loss_weights, axis=-1)
+                    if self.normalize_lm_losses:
+                        lm_loss_weights = lm_losses / tf.maximum(lm_losses_total, self.epsilon)
+                        lm_losses_weighted = tf.reduce_sum(lm_losses * lm_loss_weights, axis=-1)
+                    else:
+                        lm_losses_weighted = lm_losses_total[0]
 
                     # lm_losses_weighted = tf.Print(lm_losses_weighted, [lm_losses, lm_losses_total, lm_loss_weights, lm_losses_weighted])
 
