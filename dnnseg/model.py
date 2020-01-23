@@ -1941,6 +1941,9 @@ class DNNSeg(object):
                                             key_encodings[x] = None
                                             key_encodings_cell[x] = None
 
+                                        if not self.backprop_into_attn_keys:
+                                            keys_gold[x] = tf.stop_gradient(keys_gold[x])
+
                                         if self.decoder_use_gold_attn_keys:
                                             keys[x] = keys_gold[x]
                                             if self.lm_gradient_scale[l + 1] is not None:
@@ -1951,6 +1954,8 @@ class DNNSeg(object):
                                                 )(keys[x])
                                         else:
                                             keys[x] = keys_pred[x]
+                                            
+                                        # keys[x] = tf.cond(self.training, lambda: keys_gold[x], lambda: keys_pred[x])
 
                                         values[x] = self.segmenter.embedding_fn[l + 1](keys[x])
 
