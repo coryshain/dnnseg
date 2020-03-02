@@ -470,6 +470,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of units to use in correspondence decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_correspondence_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
     ),
     Kwarg(
+        'correspondence_decoder_activation_inner',
+        'elu',
+        [str, None],
+        "Activation function to use for internal layers of correspondence decoder."
+    ),
+    Kwarg(
         'resample_correspondence',
         25,
         int,
@@ -526,20 +532,14 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of layerwise encoder language modeling objective in the loss function. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
     ),
     Kwarg(
-        'normalize_lm_losses',
-        True,
-        bool,
-        "Whether to renormalize LM losses so that their weights sum to 1."
-    ),
-    Kwarg(
         'lm_gradient_scale',
-        None,
+        1.,
         [float, str, None],
         "Scale of gradients by layer to layerwise encoder language modeling objective. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
     ),
     Kwarg(
         'lm_target_gradient_scale',
-        None,
+        1.,
         [float, str, None],
         "Scale of gradients by layer to targets for layerwise encoder language modeling objective. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no language modeling objective is used."
     ),
@@ -756,6 +756,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Whether to compute HMLSTM preactivations as an average weighted by segmentation decisions."
+    ),
+    Kwarg(
+        'encoder_append_previous_features',
+        False,
+        bool,
+        "Whether to append features from the preceding segment to inputs to the HMLSTM recurrence. Ignored unless the decoder is an HMLSTM and encoder_num_features is defined for the current layer."
     ),
 
     # Encoder boundaries
@@ -1017,6 +1023,30 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "If ``str``, underscore-delimited name and scale of encoder bitwise feature regularization. If ``float``, scale of encoder L2 bitwise feature regularization. If ``None``, no encoder bitwise feature regularization."
     ),
     Kwarg(
+        'encoder_feature_similarity_regularization',
+        None,
+        [str, float, None],
+        "If ``str``, underscore-delimited name and scale of encoder feature similarity regularization. If ``float``, scale of encoder L2 feature similarity regularization. If ``None``, no encoder feature similarity regularization."
+    ),
+    Kwarg(
+        'encoder_feature_similarity_regularizer_shape',
+        1,
+        float,
+        "Shape parameter for exponential distribution used to compute the feature similarity regularizer."
+    ),
+    Kwarg(
+        'encoder_seglen_regularizer_scale',
+        None,
+        [float, str, None],
+        "Scale of segment length regularizer. If a scalar is provided, it is applied uniformly to all layers. If ``None``, no segment length regularization."
+    ),
+    Kwarg(
+        'encoder_seglen_regularizer_shape',
+        1.,
+        float,
+        "Shape parameter for exponential distribution used to compute the segment length regularizer."
+    ),
+    Kwarg(
         'encoder_cell_proposal_regularization',
         None,
         [str, float, None],
@@ -1105,6 +1135,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         0.1,
         float,
         "Shape parameter ``a in [0,1]`` on mean boundary prob ``p``, such that the boundary prob extremeness penalty is proportional to ``Beta(a, a).pdf(p)``. The lower the shape value, the more the penalty is pushed to the edges (high or low values of p)."
+    ),
+    Kwarg(
+        'feature_rate_extremeness_regularizer_scale',
+        None,
+        [float, None],
+        "Scale of penalty on extreme feature rates (very low or very high). If ``None``, no feature rate extremeness penalty."
+    ),
+    Kwarg(
+        'feature_rate_extremeness_regularizer_shape',
+        0.1,
+        float,
+        "Shape parameter ``a in [0,1]`` on feature rate ``p``, such that the feature rate extremeness penalty is proportional to ``Beta(a, a).pdf(p)``. The lower the shape value, the more the penalty is pushed to the edges (high or low values of p)."
     ),
     Kwarg(
         'entropy_regularizer_scale',
@@ -1473,6 +1515,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         0,
         int,
         "Number of steps (minibatches if **streaming** is ``True``, otherwise iterations) during which to pre-train the decoder without backpropagating into the encoder."
+    ),
+    Kwarg(
+        'loss_normalization',
+        None,
+        [str, None],
+        "Loss normalization method. If ``'layer'``, normalizes by layer. If ``'cell'``, renormalizes by cell. If ``None``, no renormalization."
     ),
 
     # Checkpoint

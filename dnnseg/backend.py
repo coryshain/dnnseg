@@ -216,7 +216,7 @@ def align_values_to_batch(
         value_time_ids
 ):
     i = 0 # batch counter
-    j = 0 # symbol counter
+    j = 0 # value counter
 
     assert len(batch_batch_ids) == len(batch_time_ids), 'Batch and time IDs for batch must be vectors of the same size. Saw %s and %s.' % (len(batch_batch_ids), len(batch_time_ids))
     assert len(value_batch_ids) == len(value_time_ids), 'Batch and time IDs for memory must be vectors of the same size. Saw %s and %s.' % (len(value_batch_ids), len(value_time_ids))
@@ -237,7 +237,7 @@ def align_values_to_batch(
 
             if batch_b < val_b:
                 if batch_b == val_prev_b and batch_t >= val_prev_t:
-                    out[i] = j
+                    out[i] = j - 1
                 else: # Preceding value is either from a different batch or a later timestep
                     out[i] = dummy
                 i += 1
@@ -356,29 +356,36 @@ def get_activation(activation, session=None, training=True, from_logits=True, sa
                             dim = x.shape[-1]
                             one_hot = tf.one_hot(tf.argmax(x, axis=-1), dim)
                             return one_hot
-                    elif activation.lower() == 'bsn':
-                        def make_sample_fn(s, from_logits):
+                    elif activation.lower() in ['bsn', 'csn']:
+                        if activation.lower() == 'bsn':
+                            sample_fn_inner = bernoulli_straight_through
+                            round_fn_inner = round_straight_through
                             if from_logits:
-                                def sample_fn(x):
-                                    return bernoulli_straight_through(tf.sigmoid(x), session=s)
+                                logits2probs = tf.sigmoid
                             else:
-                                def sample_fn(x):
-                                    return bernoulli_straight_through(x, session=s)
+                                logits2probs = lambda x: x
+                        else: # activation.lower() == 'csn'
+                            sample_fn_inner = argmax_straight_through
+                            round_fn_inner = categorical_sample_straight_through
+                            if from_logits:
+                                logits2probs = tf.nn.softmax
+                            else:
+                                logits2probs = lambda x: x
+
+                        def make_sample_fn(s, logit_fn=logits2probs, fn=sample_fn_inner):
+                            def sample_fn(x):
+                                return fn(logit_fn(x), session=s)
 
                             return sample_fn
 
-                        def make_round_fn(s, from_logits):
-                            if from_logits:
-                                def round_fn(x):
-                                    return round_straight_through(tf.sigmoid(x), session=s)
-                            else:
-                                def round_fn(x):
-                                    return round_straight_through(x, session=s)
+                        def make_round_fn(s, logit_fn=logits2probs, fn=round_fn_inner):
+                            def round_fn(x):
+                                return fn(logit_fn(x), session=s)
 
                             return round_fn
 
-                        sample_fn = make_sample_fn(session, from_logits)
-                        round_fn = make_round_fn(session, from_logits)
+                        sample_fn = make_sample_fn(session)
+                        round_fn = make_round_fn(session)
 
                         if sample_at_train:
                             train_fn = sample_fn
@@ -519,6 +526,22 @@ def bernoulli_straight_through(x, session=None):
             # with ops.name_scope("BernoulliSample") as name:
             #     with session.graph.gradient_override_map({"Ceil": "Identity", "Sub": "BernoulliSample_ST"}):
             #         return tf.ceil(x - tf.random_uniform(tf.shape(x)), name=name)
+
+def argmax_straight_through(x, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            fw_op = lambda x: tf.one_hot(tf.argmax(x, axis=-1), x.shape[-1])
+            bw_op = tf.identity
+            return replace_gradient(fw_op, bw_op, session=session)(x)
+
+def categorical_sample_straight_through(x, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            fw_op = lambda x: tf.one_hot(tf.contrib.distributions.Categorical(probs=x).sample(), x.shape[-1])
+            bw_op = tf.identity
+            return replace_gradient(fw_op, bw_op, session=session)(x)
 
 
 @ops.RegisterGradient("BernoulliSample_ST")
@@ -854,6 +877,48 @@ def scaled_dot_attn(
             return out, a
 
 
+def reduce_losses(losses, weights=None, epsilon=1e-8, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            if isinstance(losses, list):
+                losses_tmp = []
+                for i, l in enumerate(losses):
+                    if weights is None or weights == 'normalize':
+                        l_cur = tf.reshape(l, [-1])
+                    elif isinstance(weights, list):
+                        w = tf.convert_to_tensor(weights[i])
+                        while len(w.shape) < len(l.shape):
+                            w = w[..., None]
+                        scale = tf.reduce_prod(tf.cast(tf.shape(l) / tf.shape(w), dtype=w.dtype))
+                        l_cur = tf.reshape(l * w, [-1]) / scale
+                    else:
+                        l_cur = tf.reshape(l * weights)
+                    losses_tmp.append(l_cur)
+                losses = tf.concat(losses_tmp, axis=0)
+            else:
+                losses = tf.reshape(losses, [-1])
+            if weights is not None:
+                if weights == 'normalize':
+                    norm_const = tf.reduce_max(losses)
+                    weights = losses / tf.maximum(norm_const, epsilon)
+                    losses *= weights
+                elif isinstance(weights, list):
+                    weights = tf.concat([tf.reshape(w, [-1]) for w in weights], axis=0)
+                else:
+                    weights = tf.convert_to_tensor(weights)
+                    while len(weights.shape) < len(losses.shape):
+                        weights = weights[..., None]
+                    scale = tf.reduce_prod(tf.cast(tf.shape(losses) / tf.shape(weights), dtype=weights.dtype))
+                    weights *= scale
+
+                losses = tf.reduce_sum(losses) / tf.maximum(tf.reduce_sum(weights), epsilon)
+            else:
+                losses = tf.reduce_mean(losses)
+
+            return losses
+
+
 HMLSTM_RETURN_SIGNATURE = [
     'c',
     'h',
@@ -861,6 +926,8 @@ HMLSTM_RETURN_SIGNATURE = [
     'features_prob',
     'embedding',
     'features_target',
+    'features_by_seg',
+    'feature_deltas',
     'z_prob',
     'z',
     'lm',
@@ -924,9 +991,14 @@ def hmlstm_state_size(
             elif name == 'h':
                 include = True
                 value = units[l]
-            elif name in ['features', 'features_prob', 'features_target']:
-                include = True
-                value = features[l]
+            elif name.startswith('feature'):
+                if name in ['features_by_seg', 'feature_deltas']:
+                    if l < layers - 1:
+                        include = True
+                        value = features[l]
+                else:
+                    include = True
+                    value = features[l]
             elif name == 'embedding':
                 include = True
                 value = embedding[l]
@@ -987,6 +1059,7 @@ class HMLSTMCell(LayerRNNCell):
             forget_at_boundary=True,
             recurrent_at_forget=False,
             renormalize_preactivations=False,
+            append_previous_features=True,
             kernel_depth=2,
             prefinal_mode='max',
             resnet_n_layers=1,
@@ -1155,6 +1228,7 @@ class HMLSTMCell(LayerRNNCell):
                 self._forget_at_boundary = forget_at_boundary
                 self._recurrent_at_forget = recurrent_at_forget
                 self._renormalize_preactivations = renormalize_preactivations
+                self._append_previous_features = append_previous_features
 
                 self._kernel_depth = kernel_depth
                 self._prefinal_mode = prefinal_mode
@@ -1175,13 +1249,48 @@ class HMLSTMCell(LayerRNNCell):
                 self._oracle_boundary = oracle_boundary
                 self._infer_boundary = infer_boundary
 
-                self._activation = get_activation(activation, session=self._session, training=self._training)
+                self._activation = get_activation(
+                    activation,
+                    session=self._session,
+                    training=self._training,
+                    from_logits=True,
+                    sample_at_train=sample_at_train,
+                    sample_at_eval=sample_at_eval
+                )
                 self._tanh_activation = activation == 'tanh'
-                self._inner_activation = get_activation(inner_activation, session=self._session, training=self._training)
+                self._inner_activation = get_activation(
+                    inner_activation,
+                    session=self._session,
+                    training=self._training,
+                    from_logits=True,
+                    sample_at_train=sample_at_train,
+                    sample_at_eval=sample_at_eval
+                )
                 self._tanh_inner_activation = inner_activation == 'tanh'
-                self._prefinal_activation =  get_activation(prefinal_activation, session=self._session, training=self._training)
-                self._recurrent_activation = get_activation(recurrent_activation, session=self._session, training=self._training)
-                self._boundary_activation = get_activation(boundary_activation, session=self._session, training=self._training)
+                self._prefinal_activation =  get_activation(
+                    prefinal_activation,
+                    session=self._session,
+                    training=self._training,
+                    from_logits=True,
+                    sample_at_train=sample_at_train,
+                    sample_at_eval=sample_at_eval
+                )
+                self._recurrent_activation = get_activation(
+                    recurrent_activation,
+                    session=self._session,
+                    training=self._training,
+                    from_logits=True,
+                    sample_at_train=sample_at_train,
+                    sample_at_eval=sample_at_eval
+                )
+                self._boundary_activation = get_activation(
+                    boundary_activation,
+                    session=self._session,
+                    training=self._training,
+                    from_logits=True,
+                    sample_at_train=sample_at_train,
+                    sample_at_eval=sample_at_eval
+                )
                 if boundary_discretizer:
                     self._boundary_discretizer = get_activation(
                         boundary_discretizer,
@@ -1338,19 +1447,15 @@ class HMLSTMCell(LayerRNNCell):
             else:
                 n_embdims.append(self._num_embdims[l])
 
-        if self._return_cae:
-            units_cae = []
-            for l in range(self._num_layers):
-                if l == 0:
-                    units_cae.append(self._input_dims)
+        units_cae = []
+        for l in range(self._num_layers):
+            if l == 0:
+                units_cae.append(self._input_dims)
+            else:
+                if self._num_features[l-1] is None:
+                    units_cae.append(self._num_units[l-1])
                 else:
-                    if self._num_features[l-1] is None:
-                        units_cae.append(self._num_units[l-1])
-                    else:
-                        units_cae.append(self._num_features[l-1])
-        else:
-            units_cae = [None] * self._num_layers
-
+                    units_cae.append(self._num_features[l-1])
 
         return hmlstm_state_size(
             self._num_units,
@@ -1549,7 +1654,7 @@ class HMLSTMCell(LayerRNNCell):
                     # Build bias
                     if not self._layer_normalization and self._use_bias:
                         bias = self.add_variable(
-                            'bias_%d' % l,
+                            'bias_l%d' % l,
                             shape=[1, output_dim],
                             initializer=self._bias_initializer
                         )
@@ -1595,9 +1700,12 @@ class HMLSTMCell(LayerRNNCell):
 
                     # Build featurizer kernel
                     if self._num_features[l] is not None:
+                        featurizer_in_dim = self._num_units[l]
+                        if self._append_previous_features and self._num_features[l]:
+                            featurizer_in_dim += self._num_features[l]
                         kernel_featurizer = self.initialize_kernel(
                             l,
-                            self._num_units[l],
+                            featurizer_in_dim,
                             self._num_features[l] * self._neurons_per_feature,
                             self._bottomup_initializer,
                             name='featurizer'
@@ -1631,6 +1739,10 @@ class HMLSTMCell(LayerRNNCell):
                             self._bias_boundary.append(bias_boundary)
                         elif self._implementation == 2:
                             boundary_in_dim = self._num_units[l]
+                            if self._num_features[l] is not None:
+                                boundary_in_dim += self._num_features[l]
+                                if self._append_previous_features:
+                                    boundary_in_dim += self._num_features[l]
 
                             self._kernel_boundary.append(
                                 self.initialize_kernel(
@@ -1759,8 +1871,10 @@ class HMLSTMCell(LayerRNNCell):
                 if self._oracle_boundary:
                     n_boundary_dims = self._num_layers - 1
                     h_below = inputs[:, :-n_boundary_dims]
+                    input_feats = h_below
                 else:
                     h_below = inputs
+                    input_feats = h_below
 
                 z_below = None
 
@@ -2055,7 +2169,14 @@ class HMLSTMCell(LayerRNNCell):
                     else:
                         # Define features
                         # Squash to [-1,1] if state activation is not tanh
-                        features = self._kernel_featurizer[l](h)
+                        if self._append_previous_features and l < self._num_layers - 1:
+                            features_in = tf.concat([h, layer.features_by_seg], axis=-1)
+                            features_in_clean = tf.concat([h_clean, layer.features_by_seg], axis=-1)
+                        else:
+                            features_in = h
+                            features_in_clean = h_clean
+                        features = self._kernel_featurizer[l](features_in)
+                        features_clean = self._kernel_featurizer[l](features_in_clean)
 
                         if self._feature_noise_level:
                             features = tf.cond(
@@ -2063,7 +2184,6 @@ class HMLSTMCell(LayerRNNCell):
                                 lambda: features + tf.random_normal(shape=tf.shape(features), stddev=self._feature_noise_level),
                                 lambda: features
                             )
-                        features_clean = self._kernel_featurizer[l](h_clean)
 
                         if self._neurons_per_feature > 1:
                             features = tf.reshape(features, [-1, self._num_features[l], self._neurons_per_feature])
@@ -2149,6 +2269,9 @@ class HMLSTMCell(LayerRNNCell):
                                     else:
                                         feats = features
                                     z_in.append(feats)
+                                    if self._append_previous_features:
+                                        prev_feats = layer.features_by_seg
+                                        z_in.append(prev_feats)
 
                                 if len(z_in) == 1:
                                     z_in = z_in[0]
@@ -2222,21 +2345,50 @@ class HMLSTMCell(LayerRNNCell):
                         else:
                             z = z_prob
                         # z = replace_gradient(tf.identity, lambda x: x * 0.1, session=self._session)(z)
+                        features_by_seg = features * z + layer.features_by_seg * (1 - z)
+                        feature_deltas = features_by_seg - layer.features_by_seg
+                        feature_deltas = tf.maximum(-feature_deltas, feature_deltas)
                     else:
                         z_prob = None
                         z = None
+                        features_by_seg = None
+                        feature_deltas = None
+
+                    if l < self._num_layers - 1:
+                        u_behind = state[l].u
+                        v_behind = state[l].v
+
+                        # Update segment length
+                        u = u_behind * (1 - z_behind_cur) + z_below_cur
+
+                        # Update mean segment features
+                        if l == 0:
+                            feats = input_feats
+                        else:
+                            feats = state[l-1].features_target
+                        v = tf.where(
+                            tf.squeeze(u > 0, axis=-1),
+                            (v_behind * tf.maximum(u - 1, 0) + feats * z_below_cur) / u,
+                            tf.zeros_like(v_behind)
+                        )
+                    else:
+                        v = u = None
 
                     name_map = {
                         'c': c,
                         'h': h,
                         'features': features,
                         'features_prob': feat_prob,
-                        'embedding': embedding,
                         'features_target': features_target,
+                        'features_by_seg': features_by_seg,
+                        'feature_deltas': feature_deltas,
+                        'embedding': embedding,
                         'z': z,
                         'z_prob': z_prob,
                         'cell_proposal': c_flush,
-                        'passthru': passthru
+                        'passthru': passthru,
+                        'v': v,
+                        'u': u
                     }
 
                     h_below = embedding
@@ -2307,22 +2459,6 @@ class HMLSTMCell(LayerRNNCell):
 
                     name_map['lm'] = lm
 
-                    if self._return_cae and l < self._num_layers - 1:
-                        v_behind = state[l].v
-                        u_behind = state[l].u
-                        if l == 0:
-                            feats = inputs
-                        else:
-                            feats = state[l-1].features_target
-                        v = (v_behind * u_behind + feats) / (u_behind + 1)
-                        z_comp = 1 - z
-                        u = u_behind * z_comp + z_comp
-                    else:
-                        v = u = None
-
-                    name_map['v'] = v
-                    name_map['u'] = u
-
                     new_state_names = []
                     new_state_cur = []
 
@@ -2334,9 +2470,11 @@ class HMLSTMCell(LayerRNNCell):
                             include = True
                         elif self._lm and name == 'lm':
                             include = True
-                        elif self._return_cae and l < self._num_layers - 1 and name in ['u', 'v']:
+                        elif l < self._num_layers - 1 and name in ['u', 'v']:
                             include = True
                         elif self._n_passthru_neurons and l == 0 and name == 'passthru':
+                            include = True
+                        elif l < self._num_layers - 1 and name in ['features_by_seg', 'feature_deltas']:
                             include = True
 
                         if include and name in name_map:
@@ -2369,6 +2507,7 @@ class HMLSTMSegmenter(object):
             forget_at_boundary=True,
             recurrent_at_forget=False,
             renormalize_preactivations=False,
+            append_previous_features=False,
             kernel_depth=2,
             prefinal_mode='max',
             resnet_n_layers=1,
@@ -2474,6 +2613,7 @@ class HMLSTMSegmenter(object):
                 self.forget_at_boundary = forget_at_boundary
                 self.recurrent_at_forget = recurrent_at_forget
                 self.renormalize_preactivations = renormalize_preactivations
+                self.append_previous_features = append_previous_features
                 self.kernel_depth = kernel_depth
                 self.prefinal_mode = prefinal_mode
                 self.resnet_n_layers = resnet_n_layers
@@ -2579,6 +2719,7 @@ class HMLSTMSegmenter(object):
                     forget_at_boundary=self.forget_at_boundary,
                     recurrent_at_forget=self.recurrent_at_forget,
                     renormalize_preactivations=self.renormalize_preactivations,
+                    append_previous_features=self.append_previous_features,
                     kernel_depth=self.kernel_depth,
                     prefinal_mode=self.prefinal_mode,
                     resnet_n_layers=self.resnet_n_layers,
@@ -2743,6 +2884,22 @@ class HMLSTMOutput(object):
             out = self.l[level].feature_vectors_target(mask=mask)
 
         return out
+    
+    def feature_vectors_by_seg(self, level=None, mask=None):
+        if level is None:
+            out = tuple([l.feature_vectors_by_seg(mask=mask) for l in self.l[:-1]])
+        else:
+            out = self.l[level].feature_vectors_by_seg(mask=mask)
+
+        return out
+    
+    def feature_delta_vectors(self, level=None, mask=None):
+        if level is None:
+            out = tuple([l.feature_delta_vectors(mask=mask) for l in self.l[:-1]])
+        else:
+            out = self.l[level].feature_delta_vectors(mask=mask)
+
+        return out
 
     def boundary(self, level=None, discrete=False, method='round', as_logits=False, mask=None):
         if level is None:
@@ -2873,6 +3030,30 @@ class HMLSTMOutputLevel(object):
         with self.session.as_default():
             with self.session.graph.as_default():
                 out = self.features_target
+
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
+
+                return out
+
+    def feature_vectors_by_seg(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                out = self.features_by_seg
+
+                if mask is not None:
+                    while len(mask.shape) < len(out.shape):
+                        mask = mask[..., None]
+                    out = out * mask
+
+                return out
+
+    def feature_delta_vectors(self, mask=None):
+        with self.session.as_default():
+            with self.session.graph.as_default():
+                out = self.feature_deltas
 
                 if mask is not None:
                     while len(mask.shape) < len(out.shape):

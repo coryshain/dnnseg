@@ -23,7 +23,7 @@ if __name__ == '__main__':
     argparser.add_argument('-c', '--classes', nargs='+', default=['features'], help='Names of column in data set to use as regression target.')
     argparser.add_argument('-t', '--classifier_type', default='logreg', help='Type of classifier to use. One of ``["logreg", "random_forest"]``.')
     argparser.add_argument('-d', '--direction', type=str, default='pred2gold', help='Direction of classification. One of ["gold2pred", "pred2gold"].')
-    argparser.add_argument('-r', '--regularization_scale', type=float, default=0., help='Level of regularization to use in MLR classification.')
+    argparser.add_argument('-r', '--regularization_scale', type=float, default=1., help='Level of regularization to use in MLR classification.')
     argparser.add_argument('-M', '--max_depth', type=float, default=None, help='Maximum permissible tree depth.')
     argparser.add_argument('-m', '--min_impurity_decrease', type=float, default=0., help='Minimum impurity decrease necessary to make a split.')
     argparser.add_argument('-n', '--n_estimators', type=int, default=100, help='Number of estimators (trees) in random forest.')
@@ -86,6 +86,9 @@ if __name__ == '__main__':
                             break
 
                 if layer_match:
+                    if args.verbose:
+                        sys.stderr.write('Evaluating segment table %s...\n' % path)
+                        sys.stderr.flush()
                     df = pd.read_csv(os.path.join(p['outdir'], path), sep=' ')
                     input_col_names = [c for c in df.columns if is_embedding_dimension.match(c)]
                     target_col_names_cur = []
@@ -115,6 +118,12 @@ if __name__ == '__main__':
                             inputs = [X]
 
                         for i, X_cur in enumerate(inputs):
+                            if args.verbose:
+                                if i == 0:
+                                    sys.stderr.write('Evaluating model...\n')
+                                else:
+                                    sys.stderr.write('Evaluating baseline...\n')
+                                sys.stderr.flush()
                             if len(target_col_names_cur):
                                 for target_col in target_col_names_cur:
                                     perm, perm_inv = get_random_permutation(len(X))

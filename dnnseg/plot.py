@@ -454,7 +454,11 @@ def plot_class_similarity(
     # sparse_sim = sparse.csc_matrix(similarity_matrix.values)
     # idx = sparse.csgraph.reverse_cuthill_mckee(sparse_sim, symmetric_mode=True)
 
-    pdist = spc.distance.pdist(similarity_matrix)
+    pdist = similarity_matrix.values
+    dmin = pdist.min()
+    dmax = pdist.max()
+    drange = dmax - dmin
+    pdist = (pdist - dmin) / drange
     linkage = spc.linkage(pdist, method='single')
     idx = spc.fcluster(linkage, 0.5 * pdist.max())
 
@@ -493,26 +497,29 @@ def plot_projections(
 ):
     df = df.copy()
 
-    df['CV'] = df.gold_label.map(lambda x: 'V' if (not x[0] in ['el', 'en'] and x[0] in ['a', 'e', 'i', 'o', 'u']) else 'C')
+    df['CV'] = df.phn_label.map(lambda x: 'V' if (not x[0] in ['el', 'en'] and x[0] in ['a', 'e', 'i', 'o', 'u']) else 'C')
 
     if label_map is not None:
-        df['IPA'] = df.gold_label.map(label_map)
+        df['IPA'] = df.phn_label.map(label_map)
 
     if feature_table is not None:
         if not 'gold_label' in feature_table.columns:
-            feature_table['gold_label'] = feature_table.label
-        df = df.merge(feature_table, on=['gold_label'])
+            feature_table['phn_label'] = feature_table.label
+        df = df.merge(feature_table, on=['phn_label'])
 
     colors = ['CV']
     if 'IPA' in df.columns:
         colors.append('IPA')
     else:
-        colors.append('gold_label')
+        colors.append('phn_label')
 
     if feature_names is not None:
+        new_colors = []
         for c in feature_names:
-            df[c] = df[c].map({0: '-', 1: '+'})
-        colors += feature_names
+            if c in df:
+                df[c] = df[c].map({0: '-', 1: '+'})
+                new_colors.append(c)
+        colors += new_colors
 
     df['Projection 1'] = df.projection1
     df['Projection 2'] = df.projection2
@@ -533,7 +540,7 @@ def plot_projections(
                 alpha=0.5
             )
         try:
-            g.savefig(directory + '/' + prefix + 'projections_%s' % c + suffix)
+            g.savefig(directory + '/' + prefix + 'projections_%s' % (c + suffix))
         except Exception:
             stderr('IO error when saving plot. Skipping plotting...\n')
 

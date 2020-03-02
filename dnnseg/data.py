@@ -841,31 +841,31 @@ def compute_class_similarity(table, class_column_name='phn_label'):
             #     np.linalg.norm(gb[classes[j]].values, axis=-1, keepdims=True).T
             # )
             
-            # sim = np.clip(-0.99999999, 0.99999999, num / np.maximum(denom, 1e-5))
-            # sim = np.arctanh(sim)
-            # n_cells = np.prod(sim.shape)
+            # dist = np.clip(-0.99999999, 0.99999999, num / np.maximum(denom, 1e-5))
+            # dist = np.arctanh(dist)
+            # n_cells = np.prod(dist.shape)
             # if i == j:
-            #     np.fill_diagonal(sim, 0.)
-            #     n_cells -= sim.shape[0]
-            # mu = sim.sum() / n_cells
+            #     np.fill_diagonal(dist, 0.)
+            #     n_cells -= dist.shape[0]
+            # mu = dist.sum() / n_cells
             # mu = np.tanh(mu)
 
-            # sim = num / np.maximum(denom, 1e-5)
+            # dist = num / np.maximum(denom, 1e-5)
             
-            sim = spatial.distance.cdist(valid[i], valid[j], metric='cityblock')
+            dist = spatial.distance.cdist(valid[i], valid[j], metric='cityblock')
             
-            n_cells = np.prod(sim.shape)
+            n_cells = np.prod(dist.shape)
             if i == j:
-                np.fill_diagonal(sim, 0.)
-                n_cells -= sim.shape[0]
-            sim = (max_val - sim) / max_val
-            mu = sim.sum() / n_cells
+                np.fill_diagonal(dist, 0.)
+                n_cells -= dist.shape[0]
+            dist = (max_val - dist) / max_val
+            mu = dist.sum() / n_cells
 
             score = mu
 
-            # print(sim.shape)
-            # print(sim.max())
-            # print(sim.min())
+            # print(dist.shape)
+            # print(dist.max())
+            # print(dist.min())
             # print(fisher_z.max())
             # print(fisher_z.min())
             # print(mu_z)
@@ -1720,7 +1720,7 @@ class Dataset(object):
             feats_inputs.append(x[0])
             fixed_boundaries.append(boundaries_tmp[i][0])
 
-        n = sum(file_lengths)
+        n = int(math.ceil(sum(file_lengths) / window_len_input))
         feats_inputs = pad_sequence(feats_inputs, padding='post')
         fixed_boundaries = pad_sequence(fixed_boundaries, padding='post')
 
@@ -2133,10 +2133,11 @@ class Dataset(object):
         predict_deltas = self.cache[name]['predict_deltas']
 
         i = 0
+        s_ix = np.random.randint(0, window_len_input)
+        ix = s_ix + np.arange(0, len(time_ix) - s_ix, window_len_input)
         if randomize:
-            ix, ix_inv = get_random_permutation(n)
-        else:
-            ix = np.arange(n)
+            perm, _ = get_random_permutation(len(ix))
+            ix = ix[perm]
 
         while i < n:
             indices = ix[i:i+minibatch_size]
@@ -3313,12 +3314,15 @@ class Datafile(object):
 
                 columns = ['fileID', 'speaker', 'start', 'end', 'label']
 
-                if 'sigmoid' in state_activation:
-                    threshold = 0.5
+                if state_activation == 'softmax':
+                    label = np.argmax(embeddings, axis=-1)
                 else:
-                    threshold = 0.0
-                label = (embeddings > threshold).astype('int')
-                label = binary_to_string_np(label)
+                    if 'sigmoid' in state_activation:
+                        threshold = 0.5
+                    else:
+                        threshold = 0.0
+                    label = (embeddings > threshold).astype('int')
+                    label = binary_to_string_np(label)
 
                 df['label'] = label
                 if phn_labels is not None:
