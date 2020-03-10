@@ -3,7 +3,7 @@ import collections
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.framework import ops
-from tensorflow.python.ops import rnn_cell_impl
+from tensorflow.python.ops import control_flow_ops, rnn_cell_impl, state_ops
 from tensorflow.python.layers.utils import conv_output_length
 
 
@@ -1060,6 +1060,7 @@ class HMLSTMCell(LayerRNNCell):
             recurrent_at_forget=False,
             renormalize_preactivations=False,
             append_previous_features=True,
+            append_seg_len=True,
             kernel_depth=2,
             prefinal_mode='max',
             resnet_n_layers=1,
@@ -1229,6 +1230,7 @@ class HMLSTMCell(LayerRNNCell):
                 self._recurrent_at_forget = recurrent_at_forget
                 self._renormalize_preactivations = renormalize_preactivations
                 self._append_previous_features = append_previous_features
+                self._append_seg_len = append_seg_len
 
                 self._kernel_depth = kernel_depth
                 self._prefinal_mode = prefinal_mode
@@ -1640,6 +1642,8 @@ class HMLSTMCell(LayerRNNCell):
                     else:
                         bottomup_dim = self._num_features[l - 1]
                     bottomup_dim += (self._implementation == 1)
+                    if l > 0:
+                        bottomup_dim += self._append_seg_len
 
                     recurrent_dim = self._num_units[l]
 
@@ -1971,7 +1975,11 @@ class HMLSTMCell(LayerRNNCell):
                     # Compute state preactivations
                     s = []
 
-                    s_bottomup = self._kernel_bottomup[l](h_below)
+                    bottomup_in = h_below
+                    if l > 0 and self._append_seg_len:
+                        bottomup_in = tf.concat([bottomup_in, u], axis=-1)
+
+                    s_bottomup = self._kernel_bottomup[l](bottomup_in)
                     if l > 0:
                         s_bottomup *= z_below
 
@@ -2507,7 +2515,8 @@ class HMLSTMSegmenter(object):
             forget_at_boundary=True,
             recurrent_at_forget=False,
             renormalize_preactivations=False,
-            append_previous_features=False,
+            append_previous_features=True,
+            append_seg_len=True,
             kernel_depth=2,
             prefinal_mode='max',
             resnet_n_layers=1,
@@ -2614,6 +2623,7 @@ class HMLSTMSegmenter(object):
                 self.recurrent_at_forget = recurrent_at_forget
                 self.renormalize_preactivations = renormalize_preactivations
                 self.append_previous_features = append_previous_features
+                self.append_seg_len = append_seg_len
                 self.kernel_depth = kernel_depth
                 self.prefinal_mode = prefinal_mode
                 self.resnet_n_layers = resnet_n_layers
@@ -2720,6 +2730,7 @@ class HMLSTMSegmenter(object):
                     recurrent_at_forget=self.recurrent_at_forget,
                     renormalize_preactivations=self.renormalize_preactivations,
                     append_previous_features=self.append_previous_features,
+                    append_seg_len=self.append_seg_len,
                     kernel_depth=self.kernel_depth,
                     prefinal_mode=self.prefinal_mode,
                     resnet_n_layers=self.resnet_n_layers,

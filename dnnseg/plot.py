@@ -151,8 +151,6 @@ def plot_acoustic_features(
     if has_segs:
         axes['seg'] = axes_src[plot_ix]
         plot_ix += 1
-        axes['seg_hard'] = axes_src[plot_ix]
-        plot_ix += 1
         if has_smoothing:
             axes['seg_smoothed'] = axes_src[plot_ix]
             plot_ix += 1
@@ -179,9 +177,13 @@ def plot_acoustic_features(
             axes['Positional Encodings ' + k] = axes_src[plot_ix]
             plot_ix += 1
 
+    n_feats = None
+
     for i in range(len(inputs)):
         ax = axes['input']
         inputs_cur = inputs[i]
+        if n_feats is None:
+            n_feats = inputs_cur.shape[-1]
         if drop_zeros:
             inputs_select = np.where(np.any(inputs_cur[:,:-1] != 0., axis=1))[0]
             inputs_cur = inputs_cur[inputs_select]
@@ -226,11 +228,9 @@ def plot_acoustic_features(
             ax.set_xlabel('Time')
             ax.set_title('Segmentation Probabilities')
 
-            ax_h = axes['seg_hard']
             if has_smoothing:
                 ax_s = axes['seg_smoothed']
             colors = [plt.get_cmap('gist_rainbow')(1. * j / len(segmentation_probs_cur)) for j in range(len(segmentation_probs_cur))]
-            segs_hard = []
 
             if segmentations is None:
                 smoothing_algorithm = 'rbf'
@@ -251,26 +251,20 @@ def plot_acoustic_features(
                     segs_smoothed = segmentation_probs_smoothed[i][:,j]
                     if drop_zeros:
                         segs_smoothed = segs_smoothed[inputs_select]
-                segs_hard.append(timestamps)
                 if has_smoothing:
                     ax_s.plot(basis, segmentation_probs_cur[j], color=list(colors[j][:-1]) + [0.5], linestyle=':', label='L%d source' %(j+1))
                     ax_s.plot(basis, segs_smoothed, color=colors[j], label='L%d smoothed' %(j+1))
                 # _, _, w, _ = ax_seg_hard.get_window_extent().bounds
                 # linewidth = w / len(segs_smoothed)
-                ax_h.vlines(timestamps, j, j+1, color='k', linewidth=1)
+                y_start = float(j) / len(segmentations_cur) * n_feats
+                y_end = float(j + 1) / len(segmentations_cur) * n_feats
+                axes['input'].vlines(timestamps, y_start, y_end, color='k', linewidth=1)
 
             if has_smoothing:
                 ax_s.set_xlim(0., basis[-1])
                 ax_s.legend(fancybox=True, framealpha=0.75, frameon=True, facecolor='white', edgecolor='gray')
                 ax_s.set_xlabel('Time')
                 ax_s.set_title('Smoothed Segmentations')
-
-            ax_h.set_xlim(0., basis[-1])
-            ax_h.set_ylim(0., n_states - 1)
-            ax_h.set_yticks(np.arange(0.5, len(df.index), 1), minor=False)
-            ax_h.set_yticklabels(df.index)
-            ax_h.set_xlabel('Time')
-            ax_h.set_title('Hard segmentations')
 
         if has_states:
             for j in range(n_states):
@@ -314,11 +308,6 @@ def plot_acoustic_features(
                         arr_select = np.where(np.any(arr[:,:-1] != 0., axis=1))[0]
                         arr = arr[arr_select]
                     arr = np.swapaxes(arr, -2, -1)
-
-                    # print(i)
-                    # print(plot_name)
-                    # print(arr)
-                    # print()
 
                     if arr.shape[-1] > 0:
                         librosa.display.specshow(

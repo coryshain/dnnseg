@@ -763,6 +763,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         bool,
         "Whether to append features from the preceding segment to inputs to the HMLSTM recurrence. Ignored unless the decoder is an HMLSTM and encoder_num_features is defined for the current layer."
     ),
+    Kwarg(
+        'encoder_append_seg_len',
+        False,
+        bool,
+        "Whether to append incoming segment lengths to non-initial HMLSTM layers. Ignored unless the decoder is an HMLSTM."
+    ),
 
     # Encoder boundaries
     Kwarg(
@@ -1421,6 +1427,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
             - ``None`` (DTSRBayes only; uses the default optimizer defined by Edward, which currently includes steep learning rate decay and is therefore not recommended in the general case)"""
     ),
     Kwarg(
+        'use_jtps',
+        False,
+        bool,
+        "Whether to modify the base optimizer using JTPS. If ``False``, runs a baseline model. If ``True``, runs a test model."
+    ),
+    Kwarg(
         'max_global_gradient_norm',
         None,
         [float, None],
@@ -1636,7 +1648,7 @@ UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS = [
 ]
 
 
-def synsemnet_kwarg_docstring():
+def dnnseg_kwarg_docstring():
     out = "**Both MLE and Bayes**\n\n"
 
     for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:

@@ -12,6 +12,7 @@ import tensorflow as tf
 from sklearn.metrics import homogeneity_completeness_v_measure, adjusted_mutual_info_score, fowlkes_mallows_score
 
 from .backend import *
+from .opt import get_clipped_optimizer_class, get_JTPS_optimizer_class
 from .data import cache_data
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
 from .util import f_measure, pretty_print_seconds, stderr
@@ -1075,6 +1076,7 @@ class DNNSeg(object):
                         recurrent_at_forget=self.recurrent_at_forget,
                         renormalize_preactivations=self.encoder_renormalize_preactivations,
                         append_previous_features=self.encoder_append_previous_features,
+                        append_seg_len=self.encoder_append_seg_len,
                         kernel_depth=self.hmlstm_kernel_depth,
                         prefinal_mode=self.hmlstm_prefinal_mode,
                         resnet_n_layers=self.encoder_resnet_n_layers_inner,
@@ -2241,7 +2243,7 @@ class DNNSeg(object):
 
                             if l == 0:
                                 if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
-                                    speaker_embeddings = tf.boolean_mask(self.speaker_embeddings, mask_cur)
+                                    speaker_embeddings = tf.gather(self.speaker_embeddings, batch_ids_at_pred)
                                 else:
                                     speaker_embeddings = None
                                 if self.n_passthru_neurons:
@@ -2944,7 +2946,10 @@ class DNNSeg(object):
         self.label_probs_post = None
         raise NotImplementedError
 
-    def _initialize_optimizer(self, name):
+    def _initialize_optimizer(self):
+        name = self.optim_name.lower()
+        use_jtps = self.use_jtps
+
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 lr = tf.constant(self.learning_rate, dtype=self.FLOAT_TF)
@@ -2986,16 +2991,36 @@ class DNNSeg(object):
 
                 clip = self.max_global_gradient_norm
 
-                return {
-                    'SGD': lambda x: self._clipped_optimizer_class(tf.train.GradientDescentOptimizer)(x, max_global_norm=clip) if clip else tf.train.GradientDescentOptimizer(x),
-                    'Momentum': lambda x: self._clipped_optimizer_class(tf.train.MomentumOptimizer)(x, 0.9, max_global_norm=clip) if clip else tf.train.MomentumOptimizer(x, 0.9),
-                    'AdaGrad': lambda x: self._clipped_optimizer_class(tf.train.AdagradOptimizer)(x, max_global_norm=clip) if clip else tf.train.AdagradOptimizer(x),
-                    'AdaDelta': lambda x: self._clipped_optimizer_class(tf.train.AdadeltaOptimizer)(x, max_global_norm=clip) if clip else tf.train.AdadeltaOptimizer(x),
-                    'Adam': lambda x: self._clipped_optimizer_class(tf.train.AdamOptimizer)(x, max_global_norm=clip) if clip else tf.train.AdamOptimizer(x),
-                    'FTRL': lambda x: self._clipped_optimizer_class(tf.train.FtrlOptimizer)(x, max_global_norm=clip) if clip else tf.train.FtrlOptimizer(x),
-                    'RMSProp': lambda x: self._clipped_optimizer_class(tf.train.RMSPropOptimizer)(x, max_global_norm=clip) if clip else tf.train.RMSPropOptimizer(x),
-                    'Nadam': lambda x: self._clipped_optimizer_class(tf.contrib.opt.NadamOptimizer)(x, max_global_norm=clip) if clip else tf.contrib.opt.NadamOptimizer(x)
-                }[name](self.lr)
+                optimizer_args = [self.lr]
+                optimizer_kwargs = {}
+                if name == 'momentum':
+                    optimizer_args += [0.9]
+
+                optimizer_class = {
+                    'sgd': tf.train.GradientDescentOptimizer,
+                    'momentum': tf.train.MomentumOptimizer,
+                    'adagrad': tf.train.AdagradOptimizer,
+                    'adadelta': tf.train.AdadeltaOptimizer,
+                    'ftrl': tf.train.FtrlOptimizer,
+                    'rmsprop': tf.train.RMSPropOptimizer,
+                    'adam': tf.train.AdamOptimizer,
+                    'adam0': tf.train.AdamOptimizer,
+                    'nadam': tf.contrib.opt.NadamOptimizer
+                }[name]
+
+                if clip:
+                    optimizer_class = get_clipped_optimizer_class(optimizer_class, session=self.sess)
+                    optimizer_kwargs['max_global_norm'] = clip
+
+                if use_jtps:
+                    optimizer_class = get_JTPS_optimizer_class(optimizer_class, session=self.sess)
+                    optimizer_kwargs['meta_learning_rate'] = None
+                if name.lower() == 'adam0':
+                    optimizer_kwargs['beta1'] = 0.
+
+                optim = optimizer_class(*optimizer_args, **optimizer_kwargs)
+
+                self.optim = optim
 
     def _initialize_logging(self):
         with self.sess.as_default():
@@ -5545,7 +5570,10 @@ class DNNSeg(object):
                                 encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] + encoder_passthru_adversarial_loss_cur[l]
 
                         if verbose:
-                            pb.update(i_pb+1, values=[('loss', loss_cur), ('reg', reg_cur)])
+                            pb_update_vector = [('loss', loss_cur), ('reg', reg_cur)]
+                            if self.use_jtps:
+                                pb_update_vector.append(('l', info_dict['jtps_lambda_mean']))
+                            pb.update(i_pb+1, values=pb_update_vector)
 
                         self.check_numerics()
 
@@ -6708,15 +6736,6 @@ class DNNSegMLE(DNNSeg):
                                     loss.append(cae_loss_reduced)
                                     reduction_weights.append(1.)
 
-                                print(l)
-                                print(self._lm_distance_func(l))
-                                print(correspondence_weights)
-                                print(correspondence_targets)
-                                print(correspondence_logits)
-                                print(loss[-1])
-                                print()
-
-
                 if self.lm_loss_scale:
                     assert not self.residual_targets, 'residual_targets is currently broken. Do not use.'
 
@@ -6931,7 +6950,7 @@ class DNNSegMLE(DNNSeg):
 
                 self.full_loss = self.loss
 
-                self.optim = self._initialize_optimizer(self.optim_name)
+                self._initialize_optimizer()
 
                 boundary_var_re = re.compile('boundary')
                 state_var_re = re.compile('hmlstm_encoder/(bias|bottomup|recurrent|topdown|featurizer)')
@@ -6981,10 +7000,6 @@ class DNNSegMLE(DNNSeg):
                 elif self.weight_update_mode.lower().startswith('layerwise'):
                     train_ops = {}
                     for l in range(self.layers_encoder):
-                        print('Layer %d:' % l)
-                        for x in varset['l%d' % l]:
-                            print('  %s' % x)
-                        print()
                         train_ops[l] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['l%d' % l])
                 else:
                     float(self.weight_update_mode)
@@ -6992,6 +7007,12 @@ class DNNSegMLE(DNNSeg):
                         'boundary': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
                         'state': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
                     }
+
+                if self.use_jtps:
+                    self.jtps_lambda = self.optim.get_flattened_lambdas()
+                    self.jtps_lambda_min = tf.reduce_min(self.jtps_lambda)
+                    self.jtps_lambda_max = tf.reduce_max(self.jtps_lambda)
+                    self.jtps_lambda_mean = tf.reduce_mean(self.jtps_lambda)
 
                 self.train_ops = train_ops
 
@@ -7083,6 +7104,9 @@ class DNNSegMLE(DNNSeg):
                         [to_run_names.append('correspondence_seg_states_l%d' %i) for i in range(len(self.correspondence_hidden_states))]
                         [to_run_names.append('correspondence_seg_feats_l%d' %i) for i in range(len(self.correspondence_feats))]
                         [to_run_names.append('correspondence_seg_feats_mask_l%d' %i) for i in range(len(self.correspondence_mask))]
+                    if self.use_jtps:
+                        to_run.append(self.jtps_lambda_mean)
+                        to_run_names.append('jtps_lambda_mean')
 
                     output = self.sess.run(to_run, feed_dict=feed_dict)
 
