@@ -2374,9 +2374,12 @@ class HMLSTMCell(LayerRNNCell):
                             feats = input_feats
                         else:
                             feats = state[l-1].features_target
+
+                        cond = tf.squeeze(u > 0, axis=-1)
+
                         v = tf.where(
-                            tf.squeeze(u > 0, axis=-1),
-                            (v_behind * tf.maximum(u - 1, 0) + feats * z_below_cur) / u,
+                            cond,
+                            (v_behind * tf.maximum(u - 1, 0) + feats * z_below_cur) / tf.where(cond, u, tf.ones_like(u)), # The redundant use of tf.where is needed here because of a bug that backprops NaNs from the false branch even though it isn't selected
                             tf.zeros_like(v_behind)
                         )
                     else:

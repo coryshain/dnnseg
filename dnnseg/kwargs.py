@@ -315,6 +315,24 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['adversarial_gradient_scale']
     ),
     Kwarg(
+        'n_layers_speaker_decoder',
+        2,
+        [int, None],
+        "Number of layers to use for speaker decoder. If ``None``, inferred from length of **n_units_speaker_decoder**."
+    ),
+    Kwarg(
+        'n_units_speaker_decoder',
+        256,
+        [int, str, None],
+        "Number of units to use in speaker decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_speaker_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
+    ),
+    Kwarg(
+        'speaker_decoder_activation_inner',
+        'elu',
+        [str, None],
+        "Activation function to use for internal layers of speaker decoder."
+    ),
+    Kwarg(
         'speaker_revnet_n_layers',
         None,
         [int, None],
@@ -356,6 +374,24 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         [float, None],
         "Scale of adversarial loss for residualizing contents of passthru neurons out of the encoder. Ignored unless **speaker_emb_dim** is ``True``. If ``None``, no passthru adversarial training.",
         aliases=['adversarial_gradient_scale']
+    ),
+    Kwarg(
+        'n_layers_passthru_decoder',
+        2,
+        [int, None],
+        "Number of layers to use for passthru decoder. If ``None``, inferred from length of **n_units_passthru_decoder**."
+    ),
+    Kwarg(
+        'n_units_passthru_decoder',
+        256,
+        [int, str, None],
+        "Number of units to use in passthru decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_passthru_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
+    ),
+    Kwarg(
+        'passthru_decoder_activation_inner',
+        'elu',
+        [str, None],
+        "Activation function to use for internal layers of passthru decoder."
     ),
     Kwarg(
         'emb_dim',

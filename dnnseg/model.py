@@ -238,6 +238,44 @@ class DNNSeg(object):
         else:
             self.use_correspondence_decoder = False
 
+        if isinstance(self.n_units_speaker_decoder, str):
+            self.units_speaker_decoder = [int(x) for x in self.n_units_speaker_decoder.split()]
+        elif isinstance(self.n_units_speaker_decoder, int):
+            if self.n_layers_speaker_decoder is None:
+                self.units_speaker_decoder = [self.n_units_speaker_decoder]
+            else:
+                self.units_speaker_decoder = [self.n_units_speaker_decoder] * self.n_layers_speaker_decoder
+        else:
+            self.units_speaker_decoder = self.n_units_speaker_decoder
+
+        if self.n_layers_speaker_decoder is None:
+            self.layers_speaker_decoder = len(self.units_speaker_decoder)
+        else:
+            self.layers_speaker_decoder = self.n_layers_speaker_decoder
+        if len(self.units_speaker_decoder) == 1:
+            self.units_speaker_decoder = [self.units_speaker_decoder[0]] * self.layers_speaker_decoder
+
+        assert len(self.units_speaker_decoder) == self.n_layers_speaker_decoder, 'Misalignment in number of layers between n_layers_speaker_decoder and n_units_speaker_decoder.'
+
+        if isinstance(self.n_units_passthru_decoder, str):
+            self.units_passthru_decoder = [int(x) for x in self.n_units_passthru_decoder.split()]
+        elif isinstance(self.n_units_passthru_decoder, int):
+            if self.n_layers_passthru_decoder is None:
+                self.units_passthru_decoder = [self.n_units_passthru_decoder]
+            else:
+                self.units_passthru_decoder = [self.n_units_passthru_decoder] * self.n_layers_passthru_decoder
+        else:
+            self.units_passthru_decoder = self.n_units_passthru_decoder
+
+        if self.n_layers_passthru_decoder is None:
+            self.layers_passthru_decoder = len(self.units_passthru_decoder)
+        else:
+            self.layers_passthru_decoder = self.n_layers_passthru_decoder
+        if len(self.units_passthru_decoder) == 1:
+            self.units_passthru_decoder = [self.units_passthru_decoder[0]] * self.layers_passthru_decoder
+
+        assert len(self.units_passthru_decoder) == self.n_layers_passthru_decoder, 'Misalignment in number of layers between n_layers_passthru_decoder and n_units_passthru_decoder.'
+
         if self.segment_encoding_correspondence_regularizer_scale and \
                 self.encoder_type.lower() in ['cnn_hmlstm' ,'hmlstm'] and \
                 self.layers_encoder == self.n_layers_decoder and \
@@ -647,30 +685,6 @@ class DNNSeg(object):
                 else:
                     self.frame_dim = self.n_coef
 
-                self.speaker = tf.placeholder(tf.string, shape=[None], name='speaker')
-                self.speaker_table, self.speaker_embedding_matrix = initialize_embeddings(
-                    self.speaker_list,
-                    self.speaker_emb_dim if self.speaker_emb_dim else None,
-                    name='speaker_embedding',
-                    session=self.sess
-                )
-                self.speaker_one_hot = tf.one_hot(
-                    self.speaker_table.lookup(self.speaker),
-                    len(self.speaker_list) + 1,
-                    dtype=self.FLOAT_TF
-                )
-                if self.speaker_emb_dim:
-                    if self.optim_name == 'Nadam':  # Nadam can't handle sparse embedding lookup, so do it with matmul
-                        self.speaker_embeddings = tf.matmul(
-                            self.speaker_one_hot,
-                            self.speaker_embedding_matrix
-                        )
-                    else:
-                        self.speaker_embeddings = tf.nn.embedding_lookup(
-                            self.speaker_embedding_matrix,
-                            self.speaker_table.lookup(self.speaker)
-                        )
-
                 self.X = tf.placeholder(self.FLOAT_TF, shape=(None, self.n_timesteps_input, self.input_dim), name='X')
                 self.X_mask = tf.placeholder_with_default(
                     tf.ones(tf.shape(self.X)[:-1], dtype=self.FLOAT_TF),
@@ -700,9 +714,34 @@ class DNNSeg(object):
                         scope='input'
                     )
 
+                self.speaker = tf.placeholder(tf.string, shape=[None], name='speaker')
+                self.speaker_table, self.speaker_embedding_matrix = initialize_embeddings(
+                    self.speaker_list,
+                    self.speaker_emb_dim if self.speaker_emb_dim else None,
+                    name='speaker_embedding',
+                    session=self.sess
+                )
+                self.speaker_one_hot = tf.one_hot(
+                    self.speaker_table.lookup(self.speaker),
+                    len(self.speaker_list) + 1,
+                    dtype=self.FLOAT_TF
+                )
+                self.speaker_one_hot_tiled = tf.tile(self.speaker_one_hot[:, None, :], [1, tf.shape(self.X)[1], 1])
+                if self.speaker_emb_dim:
+                    if self.optim_name == 'Nadam':  # Nadam can't handle sparse embedding lookup, so do it with matmul
+                        self.speaker_embeddings = tf.matmul(
+                            self.speaker_one_hot,
+                            self.speaker_embedding_matrix
+                        )
+                    else:
+                        self.speaker_embeddings = tf.nn.embedding_lookup(
+                            self.speaker_embedding_matrix,
+                            self.speaker_table.lookup(self.speaker)
+                        )
+                    self.speaker_embeddings_tiled = tf.tile(self.speaker_embeddings[:, None, :], [1, tf.shape(self.X)[1], 1])
+
                 if self.speaker_emb_dim and self.append_speaker_emb_to_inputs and not self.speaker_revnet_n_layers:
-                    tiled_embeddings = tf.tile(self.speaker_embeddings[:, None, :], [1, tf.shape(self.X)[1], 1])
-                    self.inputs = tf.concat([X, tiled_embeddings], axis=-1)
+                    self.inputs = tf.concat([X, self.speaker_embeddings_tiled], axis=-1)
                 else:
                     self.inputs = X
 
@@ -840,13 +879,13 @@ class DNNSeg(object):
                         )
                 if self.speaker_adversarial_gradient_scale:
                     self.encoder_speaker_adversarial_loss_summary = []
-                    for l in range(self.layers_encoder):
+                    for l in range(self.layers_encoder - 1):
                         self.encoder_speaker_adversarial_loss_summary.append(
                             tf.placeholder(tf.float32, name='encoder_speaker_adversarial_loss_%d_summary_placeholder' % (l + 1))
                         )
                 if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
                     self.encoder_passthru_adversarial_loss_summary = []
-                    for l in range(self.layers_encoder):
+                    for l in range(self.layers_encoder - 1):
                         self.encoder_passthru_adversarial_loss_summary.append(
                             tf.placeholder(tf.float32, name='encoder_passthru_adversarial_loss_%d_summary_placeholder' % (l + 1))
                         )
@@ -1831,7 +1870,7 @@ class DNNSeg(object):
                                 session=self.sess
                             )(targets_bwd_cur)
                         elif not self.lm_target_gradient_scale[l]:
-                            targets_bwd_cur = tf.stop_gradient(targets_cur)
+                            targets_bwd_cur = tf.stop_gradient(targets_bwd_cur)
                         weights_bwd_cur = lag_dict['weights_bwd']
                         time_ids_bwd_cur = lag_dict['time_ids_bwd']
                         mask_bwd_cur = lag_dict['mask_bwd']
@@ -1844,7 +1883,7 @@ class DNNSeg(object):
                                 session=self.sess
                             )(targets_fwd_cur)
                         elif not self.lm_target_gradient_scale[l]:
-                            targets_fwd_cur = tf.stop_gradient(targets_cur)
+                            targets_fwd_cur = tf.stop_gradient(targets_fwd_cur)
                         weights_fwd_cur = lag_dict['weights_fwd']
                         time_ids_fwd_cur = lag_dict['time_ids_fwd']
                         mask_fwd_cur = lag_dict['mask_fwd']
@@ -3039,10 +3078,10 @@ class DNNSeg(object):
                     for l in range(self.layers_encoder):
                         tf.summary.scalar('objective/encoder_lm_loss_l%d' % (l+1), self.encoder_lm_loss_summary[l], collections=['objective'])
                 if self.speaker_adversarial_gradient_scale:
-                    for l in range(self.layers_encoder):
+                    for l in range(self.layers_encoder - 1):
                         tf.summary.scalar('objective/encoder_speaker_adversarial_loss_l%d' % (l+1), self.encoder_speaker_adversarial_loss_summary[l], collections=['objective'])
                 if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                    for l in range(self.layers_encoder):
+                    for l in range(self.layers_encoder - 1):
                         tf.summary.scalar('objective/encoder_passthru_adversarial_loss_l%d' % (l+1), self.encoder_passthru_adversarial_loss_summary[l], collections=['objective'])
 
                 if self.task.lower() == 'classifier':
@@ -5197,11 +5236,11 @@ class DNNSeg(object):
                                 fd_summary[self.encoder_lm_loss_summary[l]] = encoder_lm_losses[l]
 
                         if encoder_speaker_adversarial_losses is not None:
-                            for l in range(self.layers_encoder):
+                            for l in range(self.layers_encoder - 1):
                                 fd_summary[self.encoder_speaker_adversarial_loss_summary[l]] = encoder_speaker_adversarial_losses[l]
 
                         if encoder_passthru_adversarial_losses is not None:
-                            for l in range(self.layers_encoder):
+                            for l in range(self.layers_encoder - 1):
                                 fd_summary[self.encoder_passthru_adversarial_loss_summary[l]] = encoder_passthru_adversarial_losses[l]
 
                         if len(fd_summary) > 0:
@@ -5448,9 +5487,9 @@ class DNNSeg(object):
                     if self.lm_loss_scale:
                         encoder_lm_loss_total = [0.] * self.layers_encoder
                     if self.speaker_adversarial_gradient_scale:
-                        encoder_speaker_adversarial_loss_total = [0.] * self.layers_encoder
+                        encoder_speaker_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
                     if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                        encoder_passthru_adversarial_loss_total = [0.] * self.layers_encoder
+                        encoder_passthru_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
 
                     # Collect correspondence targets if necessary
                     if self.static_correspondence_targets() and (segment_embeddings is None or segment_spans is None):
@@ -5538,9 +5577,9 @@ class DNNSeg(object):
                         if self.lm_loss_scale:
                             encoder_lm_loss_cur = [info_dict['encoder_lm_loss_l%d' % l] for l in range(self.layers_encoder)]
                         if self.speaker_adversarial_gradient_scale:
-                            encoder_speaker_adversarial_loss_cur = [info_dict['encoder_speaker_adversarial_loss_l%d' % l] for l in range(self.layers_encoder)]
+                            encoder_speaker_adversarial_loss_cur = [info_dict['encoder_speaker_adversarial_loss_l%d' % l] for l in range(self.layers_encoder - 1)]
                         if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                            encoder_passthru_adversarial_loss_cur = [info_dict['encoder_passthru_adversarial_loss_l%d' % l] for l in range(self.layers_encoder)]
+                            encoder_passthru_adversarial_loss_cur = [info_dict['encoder_passthru_adversarial_loss_l%d' % l] for l in range(self.layers_encoder - 1)]
 
                         # Collect correspondence targets if necessary
                         if self.static_correspondence_targets():
@@ -5563,10 +5602,10 @@ class DNNSeg(object):
                             for l in range(self.layers_encoder):
                                 encoder_lm_loss_total[l] = encoder_lm_loss_total[l] + encoder_lm_loss_cur[l]
                         if self.speaker_adversarial_gradient_scale:
-                            for l in range(self.layers_encoder):
+                            for l in range(self.layers_encoder - 1):
                                 encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] + encoder_speaker_adversarial_loss_cur[l]
                         if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                            for l in range(self.layers_encoder):
+                            for l in range(self.layers_encoder - 1):
                                 encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] + encoder_passthru_adversarial_loss_cur[l]
 
                         if verbose:
@@ -5678,9 +5717,9 @@ class DNNSeg(object):
                                 if self.lm_loss_scale:
                                     encoder_lm_loss_total = [0.] * self.layers_encoder
                                 if self.speaker_adversarial_gradient_scale:
-                                    encoder_speaker_adversarial_loss_total = [0.] * self.layers_encoder
+                                    encoder_speaker_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
                                 if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                                    encoder_passthru_adversarial_loss_total = [0.] * self.layers_encoder
+                                    encoder_passthru_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
                                 i_pb_base = i+1
 
                     loss_total /= n_pb
@@ -5695,10 +5734,10 @@ class DNNSeg(object):
                         for l in range(self.layers_encoder):
                             encoder_lm_loss_total[l] = encoder_lm_loss_total[l] / n_pb
                     if self.speaker_adversarial_gradient_scale:
-                        for l in range(self.layers_encoder):
+                        for l in range(self.layers_encoder - 1):
                             encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] / n_pb
                     if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                        for l in range(self.layers_encoder):
+                        for l in range(self.layers_encoder - 1):
                             encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] / n_pb
 
                     self.sess.run(self.incr_global_step)
@@ -6642,11 +6681,19 @@ class DNNSegMLE(DNNSeg):
                         for l in range(self.layers_encoder - 1):
                             if self.correspondence_loss_scale[l]:
                                 correspondence_inputs = self.encoder_embeddings[l]
-                                correspondence_targets = self.averaged_inputs[l]
                                 if l == 0:
-                                    correspondence_weights = self.X_mask
-                                else:
-                                    correspondence_weights = self.encoder_segmentations[l-1]
+                                    correspondence_inputs = [correspondence_inputs]
+                                    if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
+                                        correspondence_inputs.append(self.speaker_embeddings_tiled)
+                                    if self.n_passthru_neurons:
+                                        correspondence_inputs.append(self.passthru_neurons)
+                                    if len(correspondence_inputs) == 1:
+                                        correspondence_inputs = correspondence_inputs[0]
+                                    else:
+                                        correspondence_inputs = tf.concat(correspondence_inputs, axis=-1)
+
+                                correspondence_targets = self.averaged_inputs[l]
+                                correspondence_weights = self.encoder_segmentations[l]
 
                                 if self.lm_masking_mode.lower() in ['drop_masked', 'predict_at_boundaries']:
                                     correspondence_mask = tf.cast(tf.round(correspondence_weights), dtype=tf.bool)
@@ -6723,10 +6770,6 @@ class DNNSegMLE(DNNSeg):
                                 ) * self.correspondence_loss_scale[l]
 
                                 cae_loss_reduced = tf.reduce_mean(cae_loss)
-
-                                # cae_loss_reduced = tf.Print(cae_loss_reduced, ['l%d' % l, correspondence_targets, correspondence_logits, correspondence_weights, cae_loss_reduced], summarize=1000)
-                                cae_loss_reduced = tf.Print(cae_loss_reduced, ['l%d' % l, tf.reduce_min(correspondence_targets), tf.reduce_max(correspondence_targets), cae_loss_reduced], summarize=1000)
-                                # cae_loss_reduced = tf.Print(cae_loss_reduced, ['l%d' % l, cae_loss_reduced, tf.reduce_min(cae_loss), tf.reduce_max(cae_loss), tf.reduce_mean((correspondence_targets - correspondence_logits)**2), tf.reduce_min((correspondence_targets - correspondence_logits)**2), tf.reduce_max((correspondence_targets - correspondence_logits)**2)], summarize=1000)
 
                                 self.correspondence_losses.append(cae_loss_reduced)
 
@@ -6830,77 +6873,77 @@ class DNNSegMLE(DNNSeg):
                     # lm_losses_weighted = tf.Print(lm_losses_weighted, [lm_losses, lm_losses_total, lm_loss_weights, lm_losses_weighted])
 
                 if self.speaker_adversarial_gradient_scale:
-                    speaker_adversarial_loss = []
                     self.encoder_speaker_adversarial_losses = []
-                    for l in range(self.layers_encoder):
+                    speaker_targets_base = self.speaker_one_hot_tiled[..., :-1]
+                    for l in range(self.layers_encoder - 1):
+                        speaker_targets = tf.boolean_mask(speaker_targets_base, self.encoder_segmentations[l])
 
                         L = self.speaker_adversarial_gradient_scale
-                        speaker_pred = self.encoder_features[l]
-                        speaker_pred = replace_gradient(
+                        speaker_preds = tf.boolean_mask(self.encoder_features[l], self.encoder_segmentations[l])
+                        speaker_preds = replace_gradient(
                             tf.identity,
                             lambda x: -(x * L)
-                        )(speaker_pred)
+                        )(speaker_preds)
 
-                        if l < self.layers_encoder - 1:
-                            units = self.features_encoder[l]
-                        else:
-                            units = self.features_encoder[-1]
+                        for m in range(self.layers_speaker_decoder):
+                            if m == self.layers_speaker_decoder - 1:
+                                units_cur = int(speaker_targets.shape[-1])
+                                activation = None
+                            else:
+                                units_cur = self.units_speaker_decoder[m]
+                                activation = self.speaker_decoder_activation_inner
 
-                        speaker_pred = RNNLayer(
-                            units=units,
-                            activation=self.encoder_inner_activation,
-                            recurrent_activation=self.encoder_recurrent_activation,
-                            return_sequences=False,
-                            name='speaker_classifier_rnn_l%d' % l
-                        )(speaker_pred)
-
-                        speaker_pred = DenseLayer(
-                            units=len(self.speaker_list),
-                            name='speaker_classifier_final_l%d' % l
-                        )(speaker_pred)
-
-                        targets = self.speaker_one_hot[..., :-1]
+                            speaker_preds = DenseLayer(
+                                training=self.training,
+                                units=units_cur,
+                                activation=activation,
+                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                session=self.sess,
+                                name='speaker_decoder_l%d_i%d' % (l, m)
+                            )(speaker_preds)
 
                         speaker_classifier_loss = tf.losses.softmax_cross_entropy(
-                            targets,
-                            speaker_pred
+                            speaker_targets,
+                            speaker_preds
                         )
 
                         self.encoder_speaker_adversarial_losses.append(speaker_classifier_loss)
 
-                        speaker_adversarial_loss.append(speaker_classifier_loss)
+                        loss.append(speaker_classifier_loss)
 
                 if self.passthru_adversarial_gradient_scale:
-                    passthru_adversarial_loss = []
                     self.encoder_passthru_adversarial_losses = []
 
-                    passthru_targets = tf.stop_gradient(self.passthru_neurons)
+                    passthru_targets_base = self.passthru_neurons
+                    if not self.backprop_into_targets:
+                        passthru_targets_base = tf.stop_gradient(passthru_targets_base)
 
-                    for l in range(self.layers_encoder):
+                    for l in range(self.layers_encoder - 1):
+                        passthru_targets = tf.boolean_mask(passthru_targets_base, self.encoder_segmentations[l])
+
                         L = self.passthru_adversarial_gradient_scale
-                        passthru_preds = self.encoder_features[l]
+                        passthru_preds = tf.boolean_mask(self.encoder_features[l], self.encoder_segmentations[l])
                         passthru_preds = replace_gradient(
                             tf.identity,
                             lambda x: -(x * L)
                         )(passthru_preds)
 
-                        if l < self.layers_encoder - 1:
-                            units = self.features_encoder[l]
-                        else:
-                            units = self.features_encoder[-1]
+                        for m in range(self.layers_passthru_decoder):
+                            if m == self.layers_passthru_decoder - 1:
+                                units_cur = self.n_passthru_neurons
+                                activation = None
+                            else:
+                                units_cur = self.units_passthru_decoder[m]
+                                activation = self.passthru_decoder_activation_inner
 
-                        passthru_preds = RNNLayer(
-                            units=units,
-                            activation=self.encoder_inner_activation,
-                            recurrent_activation=self.encoder_recurrent_activation,
-                            return_sequences=True,
-                            name='passthru_regression_rnn_l%d' % l
-                        )(passthru_preds)
-
-                        passthru_preds = DenseLayer(
-                            units=self.n_passthru_neurons,
-                            name='passthru_regression_final_l%d' % l
-                        )(passthru_preds)
+                            passthru_preds = DenseLayer(
+                                training=self.training,
+                                units=units_cur,
+                                activation=activation,
+                                batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                session=self.sess,
+                                name='passthru_decoder_l%d_i%d' % (l, m)
+                            )(passthru_preds)
 
                         passthru_adversarial_loss_cur = self._get_loss(
                             passthru_targets,
@@ -6912,7 +6955,7 @@ class DNNSegMLE(DNNSeg):
 
                         self.encoder_passthru_adversarial_losses.append(passthru_adversarial_loss_cur)
 
-                        passthru_adversarial_loss.append(passthru_adversarial_loss_cur)
+                        loss.append(passthru_adversarial_loss_cur)
 
                 if len(self.regularizer_map) > 0:
                     regularizer_losses = self._apply_regularization(reduce_each=True, reduce_all=False)
@@ -6920,14 +6963,6 @@ class DNNSegMLE(DNNSeg):
                     loss += regularizer_losses
                 else:
                     self.regularizer_loss_total = tf.constant(0., dtype=self.FLOAT_TF)
-
-                if self.speaker_adversarial_gradient_scale:
-                    loss.append(speaker_adversarial_loss)
-                    reduction_weights = [1] * len(speaker_adversarial_loss)
-
-                if self.passthru_adversarial_gradient_scale:
-                    loss.append(passthru_adversarial_loss)
-                    reduction_weights = [1] * len(passthru_adversarial_loss)
 
                 if self.loss_normalization:
                     reduction_weights = 'normalize'
@@ -7059,15 +7094,11 @@ class DNNSegMLE(DNNSeg):
                                 to_run.append(self.lm_losses[l])
                                 to_run_names.append('encoder_lm_loss_l%d' % l)
                         if self.speaker_adversarial_gradient_scale:
-                            for l in range(self.layers_encoder):
-                                to_run.append(self.encoder_speaker_adversarial_losses[l])
-                                to_run_names.append('encoder_speaker_adversarial_loss_l%d' % l)
-                        if self.speaker_adversarial_gradient_scale:
-                            for l in range(self.layers_encoder):
+                            for l in range(self.layers_encoder - 1):
                                 to_run.append(self.encoder_speaker_adversarial_losses[l])
                                 to_run_names.append('encoder_speaker_adversarial_loss_l%d' % l)
                         if self.passthru_adversarial_gradient_scale:
-                            for l in range(self.layers_encoder):
+                            for l in range(self.layers_encoder - 1):
                                 to_run.append(self.encoder_passthru_adversarial_losses[l])
                                 to_run_names.append('encoder_passthru_adversarial_loss_l%d' % l)
                     if return_regularizer_loss:
