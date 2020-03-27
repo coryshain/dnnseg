@@ -102,7 +102,7 @@ def plot_acoustic_features(
 
     n_plots = 1
     if has_segs:
-        n_plots += 2
+        n_plots += 1
         if has_smoothing:
             n_plots += 1
     if has_states:

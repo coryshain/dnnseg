@@ -4607,6 +4607,48 @@ class MaskedLSTMLayer(object):
 
                 return H
 
+class DropoutLayer(object):
+    def __init__(
+            self,
+            rate,
+            training=True,
+            noise_shape=None,
+            session=None,
+     ):
+        self.rate = rate
+        self.training = training
+        self.noise_shape = noise_shape
+        self.training = training
+        self.session = get_session(session)
+
+    def __call__(self, inputs):
+        shape = []
+        tile_shape = []
+        shape_src = tf.shape(inputs)
+
+        for i, s in enumerate(self.noise_shape):
+            if s is None:
+                shape.append(shape_src[i])
+            else:
+                shape.append(s)
+            tile_shape.append(shape_src[i] // shape[-1])
+
+        def train_func():
+            noise = tf.random_uniform(shape) > self.rate
+            noise = tf.tile(
+                noise,
+                tile_shape
+            )
+            alt = tf.zeros_like(inputs)
+            out = tf.where(noise, inputs, alt)
+            return out
+
+        def eval_func():
+            return inputs
+
+        return tf.cond(self.training, train_func, eval_func)
+
+
 class RevNetBlock(object):
     def __init__(
             self,

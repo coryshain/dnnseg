@@ -418,7 +418,7 @@ class DNNSeg(object):
                 else:
                     self.entropy_regularizer = None
 
-                def get_extremeness_regularizer(shape=2, scale=1):
+                def get_extremeness_regularizer_old(shape=2, scale=1):
                     def extremeness_regularizer(x):
                         out = tf.abs(2*x - 1)**shape * scale
 
@@ -429,6 +429,20 @@ class DNNSeg(object):
                         return out
 
                     return extremeness_regularizer
+
+                def get_extremeness_regularizer_new(shape=2, scale=1): # Normalized so that max gradient is ``scale`` regardless of ``shape``
+                    def extremeness_regularizer(x):
+                        out = 1. / shape * tf.abs(2*x - 1)**shape * scale
+
+                        if len(out.shape) > 0:
+                            # out = tf.Print(out, [x, out, tf.reduce_mean(out)], summarize=100)
+                            out = tf.reduce_mean(out)
+
+                        return out
+
+                    return extremeness_regularizer
+
+                get_extremeness_regularizer = get_extremeness_regularizer_new
 
                 if self.boundary_rate_extremeness_regularizer_scale:
                     self.boundary_rate_extremeness_regularizer = get_extremeness_regularizer(
@@ -491,9 +505,9 @@ class DNNSeg(object):
                     self.encoder_bitwise_feature_regularizer = get_regularizer(self.encoder_bitwise_feature_regularization, session=self.sess)
                 else:
                     self.encoder_bitwise_feature_regularizer = None
-                    
-                if self.encoder_feature_similarity_regularization:
-                    self.encoder_feature_similarity_regularizer = get_regularizer(self.encoder_feature_similarity_regularization, session=self.sess)
+
+                if self.encoder_feature_similarity_regularizer_scale:
+                    self.encoder_feature_similarity_regularizer = tf.contrib.layers.l2_regularizer(scale=self.encoder_feature_similarity_regularizer_scale)
                 else:
                     self.encoder_feature_similarity_regularizer = None
 
@@ -745,6 +759,14 @@ class DNNSeg(object):
                 else:
                     self.inputs = X
 
+                if self.temporal_dropout_rate:
+                    self.inputs = DropoutLayer(
+                        self.temporal_dropout_rate,
+                        noise_shape=[None, None, 1],
+                        training=self.training,
+                        session=self.sess
+                    )(self.inputs)
+
                 if self.project_inputs:
                     projection_in = self.inputs
                     projection_lambdas = []
@@ -891,12 +913,14 @@ class DNNSeg(object):
                         )
                 self.reg_summary = tf.placeholder(tf.float32, name='reg_summary_placeholder')
 
+                self.segmentation_rate = []
                 self.classification_scores = []
                 if self.task.lower() == 'classifier':
                     n_layers = 1
                 else:
                     n_layers = self.layers_encoder - 1
                 for l in range(n_layers):
+                    self.segmentation_rate.append(tf.placeholder(tf.float32, name='seg_rate_l%d_placeholder' % (l+1)))
                     self.classification_scores.append(
                         {
                             'phn': {
@@ -1207,6 +1231,7 @@ class DNNSeg(object):
                     self.segmentation_probs = self.segmenter_output.boundary_probs(as_logits=False, mask=self.X_mask)
                     self.encoder_segmentations = self.segmenter_output.boundary(mask=self.X_mask)
                     self.mean_segmentation_prob = tf.reduce_sum(self.segmentation_probs) / (tf.reduce_sum(self.X_mask) + self.epsilon)
+                    fixed_boundaries = self.fixed_boundaries_placeholder
 
                     if (not self.encoder_boundary_discretizer) or self.segment_at_peaks or self.boundary_prob_discretization_threshold:
                         self.segmentation_probs_smoothed = []
@@ -1235,7 +1260,6 @@ class DNNSeg(object):
                             for l in range(len(self.segmentations)):
                                 segmentations = self.segmentations[l]
                                 # Enforce known boundaries
-                                fixed_boundaries = self.fixed_boundaries_placeholder
                                 if not self.streaming:  # Ensure that the final timestep is a boundary
                                     if self.input_padding == 'pre':
                                         fixed_boundaries = tf.concat(
@@ -1346,6 +1370,8 @@ class DNNSeg(object):
                     if self.n_passthru_neurons:
                         self.passthru_neurons = self.segmenter_output.passthru_neurons(mask=self.X_mask)
 
+                    self.encoder_segmentation_rate = []
+
                     # Regularize encoder outputs
                     for l in range(self.layers_encoder):
                         if l == 0:
@@ -1361,7 +1387,7 @@ class DNNSeg(object):
                             segs = tf.zeros_like(mask_cur)
                         segs_expanded = segs[..., None]
 
-                        denom = tf.reduce_sum(mask_cur)
+                        denom_l = tf.reduce_sum(segs_expanded)
 
                         states = self.encoder_states[l]
                         proposals = self.encoder_cell_proposals[l]
@@ -1372,24 +1398,27 @@ class DNNSeg(object):
                         d_p = int(proposals.shape[-1])
                         d_f = int(features.shape[-1])
 
-                        mean_states = tf.reduce_sum(states * mask_cur_expanded) / tf.maximum(denom * d_s, e)
-                        mean_proposals = tf.reduce_sum(proposals * mask_cur_expanded) / tf.maximum(denom * d_p, e)
+                        mean_states = tf.reduce_sum(states * mask_cur_expanded) / tf.maximum(denom_l * d_s, e)
+                        mean_proposals = tf.reduce_sum(proposals * mask_cur_expanded) / tf.maximum(denom_l * d_p, e)
 
                         self._add_regularization(mean_states, self.encoder_state_regularizer)
                         self._add_regularization(mean_proposals, self.encoder_cell_proposal_regularizer)
 
                         if l < (self.layers_encoder - 1 + self.encoder_discretize_final):
-                            mean_features = tf.reduce_sum(features * mask_cur_expanded) / tf.maximum(denom * d_f, e)
-                            mean_bitwise_features = tf.reduce_sum(features * mask_cur_expanded, axis=[0,1]) / tf.maximum(denom, e)
-                            mean_bitwise_feature_at_segs = tf.reduce_sum(features * segs_expanded, axis=[0,1]) / tf.maximum(tf.reduce_sum(segs_expanded), e)
-                            # mean_bitwise_feature_at_segs = tf.Print(mean_bitwise_feature_at_segs, ['feats l%d' % l, mean_bitwise_feature_at_segs], summarize=32)
+                            mean_features = tf.reduce_sum(features * segs_expanded) / tf.maximum(denom_l * d_f, e)
+                            mean_bitwise_features = tf.reduce_sum(features * segs_expanded, axis=[0,1]) / tf.maximum(denom_l, e)
+                            mean_bitwise_feature_at_segs = tf.reduce_sum(features * segs_expanded, axis=[0,1]) / tf.maximum(denom_l, e)
                             self._add_regularization(mean_features, self.encoder_feature_regularizer)
                             self._add_regularization(mean_bitwise_features, self.encoder_bitwise_feature_regularizer)
                             self._add_regularization(mean_bitwise_feature_at_segs, self.feature_rate_extremeness_regularizer)
 
+                        fixed_boundaries = 1. - self.fixed_boundaries_placeholder
+                        denom_lm1 = tf.reduce_sum(mask_cur * fixed_boundaries)
                         if l < (self.layers_encoder - 1):
-                            mean_seg_probs = tf.reduce_sum(seg_probs) / tf.maximum(denom, e)
-                            mean_segs = tf.reduce_sum(segs) / tf.maximum(denom, e)
+                            mean_seg_probs = tf.reduce_sum(seg_probs * fixed_boundaries) / tf.maximum(denom_lm1, e)
+                            # mean_seg_probs = tf.Print(mean_seg_probs, ['l%d' % l, mean_seg_probs])
+                            mean_segs = tf.reduce_sum(segs * fixed_boundaries) / tf.maximum(denom_lm1, e)
+                            self.encoder_segmentation_rate.append(mean_segs)
                             # mean_segs = tf.Print(mean_segs, ['boundaries l%d' % l, mean_segs])
                             self._add_regularization(tf.boolean_mask(seg_probs, mask_cur), self.entropy_regularizer)
                             self._add_regularization(mean_seg_probs, self.boundary_prob_regularizer)
@@ -1398,24 +1427,15 @@ class DNNSeg(object):
                             self._add_regularization(mean_segs, self.boundary_regularizer)
 
                             # Feature similarity regularizer, penalizes similarity of adjacent segment labels
-                            feats = self.encoder_features_by_seg
-                            deltas = feats[l][:,1:] - feats[l][:,:-1]
+                            delta_mask = segs[:, 1:]
+                            feats = self.encoder_features_by_seg[l]
+                            deltas = feats[:,1:] - feats[:,:-1]
                             deltas = tf.maximum(-deltas, deltas)
-                            # deltas = self.encoder_feature_deltas[l]
+                            deltas = tf.boolean_mask(deltas, delta_mask)
                             b = self.encoder_feature_similarity_regularizer_shape
                             n_changed_feats = tf.reduce_sum(deltas, axis=-1)
-                            delta_mask = segs[:, 1:]
-                            # feature_seqs = tf.boolean_mask(features, segs)
-                            # changed_feats = feature_seqs[1:] - feature_seqs[:-1]
-                            # n_changed_feats = tf.reduce_sum(tf.maximum(changed_feats, -changed_feats), axis=-1)
-                            # batch_ids = tf.tile(tf.range(tf.shape(features)[0])[..., None], [1, tf.shape(features)[1]])
-                            # batch_ids = tf.boolean_mask(batch_ids, segs)
-                            # batch_mask = tf.cast(tf.equal(batch_ids[1:], batch_ids[:-1]), dtype=self.FLOAT_TF)
-                            # unchanged_feats = tf.Print(unchanged_feats, ['l%d' % l, tf.reduce_sum(segs), tf.shape(unchanged_feats), tf.reduce_min(unchanged_feats), tf.reduce_max(unchanged_feats), tf.reduce_sum(unchanged_feats), tf.reduce_prod(tf.shape(unchanged_feats)), tf.shape(batch_mask), tf.reduce_sum(batch_mask)])
-                            # n_unchanged_feats = tf.reduce_sum(unchanged_feats) / tf.maximum(tf.reduce_sum(batch_mask) * tf.cast(tf.shape(features)[-1], dtype=self.FLOAT_TF), e)
-                            similarity_penalty  = tf.reduce_sum(tf.exp(-b * n_changed_feats) * delta_mask) / tf.maximum(tf.reduce_sum(delta_mask), e)
-                            # x = n_changed_feats
-                            # similarity_penalty = tf.Print(similarity_penalty, ['l%d' % l, similarity_penalty, tf.reduce_mean(b * tf.exp(-b * x)), tf.reduce_min(b * tf.exp(-b * x)), tf.reduce_max(b * tf.exp(-b * x)), tf.shape(n_changed_feats), tf.reduce_min(n_changed_feats), tf.reduce_max(n_changed_feats), tf.reduce_sum(batch_mask)])
+                            similarity_penalties = tf.exp(-b * n_changed_feats)
+                            similarity_penalty  = tf.reduce_mean(similarity_penalties)
                             self._add_regularization(similarity_penalty, self.encoder_feature_similarity_regularizer)
 
                             if self.encoder_seglen_regularizer_scale[l]:
@@ -1427,7 +1447,6 @@ class DNNSeg(object):
                                 length_penalties = tf.exp(-b * tf.maximum(lengths-1 , 0)) * w
                                 length_penalty = tf.reduce_sum(length_penalties) / tf.maximum(tf.reduce_sum(w), e)
                                 length_penalty *= s
-                                # length_penalty = tf.Print(length_penalty, ['l%d' % l, segs, lengths, length_penalties, length_penalty], summarize=100)
                                 self._add_regularization(length_penalty, self.encoder_seglen_regularizer)
 
                     if self.n_correspondence:
@@ -2058,6 +2077,8 @@ class DNNSeg(object):
                                 else:
                                     gather_ix = None
 
+                                key_encoder_states = key_encoder_cell = None
+
                                 # Compute backward and forward values
                                 for x in direction:
                                     if order[x] and l < self.layers_encoder - 1:
@@ -2083,32 +2104,32 @@ class DNNSeg(object):
                                         keys_pred[x] = key_activation(keys_pred[x])
 
                                         if self.decoder_encode_keys:
-                                            if x == 'fwd':
-                                                encoder_in = keys_pred[x]
-                                            else:
+                                            if key_encoder_states is None:
                                                 encoder_in = keys_gold[x]
-                                            if self.lm_gradient_scale[l] is not None:
-                                                encoder_in = replace_gradient(
-                                                    tf.identity,
-                                                    lambda x: x * self.lm_gradient_scale[l],
+                                                if self.lm_gradient_scale[l] is not None:
+                                                    encoder_in = replace_gradient(
+                                                        tf.identity,
+                                                        lambda x: x * self.lm_gradient_scale[l],
+                                                        session=self.sess
+                                                    )(encoder_in)
+
+                                                key_encoder = RNNLayer(
+                                                    training=self.training,
+                                                    units=self.units_encoder[l],
+                                                    activation=self.encoder_inner_activation,
+                                                    recurrent_activation=self.encoder_recurrent_activation,
+                                                    return_sequences=True,
+                                                    return_cell_state=True,
+                                                    batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                                    name='decoder_key_encoder_l%d' % l,
                                                     session=self.sess
-                                                )(encoder_in)
+                                                )
 
-                                            key_encoder = RNNLayer(
-                                                training=self.training,
-                                                units=self.units_encoder[l],
-                                                activation=self.encoder_inner_activation,
-                                                recurrent_activation=self.encoder_recurrent_activation,
-                                                return_sequences=True,
-                                                return_cell_state=True,
-                                                batch_normalization_decay=self.decoder_batch_normalization_decay,
-                                                name='decoder_key_encoder_%s_l%d' % (x, l),
-                                                session=self.sess
-                                            )
-
-                                            key_encoder_states, key_encodings_cell[x] = key_encoder(encoder_in, mask=key_val_mask[x])
+                                                key_encoder_states, key_encoder_cell = key_encoder(encoder_in, mask=key_val_mask[x])
 
                                             key_encodings[x] = key_encoder_states[..., -1, :]
+
+                                            key_encodings_cell[x] = key_encoder_cell
                                             # keys[x] = (key_encoder_states * key_val_mask[x][..., None])
                                             # values[x] = keys[x]
 
@@ -2116,7 +2137,7 @@ class DNNSeg(object):
                                             key_encodings[x] = None
                                             key_encodings_cell[x] = None
 
-                                        if self.decoder_use_gold_attn_keys and x == 'bwd':
+                                        if x == 'bwd' and self.decoder_use_gold_attn_keys_at_train:
                                             keys[x] = keys_gold[x]
                                             if self.lm_gradient_scale[l + 1] is not None:
                                                 keys[x] = replace_gradient(
@@ -2127,10 +2148,15 @@ class DNNSeg(object):
                                         else:
                                             keys[x] = keys_pred[x]
 
+                                        if x == 'bwd' and self.decoder_use_gold_attn_keys_at_train and not self.decoder_use_gold_attn_keys_at_eval:
+                                            keys[x] = tf.cond(self.training, lambda: keys[x], lambda: keys_pred[x])
+
                                         if not self.backprop_into_attn_keys:
                                             keys[x] = tf.stop_gradient(keys[x])
-                                            
-                                        # keys[x] = tf.cond(self.training, lambda: keys_gold[x], lambda: keys_pred[x])
+
+                                        # if self.backprop_into_loss_weights:
+                                        if True:
+                                            keys[x] = keys[x] * key_val_mask[x][..., None]
 
                                         values[x] = self.segmenter.embedding_fn[l + 1](keys[x])
 
@@ -2405,6 +2431,7 @@ class DNNSeg(object):
                                         shape=[b_targ, t_targ],
                                         dtype=self.FLOAT_TF
                                     )
+
                                     initial_state[x] = AttentionalLSTMDecoderStateTuple(
                                         h=states_init,
                                         c=cell_states_init,
@@ -3105,6 +3132,7 @@ class DNNSeg(object):
 
                 if 'hmlstm' in self.encoder_type.lower():
                     for l in range(self.layers_encoder - 1):
+                        tf.summary.scalar('seg_rate/l%d' % (l + 1), self.segmentation_rate[l], collections=['objective'])
                         if self.data_type.lower() == 'acoustic':
                             for s in ['phn', 'wrd']:
                                 tf.summary.scalar('segmentation_l%d_%s/b_p' %(l+1, s), self.segmentation_scores[l][s]['b_p'], collections=['segmentation'])
@@ -5168,6 +5196,7 @@ class DNNSeg(object):
             log=True,
             loss=None,
             reg_loss=None,
+            seg_rate=None,
             reconstruction_loss=None,
             prediction_loss=None,
             correspondence_loss=None,
@@ -5219,12 +5248,15 @@ class DNNSeg(object):
                         if reg_loss is not None:
                             fd_summary[self.reg_summary] = reg_loss
 
+                        if seg_rate is not None:
+                            for l in range(self.layers_encoder - 1):
+                                fd_summary[self.segmentation_rate[l]] = seg_rate[l]
+
                         if reconstruction_loss is not None:
                             fd_summary[self.loss_reconstruction_summary] = None
 
                         if prediction_loss is not None:
                             fd_summary[self.loss_prediction_summary] = prediction_loss
-
                         
                         if self.use_correspondence_loss:
                             for l in range(self.layers_encoder - 1):
@@ -5479,6 +5511,7 @@ class DNNSeg(object):
 
                     loss_total = 0.
                     reg_total = 0.
+                    seg_rate_total = [0.] * (self.layers_encoder - 1)
                     if not self.streaming or self.predict_backward:
                         reconstruction_loss_total = 0.
                     if self.streaming and self.predict_forward:
@@ -5506,7 +5539,6 @@ class DNNSeg(object):
                     for i, batch in enumerate(data_feed_train):
                         if self.streaming:
                             X_batch = batch['X']
-                            X_batch
                             X_mask_batch = batch['X_mask']
                             y_bwd_batch = batch['y_bwd']
                             y_bwd_mask_batch = batch['y_bwd_mask']
@@ -5568,6 +5600,7 @@ class DNNSeg(object):
                         info_dict = self.run_train_step(fd_minibatch)
                         loss_cur = info_dict['loss']
                         reg_cur = info_dict['regularizer_loss']
+                        seg_rate_cur = [info_dict['seg_rate_l%d' % l] if 'seg_rate_l%d' % l in info_dict else 0. for l in range(self.layers_encoder - 1)]
                         if not self.streaming or self.predict_backward:
                             reconstruction_loss_cur = info_dict['reconstruction_loss']
                         if self.streaming and self.predict_forward:
@@ -5591,6 +5624,8 @@ class DNNSeg(object):
                             loss_cur = 0
                         loss_total += loss_cur
                         reg_total += reg_cur
+                        for l in range(len(seg_rate_total)):
+                            seg_rate_total[l] += seg_rate_cur[l]
                         if not self.streaming or self.predict_backward:
                             reconstruction_loss_total += reconstruction_loss_cur
                         if self.streaming and self.predict_forward:
@@ -5610,6 +5645,8 @@ class DNNSeg(object):
 
                         if verbose:
                             pb_update_vector = [('loss', loss_cur), ('reg', reg_cur)]
+                            for l in range(self.layers_encoder - 1):
+                                pb_update_vector.append(('rate L%d' % (l+1), seg_rate_cur[l]))
                             if self.use_jtps:
                                 pb_update_vector.append(('l', info_dict['jtps_lambda_mean']))
                             pb.update(i_pb+1, values=pb_update_vector)
@@ -5633,6 +5670,7 @@ class DNNSeg(object):
                                 n_plot=n_plot_cur,
                                 loss=loss_total / (i_pb + 1),
                                 reg_loss=reg_total / (i_pb + 1),
+                                seg_rate=[x / (i_pb + 1) for x in seg_rate_total],
                                 reconstruction_loss=reconstruction_loss_total / (i_pb + 1) if (not self.streaming or self.predict_backward) else None,
                                 prediction_loss=prediction_loss_total / (i_pb + 1) if (self.streaming and self.predict_forward) else None,
                                 correspondence_loss=[x / (i_pb + 1) for x in correspondence_loss_total] if self.use_correspondence_loss else None,
@@ -5708,6 +5746,7 @@ class DNNSeg(object):
 
                                 loss_total = 0.
                                 reg_total = 0.
+                                seg_rate_total = [0.] * (self.layers_encoder - 1)
                                 if not self.streaming or self.predict_backward:
                                     reconstruction_loss_total = 0.
                                 if self.streaming and self.predict_forward:
@@ -5724,6 +5763,8 @@ class DNNSeg(object):
 
                     loss_total /= n_pb
                     reg_total /= n_pb
+                    for l in range(len(seg_rate_total)):
+                        seg_rate_total[l] = seg_rate_total[l] / n_pb
                     if not self.streaming or self.predict_backward:
                         reconstruction_loss_total /= n_pb
                     if self.streaming and self.predict_forward:
@@ -5744,7 +5785,10 @@ class DNNSeg(object):
 
                     if self.streaming:
                         save = True
-                        evaluate = True
+                        if self.global_step.eval(session=self.sess) % 5 == 0:
+                            evaluate = True
+                        else:
+                            evaluate = False
                         n_plot_cur = n_plot
                         log = True
 
@@ -5776,13 +5820,14 @@ class DNNSeg(object):
                         evaluate=evaluate,
                         log=log,
                         loss=loss_total,
+                        reg_loss=reg_total,
+                        seg_rate=seg_rate_total,
                         reconstruction_loss=reconstruction_loss_total if (not self.streaming or self.predict_backward) else None,
                         prediction_loss=prediction_loss_total if (self.streaming and self.predict_forward) else None,
                         correspondence_loss=correspondence_loss_total,
                         encoder_lm_losses=encoder_lm_loss_total if self.lm_loss_scale else None,
                         encoder_speaker_adversarial_losses=encoder_speaker_adversarial_loss_total if self.speaker_adversarial_gradient_scale else None,
                         encoder_passthru_adversarial_losses=encoder_passthru_adversarial_loss_total if self.passthru_adversarial_gradient_scale else None,
-                        reg_loss=reg_total,
                         ix2label=ix2label,
                         n_plot=n_plot_cur,
                         verbose=verbose
@@ -6765,11 +6810,12 @@ class DNNSegMLE(DNNSeg):
                                     correspondence_logits,
                                     use_dtw=False,
                                     distance_func=self._lm_distance_func(l),
-                                    reduce=False,
+                                    reduce=True,
+                                    weights=correspondence_weights,
                                     name='cae_loss_L%d' % l
                                 ) * self.correspondence_loss_scale[l]
 
-                                cae_loss_reduced = tf.reduce_mean(cae_loss)
+                                cae_loss_reduced = cae_loss
 
                                 self.correspondence_losses.append(cae_loss_reduced)
 
@@ -6871,6 +6917,8 @@ class DNNSegMLE(DNNSeg):
                     #     lm_losses_weighted = lm_losses_total[0]
 
                     # lm_losses_weighted = tf.Print(lm_losses_weighted, [lm_losses, lm_losses_total, lm_loss_weights, lm_losses_weighted])
+                    
+                adversarial_losses = []
 
                 if self.speaker_adversarial_gradient_scale:
                     self.encoder_speaker_adversarial_losses = []
@@ -6909,7 +6957,7 @@ class DNNSegMLE(DNNSeg):
 
                         self.encoder_speaker_adversarial_losses.append(speaker_classifier_loss)
 
-                        loss.append(speaker_classifier_loss)
+                        adversarial_losses.append(speaker_classifier_loss)
 
                 if self.passthru_adversarial_gradient_scale:
                     self.encoder_passthru_adversarial_losses = []
@@ -6955,11 +7003,12 @@ class DNNSegMLE(DNNSeg):
 
                         self.encoder_passthru_adversarial_losses.append(passthru_adversarial_loss_cur)
 
-                        loss.append(passthru_adversarial_loss_cur)
+                        adversarial_losses.append(passthru_adversarial_loss_cur)
 
                 if len(self.regularizer_map) > 0:
                     regularizer_losses = self._apply_regularization(reduce_each=True, reduce_all=False)
                     self.regularizer_loss_total = tf.add_n(regularizer_losses)
+                    # self.regularizer_loss_total = tf.Print(self.regularizer_loss_total, ['extremeness reg', regularizer_losses[2], 'grad', tf.gradients(regularizer_losses[2], self.mean_seg_probs)[0], 'grads', tf.gradients(regularizer_losses[2], self.segmentation_probs[1])[0]], summarize=100)
                     loss += regularizer_losses
                 else:
                     self.regularizer_loss_total = tf.constant(0., dtype=self.FLOAT_TF)
@@ -6984,6 +7033,8 @@ class DNNSegMLE(DNNSeg):
                 self.loss = loss
 
                 self.full_loss = self.loss
+                if len(adversarial_losses) > 0:
+                    self.full_loss += tf.add_n(adversarial_losses)
 
                 self._initialize_optimizer()
 
@@ -7056,6 +7107,7 @@ class DNNSegMLE(DNNSeg):
             feed_dict,
             return_loss=True,
             return_regularizer_loss=True,
+            return_segmentation_rate=True,
             return_reconstructions=False,
             return_labels=False,
             return_label_probs=False,
@@ -7104,6 +7156,10 @@ class DNNSegMLE(DNNSeg):
                     if return_regularizer_loss:
                         to_run.append(self.regularizer_loss_total)
                         to_run_names.append('regularizer_loss')
+                    if return_segmentation_rate:
+                        for l in range(self.layers_encoder - 1):
+                            to_run.append(self.encoder_segmentation_rate[l])
+                            to_run_names.append('seg_rate_l%d' % l)
                     if return_reconstructions:
                         to_run.append(self.reconstructions)
                         to_run_names.append('reconst')

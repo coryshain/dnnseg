@@ -1065,10 +1065,10 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "If ``str``, underscore-delimited name and scale of encoder bitwise feature regularization. If ``float``, scale of encoder L2 bitwise feature regularization. If ``None``, no encoder bitwise feature regularization."
     ),
     Kwarg(
-        'encoder_feature_similarity_regularization',
+        'encoder_feature_similarity_regularizer_scale',
         None,
-        [str, float, None],
-        "If ``str``, underscore-delimited name and scale of encoder feature similarity regularization. If ``float``, scale of encoder L2 feature similarity regularization. If ``None``, no encoder feature similarity regularization."
+        [float, None],
+        "Scale of penalty on similarity of consecutive encodings. If ``None``, no feature similarity penalty."
     ),
     Kwarg(
         'encoder_feature_similarity_regularizer_shape',
@@ -1103,7 +1103,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     Kwarg(
         'temporal_dropout_rate',
         None,
-        [int, str, None],
+        [str, float, None],
         "Rate at which to drop timesteps to the encoder during training. If ``None``, no temporal dropout."
     ),
     Kwarg(
@@ -1291,10 +1291,16 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to project keys for computing attention weights."
     ),
     Kwarg(
-        'decoder_use_gold_attn_keys',
+        'decoder_use_gold_attn_keys_at_train',
         False,
         bool,
-        "Whether to use gold or reconstructed segment IDs as keys for computing attention weights."
+        "Whether to use gold or reconstructed segment IDs as keys for computing attention weights during training."
+    ),
+    Kwarg(
+        'decoder_use_gold_attn_keys_at_eval',
+        False,
+        bool,
+        "Whether to use gold or reconstructed segment IDs as keys for computing attention weights during evaluation."
     ),
     Kwarg(
         'backprop_into_attn_keys',
