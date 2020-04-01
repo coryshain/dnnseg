@@ -276,6 +276,55 @@ def align_values_to_batch(
 
     return out
 
+def get_segment_indices(segs, mask):
+    shape = segs.shape
+    batch_ix = np.arange(shape[0])
+    while len(batch_ix.shape) < len(shape):
+        batch_ix = batch_ix[..., None]
+    batch_ix = np.tile(batch_ix, np.floor_divide(shape, batch_ix.shape))
+    batch_ix = batch_ix.reshape(-1)
+    segs = segs.reshape(-1)
+    mask = mask.reshape(-1)
+
+    out_ix = []
+    max_len = 0
+    len_cur = 0
+    ix_cur = []
+    b_cur = -1
+
+    for i, (s, m, b) in enumerate(zip(segs, mask, batch_ix)):
+        if b != b_cur:
+            ix_cur = []
+            b_cur = b
+        if m:
+            ix_cur.append(i)
+            len_cur += 1
+            if s:
+                out_ix.append(ix_cur)
+                ix_cur = []
+                if len_cur > max_len:
+                    max_len = len_cur
+                len_cur = 0
+
+    out_mask_bottom = []
+
+    for i, x in enumerate(out_ix):
+        mask_cur = [1] * len(x)
+        if len(x) < max_len:
+            pad = [0] * (max_len - len(x))
+            out_ix[i] = x + pad
+            mask_cur += pad
+        out_mask_bottom.append(mask_cur)
+            
+    out_ix = np.array(out_ix)
+    out_mask_bottom = np.array(out_mask_bottom, dtype='float32')
+
+    return out_ix, out_mask_bottom
+                
+    
+
+
+
 
 # Debugged reduce_logsumexp to allow -inf
 # Stolen from meijun on Github <https://github.com/tensorflow/tensorflow/issues/11692>
@@ -1956,6 +2005,11 @@ class HMLSTMCell(LayerRNNCell):
                         )
                     h_behind = self._recurrent_dropout(h_behind)
 
+                    # Previous features
+                    features_behind = layer.features
+                    features_target_behind = layer.features_target
+                    features_prob_behind = layer.features_prob
+
                     # h_above: Hidden state of layer above at previous timestep (implicitly 0 if final layer)
                     if l < self._num_layers - 1:
                         h_above = state[l + 1].embedding
@@ -2173,7 +2227,7 @@ class HMLSTMCell(LayerRNNCell):
                         else:
                             features = h
                             features_clean = h_clean
-                        feat_prob = (h + 1) / 2
+                        features_prob = (h + 1) / 2
                     else:
                         # Define features
                         # Squash to [-1,1] if state activation is not tanh
@@ -2203,25 +2257,25 @@ class HMLSTMCell(LayerRNNCell):
                         # Feature values in {0,1}
                         if self._state_discretizer:
                             # Feature probabilities in [0,1]
-                            feat_prob = self._recurrent_activation(features)
+                            features_prob = self._recurrent_activation(features)
 
                             if self._cumulative_feature_prob:
                                 feat_prob_prev = layer.features_prob * (1 - z_behind_cur)
                                 feat_prob_range = 1 - feat_prob_prev
-                                feat_prob_update = feat_prob_prev + feat_prob * feat_prob_range
+                                feat_prob_update = feat_prob_prev + features_prob * feat_prob_range
                                 if self._forget_at_boundary:
                                     cprob = copy_prob
                                 else:
                                     cprob = z_below_cur
-                                feat_prob = (1 - cprob) * feat_prob_prev + cprob * feat_prob_update
+                                features_prob = (1 - cprob) * feat_prob_prev + cprob * feat_prob_update
 
                             # Feature values in {0,1}
-                            features_discrete = self._state_discretizer(feat_prob)
-                            features_discrete_clean = round_straight_through(feat_prob, session=self._session)
+                            features_discrete = self._state_discretizer(features_prob)
+                            features_discrete_clean = round_straight_through(features_prob, session=self._session)
 
                             if l < (self._num_layers - 1 + self._discretize_final):
                                 if self._min_discretization_prob is not None:
-                                    def train_func(features_discrete=features_discrete, features_prob=feat_prob, features=features):
+                                    def train_func(features_discrete=features_discrete, features_prob=features_prob, features=features):
                                         a = self._min_discretization_prob
                                         discretization_prob = 2 * (1 - a) * tf.abs(features_prob - 0.5) + a
                                         if self._trainable_self_discretization:
@@ -2241,7 +2295,7 @@ class HMLSTMCell(LayerRNNCell):
                                 features = features_discrete
                                 features_clean = features_discrete_clean
                         else:
-                            feat_prob = features
+                            features_prob = features
                             features_clean_prob = features_clean
 
                     if self._state_noise_level or self._feature_noise_level or self._boundary_noise_level:
@@ -2254,6 +2308,16 @@ class HMLSTMCell(LayerRNNCell):
                             features_target = features_discrete
                         else:
                             features_target = features
+
+                    if self._forget_at_boundary:
+                        features = copy_prob * features_behind + (1 - copy_prob) * features
+                        features_prob = copy_prob * features_prob_behind + (1 - copy_prob) * features_prob
+                        features_target = copy_prob * features_target_behind + (1 - copy_prob) * features_target
+                    else: # Copy just depends on bottom-up boundary probs
+                        features = (1 - z_below_cur) * features_behind + z_below_cur * features
+                        features_prob = (1 - z_below_cur) * features_prob_behind + z_below_cur * features_prob
+                        features_target = (1 - z_below_cur) * features_target_behind + z_below_cur * features_target
+
 
                     embedding = self._kernel_embedding[l](features)
 
@@ -2389,7 +2453,7 @@ class HMLSTMCell(LayerRNNCell):
                         'c': c,
                         'h': h,
                         'features': features,
-                        'features_prob': feat_prob,
+                        'features_prob': features_prob,
                         'features_target': features_target,
                         'features_by_seg': features_by_seg,
                         'feature_deltas': feature_deltas,
@@ -4923,7 +4987,7 @@ class RevNet(object):
 
 AttentionalLSTMDecoderStateTuple = collections.namedtuple(
     'AttentionalLSTMDecoderStateTuple',
-    ' '.join(['h', 'c', 'a', 'y'])
+    ' '.join(['h', 'c', 'a', 'y', 'mu'])
 )
 
 
@@ -4935,6 +4999,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
             keys=None,
             values=None,
             key_val_mask=None,
+            gaussian_attn=False,
             training=False,
             num_query_units=None,
             project_keys=False,
@@ -4980,6 +5045,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
 
                 self.num_hidden_units = num_hidden_units
                 self.num_output_units = num_output_units
+                self.gaussian_attn = gaussian_attn
                 self.training = training
                 self.forget_bias = forget_bias
                 self.one_hot_inputs = one_hot_inputs
@@ -5085,7 +5151,8 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
             h=self.num_hidden_units,
             c=self.num_hidden_units,
             a=self.num_attn_units,
-            y=self.num_output_units
+            y=self.num_output_units,
+            mu=1
         )
 
     @property
@@ -5186,12 +5253,16 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 ]
                 self.projection = compose_lambdas(projection)
 
-                if self.keys is not None:
+                if self.keys is not None or self.gaussian_attn:
+                    if self.gaussian_attn:
+                        q_units = 2
+                    else:
+                        q_units = self.num_query_units
                     q_kernel = [
                         make_lambda(
                             DenseLayer(
                                 training=self.training,
-                                units=self.num_query_units,
+                                units=q_units,
                                 use_bias=self.use_bias,
                                 kernel_initializer=self.query_initializer,
                                 bias_initializer=self.bias_initializer,
@@ -5244,28 +5315,39 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 c_prev = state.c
                 a_prev = state.a
                 y_prev = state.y
+                mu_prev = state.mu
 
                 y_prev = self.output_activation(y_prev)
 
-                if self.keys is not None:
+                if self.values is not None:
                     q = self.q_kernel(h_prev)
-                    k = self.k_kernel(self.keys)
-                    v = self.values
+                    if self.gaussian_attn:
+                        mu = mu_prev + tf.nn.softplus(q[..., :1])
+                        sigma2 = tf.nn.softplus(q[..., 1:2])
+                        ix = tf.cast(tf.range(tf.shape(self.values)[1]), dtype=tf.float32)[None, ...]
+                        a = tf.exp(-(mu-ix)**2/sigma2) * self.key_val_mask
+                        a /= tf.maximum(tf.reduce_sum(a, axis=1, keepdims=True), self.epsilon)
+                        context_vector = tf.reduce_sum(self.values * a[..., None], axis=1)
+                    else:
+                        q = self.q_kernel(h_prev)
+                        k = self.k_kernel(self.keys)
+                        v = self.values
+                        mu = mu_prev
 
-                    context_vector, a = scaled_dot_attn(
-                        q,
-                        k,
-                        v,
-                        mask=self.key_val_mask,
-                        epsilon=self.epsilon,
-                        session=self.session
-                    )
-
+                        context_vector, a = scaled_dot_attn(
+                            q,
+                            k,
+                            v,
+                            mask=self.key_val_mask,
+                            epsilon=self.epsilon,
+                            session=self.session
+                        )
                     x = tf.concat([inputs, y_prev, context_vector], axis=-1)
 
                 else:
                     x = tf.concat([inputs, y_prev], axis=-1)
                     a = tf.zeros(shape=[tf.shape(inputs)[0], 0], dtype=self.dtype)
+                    mu = mu_prev
 
                 s = self.bottomup_kernel(x) + self.recurrent_kernel(h_prev) + self.bias
 
@@ -5303,12 +5385,14 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                     h = tf.where(mask, h, h_prev)
                     a = tf.where(mask, a, a_prev)
                     y = tf.where(mask, y, y_prev)
+                    mu = tf.where(mask, mu, mu_prev)
 
                 state = AttentionalLSTMDecoderStateTuple(
                     h=h,
                     c=c,
                     a=a,
-                    y=y
+                    y=y,
+                    mu=mu
                 )
 
                 return state, state
@@ -5322,6 +5406,7 @@ class AttentionalLSTMDecoderLayer(object):
             keys=None,
             values=None,
             key_val_mask=None,
+            gaussian_attn=False,
             initial_state=None,
             training=False,
             num_query_units=None,
@@ -5371,6 +5456,7 @@ class AttentionalLSTMDecoderLayer(object):
                 self.keys = keys
                 self.values = values
                 self.key_val_mask = key_val_mask
+                self.gaussian_attn = gaussian_attn
                 self.initial_state = initial_state
                 self.num_query_units = num_query_units
                 self.project_keys = project_keys
@@ -5426,6 +5512,7 @@ class AttentionalLSTMDecoderLayer(object):
                     keys=self.keys,
                     values=self.values,
                     key_val_mask=self.key_val_mask,
+                    gaussian_attn=self.gaussian_attn,
                     num_query_units=self.num_query_units,
                     project_keys=self.project_keys,
                     training=self.training,
@@ -5487,6 +5574,7 @@ class AttentionalLSTMDecoderLayer(object):
 
                 if self.keys is not None:
                     self.key_matrix = self.cell.key_activation(self.cell.keys)
+                    self.value_matrix = self.cell.values
 
                 return output
 

@@ -494,6 +494,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of discovered segments to use to compute correspondence autoencoder auxiliary loss. If ``0`` or ``None``, do not use correpondence autoencoder."
     ),
     Kwarg(
+        'sequential_cae',
+        False,
+        bool,
+        'Whether to implement CAE loss using entire sequence. If ``False``, use the average over the sequence.'
+    ),
+    Kwarg(
         'n_layers_correspondence_decoder',
         2,
         [int, None],
@@ -504,6 +510,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         256,
         [int, str, None],
         "Number of units to use in correspondence decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_correspondence_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom. ``None`` is not permitted and will raise an error -- it exists here simply to force users to specify a value."
+    ),
+    Kwarg(
+        'add_bottomup_correspondence_loss',
+        False,
+        bool,
+        "Whether to additionally enforce a bottom-up (data to labels) correspondence loss."
     ),
     Kwarg(
         'correspondence_decoder_activation_inner',
@@ -1301,6 +1313,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Whether to use gold or reconstructed segment IDs as keys for computing attention weights during evaluation."
+    ),
+    Kwarg(
+        'decoder_positional_attn_keys',
+        False,
+        bool,
+        "Whether to use positional encodings as attention keys. If ``False``, segment encodings are used."
+    ),
+    Kwarg(
+        'decoder_gaussian_attn',
+        False,
+        bool,
+        "Whether to a trainable Gaussian filter as an attention distribution. Otherwise, use scaled dot attn over segmental or positional keys."
     ),
     Kwarg(
         'backprop_into_attn_keys',
