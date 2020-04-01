@@ -316,7 +316,7 @@ def get_segment_indices(segs, mask):
             mask_cur += pad
         out_mask_bottom.append(mask_cur)
             
-    out_ix = np.array(out_ix)
+    out_ix = np.array(out_ix, dtype='int32')
     out_mask_bottom = np.array(out_mask_bottom, dtype='float32')
 
     return out_ix, out_mask_bottom
@@ -5322,12 +5322,13 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 if self.values is not None:
                     q = self.q_kernel(h_prev)
                     if self.gaussian_attn:
-                        mu = mu_prev + tf.nn.softplus(q[..., :1])
+                        mu = mu_prev
                         sigma2 = tf.nn.softplus(q[..., 1:2])
                         ix = tf.cast(tf.range(tf.shape(self.values)[1]), dtype=tf.float32)[None, ...]
                         a = tf.exp(-(mu-ix)**2/sigma2) * self.key_val_mask
                         a /= tf.maximum(tf.reduce_sum(a, axis=1, keepdims=True), self.epsilon)
                         context_vector = tf.reduce_sum(self.values * a[..., None], axis=1)
+                        mu += tf.sigmoid(q[..., :1])
                     else:
                         q = self.q_kernel(h_prev)
                         k = self.k_kernel(self.keys)
