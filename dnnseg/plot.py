@@ -9,10 +9,12 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import ticker, pyplot as plt
+from matplotlib import markers
 import seaborn as sns
 from .data import extract_segment_timestamps
 from .util import stderr
 
+marker_keys = list(markers.MarkerStyle.markers.keys())[2:-3]
 
 is_embedding_dimension = re.compile('d([0-9]+)')
 
@@ -516,17 +518,24 @@ def plot_projections(
     for c in colors:
         sns.set_style('white')
 
-        with sns.plotting_context(rc={'legend.fontsize': 'small', 'lines.markersize': 2}):
+        with sns.plotting_context(rc={'legend.fontsize': 'small', 'lines.markersize': 10}):
+            vals = sorted(list(df[c].unique()))
+            print(vals)
+            marker_map = {x:y for x, y in zip(vals, marker_keys[:len(vals)])}
+
             g = sns.relplot(
                 x='Projection 1',
                 y='Projection 2',
                 kind='scatter',
                 hue=c,
-                data=df.sort_values(c),
+                style=c,
+                marker=marker_map,
+                style_order=vals,
+                data=df,
                 palette=cmap,
                 legend='full',
-                size=0.5,
-                alpha=0.5
+                edgecolor="none",
+                alpha=0.25
             )
         try:
             g.savefig(directory + '/' + prefix + 'projections_%s' % (c + suffix))

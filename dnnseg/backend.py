@@ -3310,7 +3310,7 @@ class MaskedLSTMCell(LayerRNNCell):
 
     @property
     def output_size(self):
-        return self._num_units
+        return tf.nn.rnn_cell.LSTMStateTuple(c=self._num_units,h=self._num_units)
 
     def _add_regularization(self, var, regularizer):
         if regularizer is not None:
@@ -3513,7 +3513,7 @@ class MaskedLSTMCell(LayerRNNCell):
                     c = c * mask + c_prev * (1 - mask)
                     h = h * mask + h_prev * (1 - mask)
 
-                return h, tf.nn.rnn_cell.LSTMStateTuple(c=c, h=h)
+                return tf.nn.rnn_cell.LSTMStateTuple(c=c, h=h), tf.nn.rnn_cell.LSTMStateTuple(c=c, h=h)
 
 
 class MultiLSTMCell(LayerRNNCell):
@@ -4645,7 +4645,7 @@ class MaskedLSTMLayer(object):
 
             self.built = True
 
-    def __call__(self, inputs, mask=None):
+    def __call__(self, inputs, mask=None, return_state=False):
         if not self.built:
             self.build(inputs)
 
@@ -4666,10 +4666,19 @@ class MaskedLSTMLayer(object):
                     dtype=tf.float32
                 )
 
+                H, c = H
+
                 if not self.return_sequences:
                     H = H[:, -1]
+                    if return_state:
+                        c = c[:, -1]
 
-                return H
+                if return_state:
+                    out = (H, c)
+                else:
+                    out = H
+
+                return out
 
 class DropoutLayer(object):
     def __init__(
@@ -5256,6 +5265,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 if self.keys is not None or self.gaussian_attn:
                     if self.gaussian_attn:
                         q_units = 2
+                        self.attn_step_size = self.add_variable('attn_step_size', shape=[], initializer=tf.zeros_initializer)
                     else:
                         q_units = self.num_query_units
                     q_kernel = [
@@ -5323,12 +5333,12 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                     q = self.q_kernel(h_prev)
                     if self.gaussian_attn:
                         mu = mu_prev
-                        sigma2 = tf.nn.softplus(q[..., 1:2])
+                        sigma2 = tf.nn.softplus(1 + q[..., 1:2])
                         ix = tf.cast(tf.range(tf.shape(self.values)[1]), dtype=tf.float32)[None, ...]
                         a = tf.exp(-(mu-ix)**2/sigma2) * self.key_val_mask
                         a /= tf.maximum(tf.reduce_sum(a, axis=1, keepdims=True), self.epsilon)
                         context_vector = tf.reduce_sum(self.values * a[..., None], axis=1)
-                        mu += tf.sigmoid(q[..., :1])
+                        mu += self.attn_step_size * tf.sigmoid(q[..., :1])
                     else:
                         q = self.q_kernel(h_prev)
                         k = self.k_kernel(self.keys)

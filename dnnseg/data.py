@@ -2760,7 +2760,7 @@ class Dataset(object):
                     if isinstance(seg, str):
                         segments_cur.append(seg)
                     else:
-                        segments_cur.append(seg[f])
+                        segments_cur.append(seg[seg.fileID == f])
                 if isinstance(parent_segments, str):
                     parent_segments_cur = parent_segments
                 else:
