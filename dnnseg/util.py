@@ -55,3 +55,11 @@ def suppress_output(func):
             sys.stdout = original
             return out
     return wrapper
+
+
+def get_alternating_mode(x, r):
+    t, m = r.as_integer_ratio()
+    if x % (t + m) < t:
+        return 0 # first mode
+    else:
+        return 1 # second mode

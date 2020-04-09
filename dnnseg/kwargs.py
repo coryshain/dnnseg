@@ -694,6 +694,30 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Number of units to use in input projection layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_input_projection** space-delimited integers, one for each layer in order from bottom to top. If ``None`` no input projection."
     ),
     Kwarg(
+        'n_layers_pre_cnn',
+        None,
+        [int, None],
+        "Number of layers to use for pre-encoder CNN. If ``None``, inferred from length of **n_layers_pre_cnn**."
+    ),
+    Kwarg(
+        'n_units_pre_cnn',
+        128,
+        [int, str, None],
+        "Number of units to use in pre-encoder CNN. Can be an ``int``, which will be used for all layers, a ``str`` with **n_units_pre_cnn** - 1 space-delimited integers, one for each layer in order from top to bottom. If ``None``, no pre-CNN."
+    ),
+    Kwarg(
+        'n_layers_pre_rnn',
+        None,
+        [int, None],
+        "Number of layers to use for pre-encoder RNN. If ``None``, inferred from length of **n_layers_pre_rnn**."
+    ),
+    Kwarg(
+        'n_units_pre_rnn',
+        128,
+        [int, str, None],
+        "Number of units to use in pre-encoder RNN. Can be an ``int``, which will be used for all layers, a ``str`` with **n_units_pre_rnn** - 1 space-delimited integers, one for each layer in order from top to bottom. If ``None``, no pre-RNN."
+    ),
+    Kwarg(
         'input_projection_activation_inner',
         'elu',
         [str, None],
@@ -1519,7 +1543,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     Kwarg(
         'learning_rate',
         0.001,
-        float,
+        [float, str],
         "Initial value for the learning rate."
     ),
     Kwarg(
@@ -1593,6 +1617,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         0,
         int,
         "Number of steps (minibatches if **streaming** is ``True``, otherwise iterations) during which to pre-train the decoder without backpropagating into the encoder."
+    ),
+    Kwarg(
+        'encoder_decoder_step_ratio',
+        None,
+        [float, None],
+        "Ratio of encoder training steps to decoder training steps. If ``None``, or ``0``, jointly trained."
     ),
     Kwarg(
         'loss_normalization',

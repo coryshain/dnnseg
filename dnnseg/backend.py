@@ -285,6 +285,8 @@ def get_segment_indices(segs, mask):
     batch_ix = batch_ix.reshape(-1)
     segs = segs.reshape(-1)
     mask = mask.reshape(-1)
+    segs = segs > 0.5
+    mask = mask > 0.5
 
     out_ix = []
     max_len = 0
@@ -1695,6 +1697,8 @@ class HMLSTMCell(LayerRNNCell):
                         bottomup_dim += self._append_seg_len
 
                     recurrent_dim = self._num_units[l]
+                    if self._append_previous_features and self._num_features[l]:
+                        recurrent_dim += 2 * self._num_features[l]
 
                     output_dim = self._num_units[l]
                     if l == 0 and self._n_passthru_neurons:
@@ -1754,8 +1758,6 @@ class HMLSTMCell(LayerRNNCell):
                     # Build featurizer kernel
                     if self._num_features[l] is not None:
                         featurizer_in_dim = self._num_units[l]
-                        if self._append_previous_features and self._num_features[l]:
-                            featurizer_in_dim += self._num_features[l]
                         kernel_featurizer = self.initialize_kernel(
                             l,
                             featurizer_in_dim,
@@ -1794,8 +1796,6 @@ class HMLSTMCell(LayerRNNCell):
                             boundary_in_dim = self._num_units[l]
                             if self._num_features[l] is not None:
                                 boundary_in_dim += self._num_features[l]
-                                if self._append_previous_features:
-                                    boundary_in_dim += self._num_features[l]
 
                             self._kernel_boundary.append(
                                 self.initialize_kernel(
@@ -2057,7 +2057,10 @@ class HMLSTMCell(LayerRNNCell):
                     s.append(s_bottomup)
 
                     # Recurrent features
-                    s_recurrent = self._kernel_recurrent[l](h_behind)
+                    recurrent_in = h_behind
+                    if self._append_previous_features and l < self._num_layers - 1:
+                        recurrent_in = tf.concat([recurrent_in, layer.features, layer.features_by_seg], axis=-1)
+                    s_recurrent = self._kernel_recurrent[l](recurrent_in)
                     if self._forget_at_boundary and not self._recurrent_at_forget:
                         s_recurrent *= (1 - flush_prob)
                     normalizer += 1.
@@ -2230,13 +2233,8 @@ class HMLSTMCell(LayerRNNCell):
                         features_prob = (h + 1) / 2
                     else:
                         # Define features
-                        # Squash to [-1,1] if state activation is not tanh
-                        if self._append_previous_features and l < self._num_layers - 1:
-                            features_in = tf.concat([h, layer.features_by_seg], axis=-1)
-                            features_in_clean = tf.concat([h_clean, layer.features_by_seg], axis=-1)
-                        else:
-                            features_in = h
-                            features_in_clean = h_clean
+                        features_in = h
+                        features_in_clean = h_clean
                         features = self._kernel_featurizer[l](features_in)
                         features_clean = self._kernel_featurizer[l](features_in_clean)
 
@@ -2255,9 +2253,10 @@ class HMLSTMCell(LayerRNNCell):
                             features_clean = self._feature_neuron_agg_fn(features_clean, axis=-1, keepdims=False)
 
                         # Feature values in {0,1}
+                        features_prob = self._recurrent_activation(features)
+
                         if self._state_discretizer:
                             # Feature probabilities in [0,1]
-                            features_prob = self._recurrent_activation(features)
 
                             if self._cumulative_feature_prob:
                                 feat_prob_prev = layer.features_prob * (1 - z_behind_cur)
@@ -2295,8 +2294,8 @@ class HMLSTMCell(LayerRNNCell):
                                 features = features_discrete
                                 features_clean = features_discrete_clean
                         else:
-                            features_prob = features
-                            features_clean_prob = features_clean
+                            features = features_prob
+                            features_clean = features_prob
 
                     if self._state_noise_level or self._feature_noise_level or self._boundary_noise_level:
                         if self._state_discretizer and l < (self._num_layers - 1 + self._discretize_final):
@@ -2341,9 +2340,6 @@ class HMLSTMCell(LayerRNNCell):
                                     else:
                                         feats = features
                                     z_in.append(feats)
-                                    if self._append_previous_features:
-                                        prev_feats = layer.features_by_seg
-                                        z_in.append(prev_feats)
 
                                 if len(z_in) == 1:
                                     z_in = z_in[0]

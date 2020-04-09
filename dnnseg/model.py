@@ -15,7 +15,7 @@ from .backend import *
 from .opt import get_clipped_optimizer_class, get_JTPS_optimizer_class
 from .data import cache_data
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
-from .util import f_measure, pretty_print_seconds, stderr
+from .util import f_measure, pretty_print_seconds, stderr, get_alternating_mode
 from .plot import plot_acoustic_features, plot_label_histogram, plot_label_heatmap, plot_binary_unit_heatmap
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -91,6 +91,15 @@ class DNNSeg(object):
         self.UINT_NP = getattr(tf, 'u' + self.int_type)
         self.use_dtw = self.dtw_gamma is not None
         self.regularizer_map = {}
+        self.print_learning_rate = False
+        
+        if isinstance(self.learning_rate, str):
+            lr = self.learning_rate.split()
+            lr = [float(x) for x in lr]
+            self.learning_rates = lr
+            self.learning_rate = lr[0]
+        else:
+            self.learning_rates = [self.learning_rate]
         
         if self.n_units_input_projection:
             self.project_inputs = True
@@ -116,6 +125,56 @@ class DNNSeg(object):
             self.project_inputs = False
             self.layers_input_projection = None
             self.units_input_projection = None
+            
+        if self.n_units_pre_cnn:
+            self.use_pre_cnn = True
+            if isinstance(self.n_units_pre_cnn, str):
+                self.units_pre_cnn = [int(x) for x in self.n_units_pre_cnn.split()]
+            elif isinstance(self.n_units_pre_cnn, int):
+                if self.n_layers_pre_cnn is None:
+                    self.units_pre_cnn = [self.n_units_pre_cnn]
+                else:
+                    self.units_pre_cnn = [self.n_units_pre_cnn] * self.n_layers_pre_cnn
+            else:
+                self.units_pre_cnn = self.n_units_pre_cnn
+    
+            if self.n_layers_pre_cnn is None:
+                self.layers_pre_cnn = len(self.units_pre_cnn)
+            else:
+                self.layers_pre_cnn = self.n_layers_pre_cnn
+            if len(self.units_pre_cnn) == 1:
+                self.units_pre_cnn = [self.units_pre_cnn[0]] * self.layers_pre_cnn
+    
+            assert len(self.units_pre_cnn) == self.layers_pre_cnn, 'Misalignment in number of layers between n_layers_pre_cnn and n_units_pre_cnn.'
+        else:
+            self.use_pre_cnn = False
+            self.layers_pre_cnn = None
+            self.units_pre_cnn = None
+            
+        if self.n_units_pre_rnn:
+            self.use_pre_rnn = True
+            if isinstance(self.n_units_pre_rnn, str):
+                self.units_pre_rnn = [int(x) for x in self.n_units_pre_rnn.split()]
+            elif isinstance(self.n_units_pre_rnn, int):
+                if self.n_layers_pre_rnn is None:
+                    self.units_pre_rnn = [self.n_units_pre_rnn]
+                else:
+                    self.units_pre_rnn = [self.n_units_pre_rnn] * self.n_layers_pre_rnn
+            else:
+                self.units_pre_rnn = self.n_units_pre_rnn
+    
+            if self.n_layers_pre_rnn is None:
+                self.layers_pre_rnn = len(self.units_pre_rnn)
+            else:
+                self.layers_pre_rnn = self.n_layers_pre_rnn
+            if len(self.units_pre_rnn) == 1:
+                self.units_pre_rnn = [self.units_pre_rnn[0]] * self.layers_pre_rnn
+    
+            assert len(self.units_pre_rnn) == self.layers_pre_rnn, 'Misalignment in number of layers between n_layers_pre_rnn and n_units_pre_rnn.'
+        else:
+            self.use_pre_rnn = False
+            self.layers_pre_rnn = None
+            self.units_pre_rnn = None
 
         assert not self.n_units_encoder is None, 'You must provide a value for **n_units_encoder** when initializing a DNNSeg model.'
         if isinstance(self.n_units_encoder, str):
@@ -404,6 +463,10 @@ class DNNSeg(object):
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
+                self.update_mode_placeholder = tf.placeholder(dtype=tf.string, name='update_mode_placeholder')
+                self.update_mode = tf.Variable(tf.constant('all', dtype=tf.string), trainable=False)
+                self.assign_update_mode = tf.assign(self.update_mode, self.update_mode_placeholder)
+
                 if self.entropy_regularizer_scale:
                     self.entropy_regularizer = binary_entropy_regularizer(
                         scale=self.entropy_regularizer_scale,
@@ -427,7 +490,7 @@ class DNNSeg(object):
 
                 def get_extremeness_regularizer_new(shape=2, scale=1): # Normalized so that max gradient is ``scale`` regardless of ``shape``
                     def extremeness_regularizer(x):
-                        out = 1. / shape * tf.abs(2*x - 1)**shape * scale
+                        out = 1. / (2*shape) * tf.abs(2*x - 1)**shape * scale
 
                         if len(out.shape) > 0:
                             # out = tf.Print(out, [x, out, tf.reduce_mean(out)], summarize=100)
@@ -869,10 +932,11 @@ class DNNSeg(object):
                     name='global_batch_step'
                 )
                 self.incr_global_batch_step = tf.assign(self.global_batch_step, self.global_batch_step + 1)
-                if self.streaming:
-                    self.step = self.global_batch_step
-                else:
-                    self.step = self.global_step
+                # if self.streaming:
+                #     self.step = self.global_batch_step
+                # else:
+                #     self.step = self.global_step
+                self.step = self.global_step
 
                 if self.streaming and self.curriculum_type:
                     if self.curriculum_type.lower() == 'hard':
@@ -1059,18 +1123,31 @@ class DNNSeg(object):
                 if self.emb_dim:
                     units_utt += self.emb_dim
 
-                if self.encoder_type.lower() in ['cnn_hmlstm', 'hmlstm']:
-                    if self.encoder_type.lower() == 'cnn_hmlstm':
+                if self.use_pre_cnn:
+                    for d in range(self.layers_pre_cnn):
                         encoder = Conv1DLayer(
                             self.encoder_conv_kernel_size,
                             training=self.training,
-                            n_filters=self.frame_dim,
+                            n_filters=self.units_pre_cnn[d],
                             padding='same',
-                            activation=self.encoder_inner_activation,
+                            activation='elu',
                             batch_normalization_decay=self.encoder_batch_normalization_decay,
                             session=self.sess,
-                            name='hmlstm_pre_cnn'
+                            name='hmlstm_pre_cnn_d%d' % d
                         )(encoder)
+
+                if self.use_pre_rnn:
+                    for d in range(self.layers_pre_rnn):
+                        encoder = RNNLayer(
+                            training=self.training,
+                            units=self.units_pre_rnn[d],
+                            activation=self.encoder_inner_activation,
+                            batch_normalization_decay=self.encoder_batch_normalization_decay,
+                            name='pre_rnn_d%d' % d,
+                            session=self.sess
+                        )(encoder)
+
+                if self.encoder_type.lower() == 'hmlstm':
 
                     # encoder = DenseResidualLayer(
                     #     training=self.training,
@@ -1307,7 +1384,7 @@ class DNNSeg(object):
                                 encoder_features_by_seg_cur = encoder_features_by_seg_tmp[l]
                                 encoder_feature_deltas_cur = encoder_feature_deltas_tmp[l]
                             if l < (self.layers_encoder - 1 + self.encoder_discretize_final):
-                                if not self.encoder_state_discretizer:
+                                if not self.encoder_state_discretizer and not self.features_encoder[l]:
                                     if l == self.layers_encoder - 1:
                                         activation = self.encoder_activation
                                     else:
@@ -2869,7 +2946,6 @@ class DNNSeg(object):
                     decoder_conv_kernel_size=self.decoder_conv_kernel_size,
                     frame_dim=frame_dim,
                     step=self.step,
-                    n_pretrain_steps=self.n_pretrain_steps,
                     name=name,
                     session=self.sess,
                     float_type=self.float_type
@@ -3046,75 +3122,110 @@ class DNNSeg(object):
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                lr = tf.constant(self.learning_rate, dtype=self.FLOAT_TF)
+                lrs = None
+                if isinstance(self.weight_update_mode, str) and \
+                        (self.weight_update_mode.lower().startswith('boundary_state') or
+                         self.weight_update_mode.lower().startswith('encoder_decoder') or
+                         self.weight_update_mode.lower().startswith('asymmetric_encoder_decoder')):
+                    lrs = [tf.constant(x, dtype=self.FLOAT_TF) for x in self.learning_rates[:2]]
+                    if self.weight_update_mode.lower().startswith('asymmetric_encoder_decoder'):
+                        assert len(lrs) == 2, 'When using asymmetric_encoder_decoder, you must supply exactly two learning rates, the first for the encoder and the second for the decoder.'
+                    expand_lrs = len(lrs) == 1
+                    if expand_lrs:
+                        lrs = [lrs[0], lrs[0]]
+                    if self.weight_update_mode.lower() == 'boundary_state':
+                        self.print_learning_rate = expand_lrs
+                        lr = tf.cond(tf.equal(self.update_mode, 'boundary'), lambda: lrs[0], lambda: lrs[1])
+                    elif self.weight_update_mode.lower() == 'encoder_decoder':
+                        self.print_learning_rate = expand_lrs
+                        lr = tf.cond(tf.equal(self.update_mode, 'encoder'), lambda: lrs[0], lambda: lrs[1])
+                    else:
+                        lr = None
+                else:
+                    lr = tf.constant(self.learning_rate, dtype=self.FLOAT_TF)
                 if name is None:
                     self.lr = lr
                     return None
-                if self.lr_decay_family is not None:
-                    lr_decay_steps = tf.constant(self.lr_decay_steps, dtype=self.INT_TF)
-                    lr_decay_rate = tf.constant(self.lr_decay_rate, dtype=self.FLOAT_TF)
-                    lr_decay_staircase = self.lr_decay_staircase
+                if lr is not None:
+                    lrs = [lr]
 
-                    if self.lr_decay_iteration_power != 1:
-                        t = tf.cast(self.step, dtype=self.FLOAT_TF) ** self.lr_decay_iteration_power
-                    else:
-                        t = self.step
+                for i, lr in enumerate(lrs):
+                    if self.lr_decay_family is not None:
+                        self.print_learning_rate = True
+                        lr_decay_steps = tf.constant(self.lr_decay_steps, dtype=self.INT_TF)
+                        lr_decay_rate = tf.constant(self.lr_decay_rate, dtype=self.FLOAT_TF)
+                        lr_decay_staircase = self.lr_decay_staircase
 
-                    if self.lr_decay_family.lower() == 'linear_decay':
-                        if lr_decay_staircase:
-                            decay = tf.floor(t / lr_decay_steps)
+                        if self.lr_decay_iteration_power != 1:
+                            t = tf.cast(self.step, dtype=self.FLOAT_TF) ** self.lr_decay_iteration_power
                         else:
-                            decay = t / lr_decay_steps
-                        decay *= lr_decay_rate
-                        self.lr = lr - decay
-                    else:
-                        self.lr = getattr(tf.train, self.lr_decay_family)(
-                            lr,
-                            t,
-                            lr_decay_steps,
-                            lr_decay_rate,
-                            staircase=lr_decay_staircase,
-                            name='learning_rate'
-                        )
-                    if np.isfinite(self.learning_rate_min):
-                        lr_min = tf.constant(self.learning_rate_min, dtype=self.FLOAT_TF)
-                        INF_TF = tf.constant(np.inf, dtype=self.FLOAT_TF)
-                        self.lr = tf.clip_by_value(self.lr, lr_min, INF_TF)
+                            t = self.step
+
+                        if self.lr_decay_family.lower() == 'linear_decay':
+                            if lr_decay_staircase:
+                                decay = tf.floor(t / lr_decay_steps)
+                            else:
+                                decay = t / lr_decay_steps
+                            decay *= lr_decay_rate
+                            self.lr = lr - decay
+                        else:
+                            lr = getattr(tf.train, self.lr_decay_family)(
+                                lr,
+                                t,
+                                lr_decay_steps,
+                                lr_decay_rate,
+                                staircase=lr_decay_staircase,
+                                name='learning_rate'
+                            )
+                        if np.isfinite(self.learning_rate_min):
+                            lr_min = tf.constant(self.learning_rate_min, dtype=self.FLOAT_TF)
+                            INF_TF = tf.constant(np.inf, dtype=self.FLOAT_TF)
+                            lr = tf.clip_by_value(self.lr, lr_min, INF_TF)
+                    lrs[i] = lr
+
+                if len(lrs) > 1:
+                    self.lr = lrs
                 else:
-                    self.lr = lr
+                    self.lr = lrs[0]
 
                 clip = self.max_global_gradient_norm
 
-                optimizer_args = [self.lr]
-                optimizer_kwargs = {}
-                if name == 'momentum':
-                    optimizer_args += [0.9]
+                optimizers = []
+                for lr in lrs:
+                    optimizer_args = [lr]
+                    optimizer_kwargs = {}
+                    if name == 'momentum':
+                        optimizer_args += [0.9]
 
-                optimizer_class = {
-                    'sgd': tf.train.GradientDescentOptimizer,
-                    'momentum': tf.train.MomentumOptimizer,
-                    'adagrad': tf.train.AdagradOptimizer,
-                    'adadelta': tf.train.AdadeltaOptimizer,
-                    'ftrl': tf.train.FtrlOptimizer,
-                    'rmsprop': tf.train.RMSPropOptimizer,
-                    'adam': tf.train.AdamOptimizer,
-                    'adam0': tf.train.AdamOptimizer,
-                    'nadam': tf.contrib.opt.NadamOptimizer
-                }[name]
+                    optimizer_class = {
+                        'sgd': tf.train.GradientDescentOptimizer,
+                        'momentum': tf.train.MomentumOptimizer,
+                        'adagrad': tf.train.AdagradOptimizer,
+                        'adadelta': tf.train.AdadeltaOptimizer,
+                        'ftrl': tf.train.FtrlOptimizer,
+                        'rmsprop': tf.train.RMSPropOptimizer,
+                        'adam': tf.train.AdamOptimizer,
+                        'adam0': tf.train.AdamOptimizer,
+                        'nadam': tf.contrib.opt.NadamOptimizer
+                    }[name]
 
-                if clip:
-                    optimizer_class = get_clipped_optimizer_class(optimizer_class, session=self.sess)
-                    optimizer_kwargs['max_global_norm'] = clip
+                    if clip:
+                        optimizer_class = get_clipped_optimizer_class(optimizer_class, session=self.sess)
+                        optimizer_kwargs['max_global_norm'] = clip
 
-                if use_jtps:
-                    optimizer_class = get_JTPS_optimizer_class(optimizer_class, session=self.sess)
-                    optimizer_kwargs['meta_learning_rate'] = None
-                if name.lower() == 'adam0':
-                    optimizer_kwargs['beta1'] = 0.
+                    if use_jtps:
+                        optimizer_class = get_JTPS_optimizer_class(optimizer_class, session=self.sess)
+                        optimizer_kwargs['meta_learning_rate'] = None
+                    if name.lower() == 'adam0':
+                        optimizer_kwargs['beta1'] = 0.
 
-                optim = optimizer_class(*optimizer_args, **optimizer_kwargs)
+                    optim = optimizer_class(*optimizer_args, **optimizer_kwargs)
+                    optimizers.append(optim)
 
-                self.optim = optim
+                if len(optimizers) == 1:
+                    optimizers = optimizers[0]
+
+                self.optim = optimizers
 
     def _initialize_logging(self):
         with self.sess.as_default():
@@ -4913,7 +5024,7 @@ class DNNSeg(object):
                     n_points = None
 
                     if self.xent_state_predictions:
-                        if self.encoder_state_discretizer.lower() == 'csn':
+                        if self.encoder_state_discretizer and self.encoder_state_discretizer.lower() == 'csn':
                             state_activation = 'softmax'
                         else:
                             state_activation = 'sigmoid'
@@ -5518,12 +5629,12 @@ class DNNSeg(object):
                         else:
                             stderr('Running minibatch updates...\n')
 
-                        stderr('Update mode: %s\n' % self.update_mode)
+                        stderr('Update mode: %s\n' % self.get_update_mode())
 
                         if self.n_pretrain_steps and (self.step.eval(session=self.sess) <= self.n_pretrain_steps):
                             stderr('Pretraining decoder...\n')
 
-                        if self.optim_name is not None and self.lr_decay_family is not None:
+                        if self.optim_name is not None and self.print_learning_rate:
                             stderr('Learning rate: %s\n' % self.lr.eval(session=self.sess))
 
                         if self.curriculum_t is not None:
@@ -5755,9 +5866,9 @@ class DNNSeg(object):
                                     else:
                                         sys.stderr.write('Running minibatch %d (out of %d)...\n' % (i + 1 + n_pb, n_minibatch))
 
-                                    stderr('Update mode: %s\n' % self.update_mode)
+                                    stderr('Update mode: %s\n' % self.get_update_mode())
 
-                                    if self.optim_name is not None and self.lr_decay_family is not None:
+                                    if self.optim_name is not None and self.print_learning_rate:
                                         sys.stderr.write('Learning rate: %s\n' % self.lr.eval(session=self.sess))
 
                                     if self.curriculum_type:
@@ -5820,7 +5931,8 @@ class DNNSeg(object):
 
                     if self.streaming:
                         save = True
-                        if self.global_step.eval(session=self.sess) % 1 == 0:
+                        s = self.global_step.eval(session=self.sess)
+                        if s % 1 == 0 and s >= self.n_pretrain_steps:
                             evaluate = True
                         else:
                             evaluate = False
@@ -6375,9 +6487,10 @@ class DNNSeg(object):
         if isinstance(self.weight_update_mode, str):
             if self.weight_update_mode in ['all', 'state', 'boundary']:
                 update_mode = self.weight_update_mode
-            elif self.weight_update_mode.lower().startswith('alternating'):
-                freq = int(self.weight_update_mode[11:])
-                if (self.global_step.eval(self.sess) // freq) % 2 == 0:
+            elif self.weight_update_mode.lower().startswith('boundary_state'):
+                ratio = float(self.weight_update_mode[15:])
+                mode_ix = get_alternating_mode(self.step.eval(self.sess), ratio)
+                if mode_ix:
                     update_mode = 'state'
                 else:
                     update_mode = 'boundary'
@@ -6385,7 +6498,16 @@ class DNNSeg(object):
                 freq = int(self.weight_update_mode[9:])
                 mod = self.layers_encoder
 
-                update_mode = (self.global_step.eval(self.sess) // freq) % mod
+                update_mode = str((self.step.eval(self.sess) // freq) % mod)
+            elif self.weight_update_mode.lower().startswith('encoder_decoder'):
+                ratio = float(self.weight_update_mode[15:])
+                mode_ix = get_alternating_mode(self.step.eval(self.sess), ratio)
+                if mode_ix:
+                    update_mode = 'decoder'
+                else:
+                    update_mode = 'encoder'
+            elif self.weight_update_mode.lower().startswith('asymmetric_encoder_decoder'):
+                update_mode = 'all'
             else:
                 raise ValueError('Unrecognized update mode %s' % self.weight_update_mode)
 
@@ -6401,7 +6523,10 @@ class DNNSeg(object):
             sys.stderr.write('Update mode: %s\n' % update_mode)
             sys.stderr.flush()
 
-        self.update_mode = update_mode
+        self.sess.run(self.assign_update_mode, {self.update_mode_placeholder: update_mode})
+
+    def get_update_mode(self):
+        return self.update_mode.eval(self.sess).decode("utf-8")
 
     def set_predict_mode(self, mode):
         with self.sess.as_default():
@@ -6780,8 +6905,9 @@ class DNNSegMLE(DNNSeg):
                                         data_seq = self.encoder_embeddings[l-1]
                                     data_seq = tf.reshape(data_seq, [-1, data_seq.shape[-1]])
                                     cae_mask_top = segs * mask
-                                    cae_mask_top_aligned = tf.boolean_mask(cae_mask_top, cae_mask_top > 0.5)[..., None]
-                                    cae_embeddings = tf.boolean_mask(embeddings, cae_mask_top > 0.5)
+                                    cae_mask_top_bool = cae_mask_top > 0.5
+                                    cae_mask_top_aligned = tf.boolean_mask(cae_mask_top, cae_mask_top_bool)[..., None]
+                                    cae_embeddings = tf.boolean_mask(embeddings, cae_mask_top_bool)
                                     cae_seg_ix, cae_seg_mask_bottom = tf.py_func(
                                         get_segment_indices,
                                         [
@@ -6840,14 +6966,14 @@ class DNNSegMLE(DNNSeg):
                                             correspondence_targets = cae_segs
                                         else: # direction == 'bottomup'
                                             correspondence_weights = cae_mask_top_aligned
-                                            correspondence_inputs = cae_segs
+                                            correspondence_inputs = cae_segs * cae_seg_mask_bottom[..., None]
                                             correspondence_targets = cae_embeddings
 
                                         correspondence_inputs = [correspondence_inputs]
                                         if l == 0:
                                             if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
                                                 speaker_embeddings = self.speaker_embeddings
-                                                speaker_embeddings = tf.boolean_mask(speaker_embeddings, cae_mask_top)
+                                                speaker_embeddings = tf.boolean_mask(speaker_embeddings, cae_mask_top_bool)
                                                 speaker_embeddings = tf.expand_dims(speaker_embeddings, 1)
                                                 speaker_embeddings = tf.tile(
                                                     speaker_embeddings,
@@ -6856,7 +6982,7 @@ class DNNSegMLE(DNNSeg):
                                                 correspondence_inputs.append(speaker_embeddings)
                                             if self.n_passthru_neurons:
                                                 passthru_neurons = self.passthru_neurons
-                                                passthru_neurons = tf.boolean_mask(passthru_neurons, cae_mask_top)
+                                                passthru_neurons = tf.boolean_mask(passthru_neurons, cae_mask_top_bool)
                                                 passthru_neurons = tf.expand_dims(passthru_neurons, 1)
                                                 passthru_neurons = tf.tile(
                                                     passthru_neurons,
@@ -7239,7 +7365,9 @@ class DNNSegMLE(DNNSeg):
 
                 varset = {
                     'boundary': [x for x in trainable_variables if not state_var_re.search(x.name)],
-                    'state': [x for x in trainable_variables if not boundary_var_re.search(x.name)]
+                    'state': [x for x in trainable_variables if not boundary_var_re.search(x.name)],
+                    'encoder': [x for x in trainable_variables if not 'ecoder' in x.name],
+                    'decoder': [x for x in trainable_variables if 'ecoder' in x.name]
                 }
 
                 layer_matcher = re.compile('\_l([0-9]+)')
@@ -7259,34 +7387,33 @@ class DNNSegMLE(DNNSeg):
                 for l in range(self.layers_encoder):
                     varset['l%d' % l] = sorted(list(varset['l%d' % l]), key=str)
 
-
+                train_ops = {}
+                if self.n_pretrain_steps:
+                    train_ops['decoder'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['decoder'])
                 if self.weight_update_mode.lower() == 'all':
-                    train_ops = {
-                        'all': self.optim.minimize(self.full_loss, global_step=self.global_batch_step)
-                    }
+                    train_ops['all'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step)
                 elif self.weight_update_mode.lower() == 'boundary':
-                    train_ops = {
-                        'boundary': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary'])
-                    }
+                    train_ops['boundary'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary'])
                 elif self.weight_update_mode.lower() == 'state':
-                    train_ops = {
-                        'state': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
-                    }
-                elif self.weight_update_mode.lower().startswith('alternating'):
-                    train_ops = {
-                        'boundary': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
-                        'state': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
-                    }
+                    train_ops['state'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
+                elif self.weight_update_mode.lower().startswith('boundary_state'):
+                    train_ops['boundary'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
+                    train_ops['state'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
                 elif self.weight_update_mode.lower().startswith('layerwise'):
-                    train_ops = {}
                     for l in range(self.layers_encoder):
-                        train_ops[l] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['l%d' % l])
+                        train_ops[str(l)] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['l%d' % l])
+                elif self.weight_update_mode.lower().startswith('encoder_decoder'):
+                    train_ops['encoder'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['encoder']),
+                    train_ops['decoder'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['decoder'])
+                elif self.weight_update_mode.lower().startswith('asymmetric_encoder_decoder'):
+                    train_ops['all'] = tf.group(
+                        self.optim[0].minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['encoder']),
+                        self.optim[1].minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['decoder'])
+                    )
                 else:
                     float(self.weight_update_mode)
-                    train_ops = {
-                        'boundary': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
-                        'state': self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
-                    }
+                    train_ops['boundary'] =self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
+                    train_ops['state'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
 
                 if self.use_jtps:
                     self.jtps_lambda = self.optim.get_flattened_lambdas()
@@ -7313,7 +7440,10 @@ class DNNSegMLE(DNNSeg):
                 out_dict = {}
 
                 if return_loss or return_reconstructions or return_labels or return_label_probs:
-                    train_op = self.train_ops[self.update_mode]
+                    if self.n_pretrain_steps and self.step.eval(session=self.sess) < self.n_pretrain_steps:
+                        train_op = self.train_ops['decoder']
+                    else:
+                        train_op = self.train_ops[self.get_update_mode()]
 
                     to_run = [train_op]
                     to_run_names = []
