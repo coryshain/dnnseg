@@ -560,11 +560,12 @@ def round_straight_through(x, session=None):
     with session.as_default():
         with session.graph.as_default():
             fw_op = tf.round
-            bw_op = tf.identity
+            # bw_op = tf.identity
+            def bw_op(x):
+                st = tf.round(x)
+                corr = tf.stop_gradient((0.5 - tf.abs(st - x)) / 0.5)
+                return x * corr
             return replace_gradient(fw_op, bw_op, session=session)(x)
-            # with ops.name_scope("BinaryRound") as name:
-            #     with session.graph.gradient_override_map({"Round": "Identity"}):
-            #         return tf.round(x, name=name)
 
 
 def bernoulli_straight_through(x, session=None):
@@ -574,9 +575,7 @@ def bernoulli_straight_through(x, session=None):
             fw_op = lambda x: tf.ceil(x - tf.random_uniform(tf.shape(x)))
             bw_op = tf.identity
             return replace_gradient(fw_op, bw_op, session=session)(x)
-            # with ops.name_scope("BernoulliSample") as name:
-            #     with session.graph.gradient_override_map({"Ceil": "Identity", "Sub": "BernoulliSample_ST"}):
-            #         return tf.ceil(x - tf.random_uniform(tf.shape(x)), name=name)
+
 
 def argmax_straight_through(x, session=None):
     session = get_session(session)
@@ -586,6 +585,7 @@ def argmax_straight_through(x, session=None):
             bw_op = tf.identity
             return replace_gradient(fw_op, bw_op, session=session)(x)
 
+
 def categorical_sample_straight_through(x, session=None):
     session = get_session(session)
     with session.as_default():
@@ -593,11 +593,6 @@ def categorical_sample_straight_through(x, session=None):
             fw_op = lambda x: tf.one_hot(tf.contrib.distributions.Categorical(probs=x).sample(), x.shape[-1])
             bw_op = tf.identity
             return replace_gradient(fw_op, bw_op, session=session)(x)
-
-
-@ops.RegisterGradient("BernoulliSample_ST")
-def bernoulliSample_ST(op, grad):
-    return [grad, tf.zeros(tf.shape(op.inputs[1]))]
 
 
 def replace_gradient(fw_op, bw_op, session=None):
@@ -855,7 +850,7 @@ def wma(x, filter_width=5, session=None):
             filter_left = tf.range(1, filter_left_width+1, dtype=tf.float32)
             filter_right = tf.range(1, filter_right_width+1, dtype=tf.float32)
             filter = tf.concat([filter_left, filter_right], axis=0)
-            filter /= tf.reduce_sum(filter)
+            filter /= tf.maximum(tf.reduce_sum(filter), 1e-8)
             filter = filter[..., None, None]
 
             x_pad_left = x[...,:1]
@@ -920,7 +915,7 @@ def scaled_dot_attn(
             k = tf.matrix_transpose(k)
             dot = tf.squeeze(tf.matmul(q, k), axis=-2)
             dot = infinity_mask(dot, mask=mask, float_type=float_type, int_type=int_type, session=session)
-            a = tf.nn.softmax(dot / scale)
+            a = tf.nn.softmax(dot / tf.maximum(scale, epsilon))
             a_expanded = tf.expand_dims(a, -1)
             scaled = v * a_expanded
             out = tf.reduce_sum(scaled, axis=-2)
@@ -941,8 +936,8 @@ def reduce_losses(losses, weights=None, epsilon=1e-8, session=None):
                         w = tf.convert_to_tensor(weights[i])
                         while len(w.shape) < len(l.shape):
                             w = w[..., None]
-                        scale = tf.reduce_prod(tf.cast(tf.shape(l) / tf.shape(w), dtype=w.dtype))
-                        l_cur = tf.reshape(l * w, [-1]) / scale
+                        scale = tf.reduce_prod(tf.cast(tf.shape(l) / tf.maximum(tf.shape(w), 1), dtype=w.dtype))
+                        l_cur = tf.reshape(l * w, [-1]) / tf.maximum(scale, epsilon)
                     else:
                         l_cur = tf.reshape(l * weights)
                     losses_tmp.append(l_cur)
@@ -960,7 +955,7 @@ def reduce_losses(losses, weights=None, epsilon=1e-8, session=None):
                     weights = tf.convert_to_tensor(weights)
                     while len(weights.shape) < len(losses.shape):
                         weights = weights[..., None]
-                    scale = tf.reduce_prod(tf.cast(tf.shape(losses) / tf.shape(weights), dtype=weights.dtype))
+                    scale = tf.reduce_prod(tf.cast(tf.shape(losses) / tf.maximum(tf.shape(weights), 1), dtype=weights.dtype))
                     weights *= scale
 
                 losses = tf.reduce_sum(losses) / tf.maximum(tf.reduce_sum(weights), epsilon)
@@ -2012,7 +2007,8 @@ class HMLSTMCell(LayerRNNCell):
 
                     # h_above: Hidden state of layer above at previous timestep (implicitly 0 if final layer)
                     if l < self._num_layers - 1:
-                        h_above = state[l + 1].embedding
+                        # h_above = state[l + 1].embedding
+                        h_above = state[l + 1].h
 
                         # if not self._bptt:
                         #     h_above = tf.stop_gradient(h_above)
@@ -2049,10 +2045,10 @@ class HMLSTMCell(LayerRNNCell):
                             return s_bottomup, tf.ones([tf.shape(s_bottomup)[0], 1])
 
                         s_bottomup, normalizer = tf.cond(self._training, train_func, eval_func)
+                    elif l > 0:
+                        normalizer = z_below
                     else:
                         normalizer = 1.
-                    if l > 0:
-                        normalizer *= z_below
 
                     s.append(s_bottomup)
 
@@ -2062,8 +2058,11 @@ class HMLSTMCell(LayerRNNCell):
                         recurrent_in = tf.concat([recurrent_in, layer.features, layer.features_by_seg], axis=-1)
                     s_recurrent = self._kernel_recurrent[l](recurrent_in)
                     if self._forget_at_boundary and not self._recurrent_at_forget:
-                        s_recurrent *= (1 - flush_prob)
-                    normalizer += 1.
+                        p = (1 - flush_prob)
+                        s_recurrent *= p
+                        normalizer += p
+                    else:
+                        normalizer += 1.
                     s.append(s_recurrent)
 
                     # Top-down features (if non-final layer)
@@ -2077,6 +2076,7 @@ class HMLSTMCell(LayerRNNCell):
                     s = sum(s)
 
                     if self._renormalize_preactivations:
+                        normalizer += self._epsilon
                         s /= normalizer
 
                     s_clean = s
@@ -2367,8 +2367,8 @@ class HMLSTMCell(LayerRNNCell):
                                 if self._forget_at_boundary:
                                     cprob = copy_prob
                                 else:
-                                    cprob = z_below_cur
-                                z_prob = (1 - cprob) * z_prob_prev + cprob * z_prob_update
+                                    cprob = (1 - z_below_cur)
+                                z_prob = cprob * z_prob_prev + (1 - cprob) * z_prob_update
 
                             if self._oracle_boundary:
                                 z_prob = tf.maximum(z_prob, z_prob_oracle)
@@ -5331,7 +5331,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                         mu = mu_prev
                         sigma2 = tf.nn.softplus(1 + q[..., 1:2])
                         ix = tf.cast(tf.range(tf.shape(self.values)[1]), dtype=tf.float32)[None, ...]
-                        a = tf.exp(-(mu-ix)**2/sigma2) * self.key_val_mask
+                        a = tf.exp(-(mu-ix)**2/ tf.maximum(sigma2, self.epsilon)) * self.key_val_mask
                         a /= tf.maximum(tf.reduce_sum(a, axis=1, keepdims=True), self.epsilon)
                         context_vector = tf.reduce_sum(self.values * a[..., None], axis=1)
                         mu += self.attn_step_size * tf.sigmoid(q[..., :1])
@@ -5888,7 +5888,7 @@ def construct_positional_encoding(
                     if positional_encoding_type.lower() == 'periodic':
                         coef = tf.exp(tf.linspace(-2., 2., n))[None, ...]
                     elif positional_encoding_type.lower() == 'transformer':
-                        log_timescale_increment = tf.log(10000.) / (tf.cast(n, dtype=FLOAT_TF) - 1)
+                        log_timescale_increment = tf.log(10000.) / tf.maximum(tf.cast(n, dtype=FLOAT_TF) - 1, 1e-8)
                         coef = (tf.exp(np.arange(n) * -log_timescale_increment))[None, ...]
 
                     sin = tf.sin(time * coef)

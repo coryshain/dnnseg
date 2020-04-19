@@ -10,6 +10,21 @@ from .backend import get_session
 
 
 ## Thanks to Keisuke Fujii (https://github.com/blei-lab/edward/issues/708) for this idea
+def get_safe_optimizer_class(base_optimizer_class, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            class SafeOptimizer(base_optimizer_class):
+                def __init__(self, *args, **kwargs):
+                    super(SafeOptimizer, self).__init__(*args, **kwargs)
+
+                def apply_gradients(self, grads_and_vars, **kwargs):
+                    with tf.control_dependencies([tf.check_numerics(g, 'Numerics check failed in gradient to variable %s' % v.name) for g, v in grads_and_vars if g is not None]):
+                        return super(SafeOptimizer, self).apply_gradients(grads_and_vars, **kwargs)
+
+            return SafeOptimizer
+
+
 def get_clipped_optimizer_class(base_optimizer_class, session=None):
     session = get_session(session)
     with session.as_default():
@@ -19,22 +34,12 @@ def get_clipped_optimizer_class(base_optimizer_class, session=None):
                     super(ClippedOptimizer, self).__init__(*args, **kwargs)
                     self.max_global_norm = max_global_norm
 
-                def compute_gradients(self, *args, **kwargs):
-                    grads_and_vars = super(ClippedOptimizer, self).compute_gradients(*args, **kwargs)
-                    if self.max_global_norm is None:
-                        return grads_and_vars
-                    grads = tf.clip_by_global_norm([g for g, _ in grads_and_vars], self.max_global_norm)[0]
-                    vars = [v for _, v in grads_and_vars]
-                    grads_and_vars = []
-                    for grad, var in zip(grads, vars):
-                        grads_and_vars.append((grad, var))
-                    return grads_and_vars
-
                 def apply_gradients(self, grads_and_vars, **kwargs):
                     if self.max_global_norm is None:
                         return grads_and_vars
                     grads, _ = tf.clip_by_global_norm([g for g, _ in grads_and_vars], self.max_global_norm)
-                    vars = [v for _, v in grads_and_vars]
+                    with tf.control_dependencies([tf.check_numerics(g, 'Numerics check failed in gradient') for g in grads if g is not None]):
+                        vars = [v for _, v in grads_and_vars]
                     grads_and_vars = []
                     for grad, var in zip(grads, vars):
                         grads_and_vars.append((grad, var))

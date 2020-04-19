@@ -26,7 +26,7 @@ def load_dnnseg(dir_path):
     that metadata to construct the computation graph. Then, if saved weights are found, these are loaded into the
     graph.
 
-    :param dir_path: Path to directory containing the DTSR checkpoint files.
+    :param dir_path: Path to root directory for DNNSeg model.
     :return: The loaded DNNSeg instance.
     """
 

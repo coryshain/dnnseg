@@ -76,7 +76,7 @@ if __name__ == '__main__':
         if not os.path.exists(analysis_dir):
             os.makedirs(analysis_dir)
 
-        for path in os.listdir(p['outdir']):
+        for path in os.listdir(p['outdir'] + '/tables/'):
             if path.startswith('embeddings') and path.endswith('.csv'):
                 layer_match = args.layers is None
                 if not layer_match:
@@ -89,7 +89,7 @@ if __name__ == '__main__':
                     if args.verbose:
                         sys.stderr.write('Evaluating segment table %s...\n' % path)
                         sys.stderr.flush()
-                    df = pd.read_csv(os.path.join(p['outdir'], path), sep=' ')
+                    df = pd.read_csv(os.path.join(p['outdir'] + '/tables/', path), sep=' ')
                     input_col_names = [c for c in df.columns if is_embedding_dimension.match(c)]
                     target_col_names_cur = []
                     df_cols = set(df.columns)

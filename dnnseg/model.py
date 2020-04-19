@@ -9,10 +9,11 @@ import numpy as np
 import scipy.signal
 import pandas as pd
 import tensorflow as tf
+from tensorflow.python import debug as tf_debug
 from sklearn.metrics import homogeneity_completeness_v_measure, adjusted_mutual_info_score, fowlkes_mallows_score
 
 from .backend import *
-from .opt import get_clipped_optimizer_class, get_JTPS_optimizer_class
+from .opt import get_safe_optimizer_class, get_clipped_optimizer_class, get_JTPS_optimizer_class
 from .data import cache_data
 from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS
 from .util import f_measure, pretty_print_seconds, stderr, get_alternating_mode
@@ -77,6 +78,8 @@ class DNNSeg(object):
     def _initialize_session(self):
         self.g = tf.Graph()
         self.sess = tf.Session(graph=self.g, config=tf_config)
+        # self.sess = tf_debug.LocalCLIDebugWrapperSession(self.sess)
+        # self.sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
 
     def _initialize_metadata(self):
         assert not (self.streaming and (self.task.lower() == 'classifier')), 'Streaming mode is not supported for the classifier task.'
@@ -419,7 +422,9 @@ class DNNSeg(object):
             self.use_correspondence_loss = True
         else:
             self.use_correspondence_loss = False
-        if self.correspondence_loss_scale is not None:
+        if self.correspondence_loss_scale is None:
+            self.correspondence_loss_scale = self._get_layerwise_scalar(0)
+        else:
             self.correspondence_loss_scale = self._get_layerwise_scalar(self.correspondence_loss_scale)
         if len(self.correspondence_loss_scale) == self.layers_encoder:
             self.correspondence_loss_scale = self.correspondence_loss_scale
@@ -2225,7 +2230,7 @@ class DNNSeg(object):
                                         if not self.backprop_into_attn_keys:
                                             labels[x] = tf.stop_gradient(labels[x])
 
-                                        labels[x] = labels[x] * key_val_mask[x][..., None]
+                                        labels[x] = labels[x]
 
                                         values[x] = self.segmenter.embedding_fn[l + 1](labels[x])
 
@@ -3209,6 +3214,8 @@ class DNNSeg(object):
                         'nadam': tf.contrib.opt.NadamOptimizer
                     }[name]
 
+                    optimizer_class = get_safe_optimizer_class(optimizer_class, session=self.sess)
+
                     if clip:
                         optimizer_class = get_clipped_optimizer_class(optimizer_class, session=self.sess)
                         optimizer_kwargs['max_global_norm'] = clip
@@ -3245,7 +3252,7 @@ class DNNSeg(object):
                         tf.summary.scalar('objective/encoder_lm_loss_l%d' % (l+1), self.encoder_lm_loss_summary[l], collections=['objective'])
                 if self.speaker_adversarial_gradient_scale:
                     for l in range(self.layers_encoder - 1):
-                        tf.summary.scalar('objective/encoder_speaker_adversarial_loss_l%d' % (l+1), self.encoder_speaker_adversarial_loss_summary[l], collections=['objective'])
+                        tf.summary.scalar('objective/speaker_adversarial_loss_l%d' % (l+1), self.encoder_speaker_adversarial_loss_summary[l], collections=['objective'])
                 if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
                     for l in range(self.layers_encoder - 1):
                         tf.summary.scalar('objective/encoder_passthru_adversarial_loss_l%d' % (l+1), self.encoder_passthru_adversarial_loss_summary[l], collections=['objective'])
@@ -3656,7 +3663,7 @@ class DNNSeg(object):
 
         if reduce_all:
             n = len(regularizer_losses)
-            regularizer_loss = tf.add_n(regularizer_losses) / tf.maximum(n, self.epsilon)
+            regularizer_losses = tf.add_n(regularizer_losses) / tf.maximum(n, self.epsilon)
 
         return regularizer_losses
 
@@ -4337,7 +4344,7 @@ class DNNSeg(object):
                         n_cells_weights = tf.reduce_prod(tf.shape(weights))
                         n_cells_losses = tf.reduce_prod(tf.shape(preds))
                         target_len = len(preds.shape) - 1
-                        scaling_factor = tf.cast(n_cells_losses / n_cells_weights, dtype=self.FLOAT_TF)
+                        scaling_factor = tf.cast(n_cells_losses / tf.maximum(n_cells_weights, 1), dtype=self.FLOAT_TF)
                         while len(weights.shape) < target_len:
                             weights = weights[..., None]
                         while len(weights.shape) > target_len:
@@ -4367,7 +4374,7 @@ class DNNSeg(object):
                         else:
                             n_cells_losses = tf.reduce_prod(tf.shape(preds))
                             target_len = len(preds.shape)
-                        scaling_factor = tf.cast(n_cells_losses / n_cells_weights, dtype=self.FLOAT_TF)
+                        scaling_factor = tf.cast(n_cells_losses / tf.maximum(n_cells_weights, 1), dtype=self.FLOAT_TF)
                         while len(weights.shape) < target_len:
                             weights = weights[..., None]
 
@@ -4672,7 +4679,7 @@ class DNNSeg(object):
                     labels_string,
                     labels_pred.astype('int'),
                     label_map=self.label_map,
-                    dir=self.outdir
+                    directory=self.outdir
                 )
 
                 if binary_encoding is not None:
@@ -4686,7 +4693,7 @@ class DNNSeg(object):
                         labels_string,
                         binary_encoding,
                         label_map=self.label_map,
-                        dir=self.outdir,
+                        directory=self.outdir,
                         suffix=suffix
                     )
 
@@ -4802,7 +4809,7 @@ class DNNSeg(object):
                 }
 
             data.dump_segmentations_to_textgrid(
-                outdir=self.outdir,
+                outdir=self.outdir + '/textgrids/',
                 suffix='',
                 segments=segment_tables + ['phn', 'wrd']
             )
@@ -5153,14 +5160,16 @@ class DNNSeg(object):
                     if save_embeddings:
                         if verbose:
                             stderr('Saving segment tables...\n')
+                        if not os.path.exists(self.outdir + '/tables/'):
+                            os.makedirs(self.outdir + '/tables/')
                         for l in range(self.layers_encoder - 1):
                             pred_tables[l].to_csv(
-                                self.outdir + '/embeddings_pred_segs_l%d.csv' % l,
+                                self.outdir + '/tables/embeddings_pred_segs_l%d.csv' % l,
                                 sep=' ',
                                 index=False
                             )
                             wrd_tables[l].to_csv(
-                                self.outdir + '/embeddings_gold_wrd_segs_l%d.csv' % l,
+                                self.outdir + '/tables/embeddings_gold_wrd_segs_l%d.csv' % l,
                                 sep=' ',
                                 index=False
                             )
@@ -5170,14 +5179,14 @@ class DNNSeg(object):
                                 tol=0.02
                             )
                             matched_wrd.to_csv(
-                                self.outdir + '/embeddings_matched_wrd_segs_l%d.csv' % l,
+                                self.outdir + '/tables/embeddings_matched_wrd_segs_l%d.csv' % l,
                                 sep=' ',
                                 index=False
                             )
 
                             if self.data_type.lower() == 'acoustic':
                                 phn_tables[l].to_csv(
-                                    self.outdir + '/embeddings_gold_phn_segs_l%d.csv' % l, sep=' ',
+                                    self.outdir + '/tables/embeddings_gold_phn_segs_l%d.csv' % l, sep=' ',
                                     index=False
                                 )
                                 matched_phn = data.extract_matching_segment_embeddings(
@@ -5187,7 +5196,7 @@ class DNNSeg(object):
                                 )
                                 matched_phn.rename(columns={'label': 'phn_label'}, inplace=True)
                                 matched_phn.to_csv(
-                                    self.outdir + '/embeddings_matched_phn_segs_l%d.csv' % l,
+                                    self.outdir + '/tables/embeddings_matched_phn_segs_l%d.csv' % l,
                                     sep=' ',
                                     index=False
                                 )
@@ -5595,8 +5604,8 @@ class DNNSeg(object):
                 else:
                     n_pb = n_minibatch
 
-                if not self.initial_evaluation_complete.eval(session=self.sess):
-                # if True:
+                # if not self.initial_evaluation_complete.eval(session=self.sess):
+                if True:
                 # if False:
                     self.run_checkpoint(
                         val_data,
@@ -6371,7 +6380,7 @@ class DNNSeg(object):
                     sr=sr,
                     hop_length=hop_length,
                     label_map=self.label_map,
-                    directory=self.outdir
+                    directory=self.outdir + '/plots/segs_and_states/'
                 )
 
                 # if invert_spectrograms and self.spectrogram_inverter is not None and not self.residual_targets:
@@ -6405,7 +6414,7 @@ class DNNSeg(object):
         bins = self.units_encoder[-1]
 
         if bins < 1000:
-            plot_label_histogram(labels_pred, dir=dir, bins=bins)
+            plot_label_histogram(labels_pred, directory=dir, bins=bins)
 
     def plot_label_heatmap(self, labels, preds, dir=None):
         if dir is None:
@@ -6414,7 +6423,7 @@ class DNNSeg(object):
         plot_label_heatmap(
             labels,
             preds,
-            dir=dir
+            directory=dir
         )
 
     def initialized(self):
@@ -6431,12 +6440,14 @@ class DNNSeg(object):
                 else:
                     return False
 
-    def save(self, dir=None):
+    def save(self, directory=None):
 
         assert not self.predict_mode, 'Cannot save while in predict mode, since this would overwrite the parameters with their moving averages.'
 
-        if dir is None:
-            dir = self.outdir
+        if directory is None:
+            directory = self.outdir + '/model/'
+        if not os.path.exists(directory):
+            os.makedirs(directory)
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 failed = True
@@ -6445,8 +6456,8 @@ class DNNSeg(object):
                 # Try/except to handle race conditions in Windows
                 while failed and i < 10:
                     try:
-                        self.saver.save(self.sess, dir + '/model.ckpt')
-                        with open(dir + '/m.obj', 'wb') as f:
+                        self.saver.save(self.sess, directory + '/model.ckpt')
+                        with open(directory + '/m.obj', 'wb') as f:
                             pickle.dump(self, f)
                         failed = False
                     except Exception:
@@ -6455,8 +6466,8 @@ class DNNSeg(object):
                         i += 1
                 if i >= 10:
                     sys.stderr.write('Could not save model to checkpoint file. Saving to backup...\n')
-                    self.saver.save(self.sess, dir + '/model_backup.ckpt')
-                    with open(dir + '/m.obj', 'wb') as f:
+                    self.saver.save(self.sess, directory + '/model_backup.ckpt')
+                    with open(directory + '/m.obj', 'wb') as f:
                         pickle.dump(self, f)
 
     def load(self, outdir=None, predict=False, restore=True, allow_missing=True):
@@ -6477,8 +6488,11 @@ class DNNSeg(object):
                 if not self.initialized():
                     self.sess.run(tf.global_variables_initializer())
                     tf.tables_initializer().run()
-                if restore and os.path.exists(outdir + '/checkpoint'):
-                    self._restore_inner(outdir + '/model.ckpt', predict=predict, allow_missing=allow_missing)
+                if restore:
+                    if os.path.exists(outdir + '/model/checkpoint'):
+                        self._restore_inner(outdir + '/model/model.ckpt', predict=predict, allow_missing=allow_missing)
+                    elif os.path.exists(outdir + '/checkpoint'): # To handle previous impl which didn't put checkpoint in subdir
+                        self._restore_inner(outdir + '/model.ckpt', predict=predict, allow_missing=allow_missing)
                 else:
                     if predict:
                         sys.stderr.write('No EMA checkpoint available. Leaving internal variables unchanged.\n')
@@ -7056,7 +7070,6 @@ class DNNSegMLE(DNNSeg):
                                     correspondence_logits = correspondence_inputs
 
                                     if not self.backprop_into_targets:
-                                    # if True:
                                         correspondence_targets = tf.stop_gradient(correspondence_targets)
 
                                     if direction == 'topdown':
@@ -7158,6 +7171,8 @@ class DNNSegMLE(DNNSeg):
                         lm_weights_cur = []
 
                         if loss_scale:
+                            lm_losses_reduced = 0.
+
                             if self.lm_targets_bwd[l] is not None and self.lm_order_bwd:
                                 logits_bwd = self.lm_logits_bwd[l]
                                 targets_bwd = self.lm_targets_bwd[l]
@@ -7168,16 +7183,11 @@ class DNNSegMLE(DNNSeg):
                                     logits_bwd,
                                     use_dtw=self._apply_dtw(l),
                                     distance_func=self._lm_distance_func(l),
-                                    weights=None,
-                                    reduce=False,
+                                    weights=weights_bwd,
+                                    reduce=True,
                                     name='lm_bwd_loss_L%d' % l
                                 ) * loss_scale
-                                lm_losses_cur.insert(0, lm_loss_bwd_cur)
-                                lm_weights_cur.insert(0, weights_bwd)
-                            else:
-                                lm_loss_bwd_cur = 0.
-                                lm_losses_cur.insert(0,0)
-                                lm_weights_cur.insert(0,1)
+                                lm_losses_reduced += lm_loss_bwd_cur
 
                             if self.lm_targets_fwd[l] is not None and self.lm_order_fwd:
                                 logits_fwd = self.lm_logits_fwd[l]
@@ -7189,30 +7199,15 @@ class DNNSegMLE(DNNSeg):
                                     logits_fwd,
                                     use_dtw=self._apply_dtw(l),
                                     distance_func=self._lm_distance_func(l),
-                                    weights=None,
-                                    reduce=False,
+                                    weights=weights_fwd,
+                                    reduce=True,
                                     name='lm_fwd_loss_L%d' % l
                                 ) * loss_scale
-                                lm_losses_cur.insert(0, lm_loss_fwd_cur)
-                                lm_weights_cur.insert(0, weights_fwd)
-                            else:
-                                lm_loss_fwd_cur = 0.
-                                lm_losses_cur.insert(0,0)
-                                lm_weights_cur.insert(0,1)
-
-                            lm_losses_reduced = reduce_losses(
-                                lm_losses_cur,
-                                lm_weights_cur,
-                                epsilon=self.epsilon,
-                                session=self.sess
-                            )
+                                lm_losses_reduced += lm_loss_fwd_cur
                         else:
-                            lm_losses_cur = 0.
                             lm_losses_reduced = None
 
-                        if self.loss_normalization == 'cell':
-                            loss += lm_losses_cur
-                        elif lm_losses_reduced is not None:
+                        if lm_losses_reduced is not None:
                             self.lm_losses.insert(0, lm_losses_reduced)
                             loss.insert(0, lm_losses_reduced)
                             reduction_weights.append(1.)

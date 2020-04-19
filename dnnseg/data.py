@@ -2963,8 +2963,7 @@ class Datafile(object):
             out = self.min(reduction_axis, mask=mask)
         elif normalization.lower() == 'norm_and_standardize':
             norm = np.linalg.norm(data, ord=2, axis=1, keepdims=True)
-            mean = (data / norm).mean()
-            out = norm * mean
+            out = norm * (data / norm).mean() # Algrebraically derived shift for norm followed by z-score
         else:
             out = np.zeros(shape)
 
@@ -2994,11 +2993,14 @@ class Datafile(object):
             out = self.sum(reduction_axis, mask=mask)
         elif normalization.lower() == 'norm_and_standardize':
             norm = np.linalg.norm(data, ord=2, axis=1, keepdims=True)
-            scale = (data / norm).std()
-            out = norm * scale
+            out = norm * (data / norm).std() # Algrebraically derived scale for norm followed by z-score
         else:
             if normalization.endswith('center'):
                 normalization = normalization[:-6]
+            if normalization.lower().startswith('norm'):
+                normalization = normalization[4:]
+                if not normalization:
+                    normalization = 2
             try:
                 normalization = int(normalization)
             except Exception:
@@ -3624,6 +3626,9 @@ class AcousticDatafile(Datafile):
     def dump_segmentations_to_textgrid(self, outdir=None, suffix='', segments=None):
         if outdir is None:
             outdir = self.dir
+
+        if not os.path.exists(outdir):
+            os.makedirs(outdir)
 
         if not isinstance(segments, list):
             segments = [segments]

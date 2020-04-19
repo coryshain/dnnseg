@@ -1,4 +1,5 @@
 import sys
+import os
 import re
 import numpy as np
 import scipy.cluster.hierarchy as spc
@@ -329,6 +330,8 @@ def plot_acoustic_features(
                 title = label_map.get(title, title)
             fig.suptitle(title, fontsize=20, weight='bold')
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        if not os.path.exists(directory):
+            os.makedirs(directory)
         try:
             fig.savefig(directory + '/' + prefix + '%d_featureplot' % i + suffix)
         except Exception:
@@ -340,7 +343,7 @@ def plot_acoustic_features(
     plt.close(fig)
 
 
-def plot_label_histogram(labels, title=None, bins='auto', label_map=None, dir='./', prefix='', suffix='.png'):
+def plot_label_histogram(labels, title=None, bins='auto', label_map=None, directory='./', prefix='', suffix='.png'):
 
     if label_map is not None:
         label_map = dict(zip(label_map.source,label_map.target))
@@ -359,14 +362,14 @@ def plot_label_histogram(labels, title=None, bins='auto', label_map=None, dir='.
     fig.tight_layout()
 
     try:
-        fig.savefig(dir + '/' + prefix + 'label_histogram' + suffix)
+        fig.savefig(directory + '/' + prefix + 'label_histogram' + suffix)
     except:
         stderr('IO error when saving plot. Skipping plotting...\n')
 
     plt.close(fig)
 
 
-def plot_label_heatmap(seg_table, class_column_name='IPA', title=None, cmap='Blues', dir='./', prefix='', suffix='.png'):
+def plot_label_heatmap(seg_table, class_column_name='IPA', title=None, cmap='Blues', directory='./', prefix='', suffix='.png'):
     fig = plt.figure()
     ax = fig.add_subplot(1, 1, 1)
 
@@ -390,15 +393,18 @@ def plot_label_heatmap(seg_table, class_column_name='IPA', title=None, cmap='Blu
         fig.suptitle(title)
     # fig.tight_layout()
 
+
+    if not os.path.exists(directory):
+        os.makedirs(directory)
     try:
-        fig.savefig(dir + '/' + prefix + 'label_heatmap' + suffix)
+        fig.savefig(directory + '/' + prefix + 'label_heatmap' + suffix)
     except:
         stderr('IO error when saving plot. Skipping plotting...\n')
 
     plt.close(fig)
 
 
-def plot_binary_unit_heatmap(seg_table, class_column_name='IPA', cmap='Blues', dir='./', prefix='', suffix='.png'):
+def plot_binary_unit_heatmap(seg_table, class_column_name='IPA', cmap='Blues', directory='./', prefix='', suffix='.png'):
     embedding_cols = [x for x in seg_table.columns if is_embedding_dimension.match(x)]
     df = seg_table[[class_column_name] + embedding_cols]
     df[class_column_name] += '   '
@@ -418,8 +424,10 @@ def plot_binary_unit_heatmap(seg_table, class_column_name='IPA', cmap='Blues', d
     cm.cax.set_visible(False)
     cm.ax_col_dendrogram.set_visible(False)
 
+    if not os.path.exists(directory):
+        os.makedirs(directory)
     try:
-        cm.savefig(dir + '/' + prefix + 'binary_unit_heatmap' + suffix)
+        cm.savefig(directory + '/' + prefix + 'binary_unit_heatmap' + suffix)
     except Exception:
         stderr('IO error when saving plot. Skipping plotting...\n')
 
@@ -430,7 +438,7 @@ def plot_class_similarity(
         similarity_matrix,
         title=None,
         cmap='Blues',
-        dir='./',
+        directory='./',
         prefix='',
         suffix='.png'
 ):
@@ -468,8 +476,11 @@ def plot_class_similarity(
         fig.suptitle(title)
     # fig.tight_layout()
 
+
+    if not os.path.exists(directory):
+        os.makedirs(directory)
     try:
-        fig.savefig(dir + '/' + prefix + 'confusion_matrix' + suffix)
+        fig.savefig(directory + '/' + prefix + 'confusion_matrix' + suffix)
     except:
         stderr('IO error when saving plot. Skipping plotting...\n')
 
@@ -537,6 +548,9 @@ def plot_projections(
                 edgecolor="none",
                 alpha=0.25
             )
+
+        if not os.path.exists(directory):
+            os.makedirs(directory)
         try:
             g.savefig(directory + '/' + prefix + 'projections_%s' % (c + suffix))
         except Exception:
