@@ -439,6 +439,16 @@ class DNNSeg(object):
             self.correspondence_gradient_scale = self.correspondence_gradient_scale
         assert len(self.correspondence_gradient_scale) == self.layers_encoder, 'Misalignment in number of layers between correspondence_gradient_scale and n_units_encoder.'
 
+        if isinstance(self.correspondence_target_gradient_scale, str):
+            self.correspondence_target_gradient_scale = [float(x) for x in self.correspondence_target_gradient_scale.split()]
+            if len(self.correspondence_target_gradient_scale) == 1:
+                self.correspondence_target_gradient_scale = [self.correspondence_target_gradient_scale[0]] * self.layers_encoder
+        elif isinstance(self.correspondence_target_gradient_scale, float) or self.correspondence_target_gradient_scale is None:
+            self.correspondence_target_gradient_scale = [self.correspondence_target_gradient_scale] * self.layers_encoder
+        else:
+            self.correspondence_target_gradient_scale = self.correspondence_target_gradient_scale
+        assert len(self.correspondence_target_gradient_scale) == self.layers_encoder, 'Misalignment in number of layers between correspondence_target_gradient_scale and n_units_encoder.'
+
         ppx = self.plot_position_index.split()
         if len(ppx) == 1:
             ppx *= 2
@@ -1388,24 +1398,23 @@ class DNNSeg(object):
                             if l < self.layers_encoder - 1:
                                 encoder_features_by_seg_cur = encoder_features_by_seg_tmp[l]
                                 encoder_feature_deltas_cur = encoder_feature_deltas_tmp[l]
-                            if l < (self.layers_encoder - 1 + self.encoder_discretize_final):
-                                if not self.encoder_state_discretizer and not self.features_encoder[l]:
-                                    if l == self.layers_encoder - 1:
-                                        activation = self.encoder_activation
-                                    else:
-                                        activation = self.encoder_inner_activation
-                                    if activation == 'tanh':
-                                        encoder_features_cur = ((encoder_features_cur + 1) / 2)
-                                        encoder_feature_targets_cur = (encoder_feature_targets_cur + 1) / 2
-                                        if l < self.layers_encoder - 1:
-                                            encoder_features_by_seg_cur = (encoder_features_by_seg_cur + 1) / 2
-                                            encoder_feature_deltas_cur = (encoder_feature_deltas_cur + 1) / 2
-                                encoder_features_cur *= self.X_mask[..., None]
-                                encoder_embeddings_cur *= self.X_mask[..., None]
-                                encoder_feature_targets_cur *= self.X_mask[..., None]
-                                if l < self.layers_encoder - 1:
-                                    encoder_features_by_seg_cur *= self.X_mask[..., None]
-                                    encoder_feature_deltas_cur *= self.X_mask[..., None]
+                            if not self.encoder_state_discretizer and not self.features_encoder[l]:
+                                if l == self.layers_encoder - 1:
+                                    activation = self.encoder_activation
+                                else:
+                                    activation = self.encoder_inner_activation
+                                if activation == 'tanh':
+                                    encoder_features_cur = ((encoder_features_cur + 1) / 2)
+                                    encoder_feature_targets_cur = (encoder_feature_targets_cur + 1) / 2
+                                    if l < self.layers_encoder - 1:
+                                        encoder_features_by_seg_cur = (encoder_features_by_seg_cur + 1) / 2
+                                        encoder_feature_deltas_cur = (encoder_feature_deltas_cur + 1) / 2
+                            encoder_features_cur *= self.X_mask[..., None]
+                            encoder_embeddings_cur *= self.X_mask[..., None]
+                            encoder_feature_targets_cur *= self.X_mask[..., None]
+                            if l < self.layers_encoder - 1:
+                                encoder_features_by_seg_cur *= self.X_mask[..., None]
+                                encoder_feature_deltas_cur *= self.X_mask[..., None]
                             encoder_features.append(encoder_features_cur)
                             encoder_embeddings.append(encoder_embeddings_cur)
                             encoder_feature_targets.append(encoder_feature_targets_cur)
@@ -1524,7 +1533,7 @@ class DNNSeg(object):
                                 b = self.encoder_seglen_regularizer_shape[l]
                                 s = self.encoder_seglen_regularizer_scale[l]
                                 w = segs_expanded
-                                length_penalties = tf.exp(-b * tf.maximum(lengths-1 , 0)) * w
+                                length_penalties = tf.exp(-b * (lengths-1)) * w
                                 length_penalty = tf.reduce_sum(length_penalties) / tf.maximum(tf.reduce_sum(w), e)
                                 length_penalty *= s
                                 self._add_regularization(length_penalty, self.encoder_seglen_regularizer)
@@ -1937,7 +1946,30 @@ class DNNSeg(object):
                             elif not self.backprop_into_loss_weights:
                                 weights_cur = tf.stop_gradient(weights_cur)
                             if drop_masked:
-                                mask_cur = tf.cast(weights_cur > 0.5, self.FLOAT_TF)
+                                def round_fn():
+                                    return tf.cast(
+                                        weights_cur >= 0.5,
+                                        self.FLOAT_TF
+                                    )
+                                
+                                def sample_fn():
+                                    return tf.cast(
+                                        weights_cur >= tf.random_uniform(tf.shape(weights_cur)),
+                                        self.FLOAT_TF
+                                    )
+                                
+                                if self.sample_at_train and self.encoder_boundary_discretizer is None:
+                                    train_fn = sample_fn
+                                else:
+                                    train_fn = round_fn
+                                
+                                if self.sample_at_eval and self.encoder_boundary_discretizer is None:
+                                    eval_fn = sample_fn
+                                else:
+                                    eval_fn = round_fn
+                                    
+                                mask_cur = tf.cond(self.training, train_fn, eval_fn)
+                                
                             else:
                                 mask_cur = self.X_mask
 
@@ -1962,10 +1994,15 @@ class DNNSeg(object):
 
                         targets_bwd_cur = lag_dict['X_bwd']
                         targets_bwd_src_cur = targets_bwd_cur
-                        if self.lm_target_gradient_scale[l] and self.lm_target_gradient_scale[l] < 1:
+                        if self.lm_target_gradient_scale[l] is None:
+                            scale = 0
+                        else:
+                            scale = self.lm_target_gradient_scale[l]
+
+                        if scale != 1:
                             targets_bwd_cur = replace_gradient(
                                 tf.identity,
-                                lambda x: x * self.lm_target_gradient_scale[l],
+                                lambda x: x * scale,
                                 session=self.sess
                             )(targets_bwd_cur)
                         elif not self.lm_target_gradient_scale[l]:
@@ -1975,14 +2012,12 @@ class DNNSeg(object):
                         mask_bwd_cur = lag_dict['mask_bwd']
                         targets_fwd_cur = lag_dict['X_fwd']
                         targets_fwd_src_cur = targets_fwd_cur
-                        if self.lm_target_gradient_scale[l] and self.lm_target_gradient_scale[l] < 1:
+                        if scale != 1:
                             targets_fwd_cur = replace_gradient(
                                 tf.identity,
-                                lambda x: x * self.lm_target_gradient_scale[l],
+                                lambda x: x * scale,
                                 session=self.sess
                             )(targets_fwd_cur)
-                        elif not self.lm_target_gradient_scale[l]:
-                            targets_fwd_cur = tf.stop_gradient(targets_fwd_cur)
                         weights_fwd_cur = lag_dict['weights_fwd']
                         time_ids_fwd_cur = lag_dict['time_ids_fwd']
                         mask_fwd_cur = lag_dict['mask_fwd']
@@ -4756,7 +4791,9 @@ class DNNSeg(object):
 
         return eval_dict, summary
 
-    def score_acoustics(self, data, segment_tables):
+    def score_acoustics(self, data, segment_tables, outdir=None):
+        if outdir is None:
+            outdir = self.outdir
         segmentation_scores = []
         summary = ''
 
@@ -4809,7 +4846,7 @@ class DNNSeg(object):
                 }
 
             data.dump_segmentations_to_textgrid(
-                outdir=self.outdir + '/textgrids/',
+                outdir=outdir + '/textgrids/',
                 suffix='',
                 segments=segment_tables + ['phn', 'wrd']
             )
@@ -4819,13 +4856,16 @@ class DNNSeg(object):
 
         return segmentation_scores, summary
 
-    def score_text(self, data, segment_tables):
+    def score_text(self, data, segment_tables, outdir=None):
+        if outdir is None:
+            outdir = self.outdir
+
         segmentation_scores = []
         summary = ''
         if self.data_type.lower() == 'text':
             for i, segment_table in enumerate(segment_tables):
                 summary += '  Layer %s\n' % (i + 1)
-                summary += '    Num segments: %d\n' % len(segment_tables)
+                summary += '    Num segments: %d\n' % len(segment_table)
                 summary += '    Mean segment length: %.4f characters\n\n' % (segment_table.end - segment_table.start).mean()
 
                 s = data.score_text_segmentation('wrd', segment_table)[0]
@@ -4857,9 +4897,12 @@ class DNNSeg(object):
                     }
                 })
 
+                if not os.path.exists(outdir + '/text'):
+                    os.makedirs(outdir + '/text')
+
                 data.dump_segmentations_to_textfile(
-                    outdir=self.outdir,
-                    suffix='_l%d' % (i + 1),
+                    outdir=outdir + '/text/',
+                    suffix='l%d' % (i + 1),
                     segments=[segment_table],
                     parent_segments='vad'
                 )
@@ -4868,28 +4911,13 @@ class DNNSeg(object):
 
         return segmentation_scores, summary
 
-    def evaluate_segmenter(
+    def get_segmentation_arrays(
             self,
             data,
             whole_file=True,
-            segtype=None,
-            random_baseline=True,
-            plot=True,
-            save_embeddings=True,
-            ix2label=None,
             verbose=True
     ):
-        report_classeval = False
-
         if 'hmlstm' in self.encoder_type.lower():
-            summary = ''
-
-            if verbose:
-                stderr('Evaluating segmenter...\n')
-
-            if segtype is None:
-                segtype = self.segtype
-
             if whole_file:
                 minibatch_size = 1
                 n_minibatch = data.get_n(self.val_data_name)
@@ -4916,9 +4944,8 @@ class DNNSeg(object):
                         pb = tf.contrib.keras.utils.Progbar(n_minibatch)
 
                     if self.streaming or whole_file:
-                        padding = None
-
                         # Lists are ragged shape [N_LAYERS, N_FILES, N_TIMESTEPS]
+                        segmentation_probs = [[] for _ in range(n_layers)]
                         segmentations = [[] for _ in range(n_layers)]
                         states = [[] for _ in range(n_layers)]
                         phn_boundaries = []
@@ -4956,8 +4983,9 @@ class DNNSeg(object):
                             if fixed_boundaries_batch is not None:
                                 fd_minibatch[self.fixed_boundaries_placeholder] = fixed_boundaries_batch
 
-                            segmentations_cur, states_cur = self.sess.run(
+                            segmentation_probs_cur, segmentations_cur, states_cur = self.sess.run(
                                 [
+                                    self.segmentation_probs,
                                     self.segmentations,
                                     self.encoder_feature_targets
                                 ],
@@ -4965,14 +4993,14 @@ class DNNSeg(object):
                             )
 
                             for l in range(n_layers):
-                                states[l].append(np.squeeze(states_cur[l]))
+                                segmentation_probs[l].append(np.squeeze(segmentation_probs_cur[l]))
                                 segmentations[l].append(np.squeeze(segmentations_cur[l]))
+                                states[l].append(np.squeeze(states_cur[l]))
 
                             if verbose:
                                 pb.update(i+1, values=[])
 
-                    else:
-                        padding = self.input_padding
+                    else: # CURRENTLY BROKEN
                         segmentations = [[] for _ in range(n_layers)]
                         states = [[] for _ in range(n_layers)]
 
@@ -5024,194 +5052,287 @@ class DNNSeg(object):
                         segmentations = new_segmentations
                         states = new_states
 
-                    if verbose:
-                        stderr('Computing segment tables...\n')
+                    self.set_predict_mode(False)
 
-                    smoothing_algorithm = None
-                    n_points = None
-
-                    if self.xent_state_predictions:
-                        if self.encoder_state_discretizer and self.encoder_state_discretizer.lower() == 'csn':
-                            state_activation = 'softmax'
-                        else:
-                            state_activation = 'sigmoid'
-                    else:
-                        state_activation = self.encoder_inner_activation
-
-                    pred_tables = data.get_segment_tables(
-                        segmentations=segmentations,
-                        parent_segment_type=segtype,
-                        states=states,
-                        phn_labels=phn_labels,
-                        wrd_labels=wrd_labels,
-                        state_activation=state_activation,
-                        smoothing_algorithm=smoothing_algorithm,
-                        smoothing_algorithm_params=None,
-                        n_points=n_points,
-                        padding=padding
-                    )
-
-                    if self.data_type.lower() == 'acoustic':
-                        phn_tables = data.get_segment_tables(
-                            segmentations=[phn_boundaries] * (self.layers_encoder - 1),
-                            states=states,
-                            phn_labels=phn_labels,
-                            wrd_labels=None,
-                            parent_segment_type=segtype,
-                            state_activation=state_activation,
-                            smoothing_algorithm=smoothing_algorithm,
-                            smoothing_algorithm_params=None,
-                            n_points=n_points,
-                            padding=padding
-                        )
-
-                        if self.feature_map is not None:
-                            phn_tables = [pd.merge(x, self.feature_map, left_on=['phn_label'], right_on=['symbol']) for x in phn_tables]
-                        if self.label_map is not None:
-                            for table in pred_tables:
-                                ipa = pd.Series(table.phn_label).replace(self.label_map)
-                                table['IPA'] = ipa
-                            for table in phn_tables:
-                                ipa = pd.Series(table.phn_label).replace(self.label_map)
-                                table['IPA'] = ipa
-                        phn_tables = [x.sort_values(['speaker', 'fileID', 'start']) for x in phn_tables]
-                    else:
-                        phn_tables = None
-
-                    wrd_tables = data.get_segment_tables(
-                        segmentations=[wrd_boundaries] * (self.layers_encoder - 1),
-                        states=states,
-                        phn_labels=None,
-                        wrd_labels=wrd_labels,
-                        parent_segment_type=segtype,
-                        state_activation=state_activation,
-                        smoothing_algorithm=smoothing_algorithm,
-                        smoothing_algorithm_params=None,
-                        n_points=n_points,
-                        padding=padding
-                    )
-
-                    if verbose:
-                        stderr('Evaluating segmentation...\n')
-
-                    summary += '\nSEGMENTATION EVAL:\n\n'
-
-                    if self.data_type.lower() == 'acoustic':
-                        scores_cur, summary_cur = self.score_acoustics(data, pred_tables)
-                    else:
-                        scores_cur, summary_cur = self.score_text(data, pred_tables)
-
-                    scores = {
-                        'segmentation_scores': scores_cur
+                    out = {
+                        'segmentation_probs': segmentation_probs,
+                        'segmentations': segmentations,
+                        'states': states,
+                        'phn_boundaries': phn_boundaries,
+                        'phn_labels': phn_labels,
+                        'wrd_boundaries': wrd_boundaries,
+                        'wrd_labels': wrd_labels
                     }
+
+                    return out
+
+    def get_segmentation_eval(
+            self,
+            data,
+            segtype=None,
+            padding=None,
+            segmentations=None,
+            states=None,
+            phn_boundaries=None,
+            phn_labels=None,
+            wrd_boundaries=None,
+            wrd_labels=None,
+            random_baseline=True,
+            save_embeddings=False,
+            report_classeval=False,
+            plot=True,
+            outdir=None,
+            verbose=True
+    ):
+        summary = ''
+
+        if verbose:
+            stderr('Computing segment tables...\n')
+
+        smoothing_algorithm = None
+        n_points = None
+
+        if self.xent_state_predictions:
+            if self.encoder_state_discretizer and self.encoder_state_discretizer.lower() == 'csn':
+                state_activation = 'softmax'
+            else:
+                state_activation = 'sigmoid'
+        else:
+            state_activation = self.encoder_inner_activation
+
+        pred_tables = data.get_segment_tables(
+            segmentations=segmentations,
+            states=states,
+            parent_segment_type=segtype,
+            phn_labels=phn_labels,
+            wrd_labels=wrd_labels,
+            state_activation=state_activation,
+            smoothing_algorithm=smoothing_algorithm,
+            smoothing_algorithm_params=None,
+            n_points=n_points,
+            padding=padding
+        )
+
+        if self.data_type.lower() == 'acoustic':
+            phn_tables = data.get_segment_tables(
+                segmentations=[phn_boundaries] * (self.layers_encoder - 1),
+                states=states,
+                phn_labels=phn_labels,
+                wrd_labels=None,
+                parent_segment_type=segtype,
+                state_activation=state_activation,
+                smoothing_algorithm=smoothing_algorithm,
+                smoothing_algorithm_params=None,
+                n_points=n_points,
+                padding=padding
+            )
+
+            if self.feature_map is not None:
+                phn_tables = [pd.merge(x, self.feature_map, left_on=['phn_label'], right_on=['symbol']) for x in
+                              phn_tables]
+            if self.label_map is not None:
+                for table in pred_tables:
+                    ipa = pd.Series(table.phn_label).replace(self.label_map)
+                    table['IPA'] = ipa
+                for table in phn_tables:
+                    ipa = pd.Series(table.phn_label).replace(self.label_map)
+                    table['IPA'] = ipa
+            phn_tables = [x.sort_values(['speaker', 'fileID', 'start']) for x in phn_tables]
+        else:
+            phn_tables = None
+
+        wrd_tables = data.get_segment_tables(
+            segmentations=[wrd_boundaries] * (self.layers_encoder - 1),
+            states=states,
+            phn_labels=None,
+            wrd_labels=wrd_labels,
+            parent_segment_type=segtype,
+            state_activation=state_activation,
+            smoothing_algorithm=smoothing_algorithm,
+            smoothing_algorithm_params=None,
+            n_points=n_points,
+            padding=padding
+        )
+
+        if verbose:
+            stderr('Evaluating segmentation...\n')
+
+        summary += '\nSEGMENTATION EVAL:\n\n'
+
+        if self.data_type.lower() == 'acoustic':
+            scores_cur, summary_cur = self.score_acoustics(data, pred_tables, outdir=outdir)
+        else:
+            scores_cur, summary_cur = self.score_text(data, pred_tables, outdir=outdir)
+
+        scores = {
+            'segmentation_scores': scores_cur
+        }
+        summary += summary_cur
+
+        if verbose:
+            stderr('Evaluating classification...\n')
+
+        if report_classeval:
+            summary += '\nCLASSIFICATION EVAL:\n\n'
+        scores['classification_scores'] = []
+        if self.data_type.lower() == 'acoustic':
+            segtypes = ['phn', 'wrd']
+        else:
+            segtypes = ['wrd']
+        for l in range(len(pred_tables)):
+            scores['classification_scores'].append({})
+            for s in segtypes:
+                if report_classeval:
+                    summary += 'LAYER %d, GOLD=%s\n' % (l + 1, s)
+
+                scores['classification_scores'][l][s] = {'goldseg': {}, 'predseg': {}}
+
+                if s == 'phn':
+                    seg_table = phn_tables[l]
+                else:
+                    seg_table = wrd_tables[l]
+
+                if report_classeval:
+                    summary += '  Using gold segmentations\n'
+                goldseg_score, summary_cur = self._evaluate_classifier_inner(
+                    seg_table[s + '_label'],
+                    seg_table.label,
+                    plot=plot,
+                    random_baseline=random_baseline,
+                    ix2label=None,
+                    verbose=False
+                )
+                scores['classification_scores'][l][s]['goldseg'] = goldseg_score
+                if report_classeval:
                     summary += summary_cur
 
-                    if verbose:
-                        stderr('Evaluating classification...\n')
+                if report_classeval:
+                    summary += '  Using predicted segmentations\n'
+                predseg_score, summary_cur = self._evaluate_classifier_inner(
+                    pred_tables[l][s + '_label'],
+                    pred_tables[l].label,
+                    plot=plot,
+                    random_baseline=random_baseline,
+                    ix2label=None,
+                    verbose=False
+                )
+                scores['classification_scores'][l][s]['predseg'] = predseg_score
+                if report_classeval:
+                    summary += summary_cur
 
-                    if report_classeval:
-                        summary += '\nCLASSIFICATION EVAL:\n\n'
-                    scores['classification_scores'] = []
-                    if self.data_type.lower() == 'acoustic':
-                        segtypes = ['phn', 'wrd']
-                    else:
-                        segtypes = ['wrd']
-                    for l in range(len(pred_tables)):
-                        scores['classification_scores'].append({})
-                        for s in segtypes:
-                            if report_classeval:
-                                summary += 'LAYER %d, GOLD=%s\n' % (l + 1, s)
+        if save_embeddings:
+            if outdir is None:
+                outdir = self.outdir
+            if verbose:
+                stderr('Saving segment tables...\n')
+            if not os.path.exists(outdir + '/tables/'):
+                os.makedirs(outdir + '/tables/')
+            for l in range(self.layers_encoder - 1):
+                pred_tables[l].to_csv(
+                    outdir + '/tables/embeddings_pred_segs_l%d.csv' % l,
+                    sep=' ',
+                    index=False
+                )
+                wrd_tables[l].to_csv(
+                    outdir + '/tables/embeddings_gold_wrd_segs_l%d.csv' % l,
+                    sep=' ',
+                    index=False
+                )
+                matched_wrd = data.extract_matching_segment_embeddings(
+                    'wrd',
+                    pred_tables[l],
+                    tol=0.02
+                )
+                matched_wrd.to_csv(
+                    outdir + '/tables/embeddings_matched_wrd_segs_l%d.csv' % l,
+                    sep=' ',
+                    index=False
+                )
 
-                            scores['classification_scores'][l][s] = {'goldseg': {}, 'predseg': {}}
+                if self.data_type.lower() == 'acoustic':
+                    phn_tables[l].to_csv(
+                        outdir + '/tables/embeddings_gold_phn_segs_l%d.csv' % l, sep=' ',
+                        index=False
+                    )
+                    matched_phn = data.extract_matching_segment_embeddings(
+                        'phn',
+                        pred_tables[l],
+                        tol=0.02
+                    )
+                    matched_phn.rename(columns={'label': 'phn_label'}, inplace=True)
+                    matched_phn.to_csv(
+                        outdir + '/tables/embeddings_matched_phn_segs_l%d.csv' % l,
+                        sep=' ',
+                        index=False
+                    )
 
-                            if s == 'phn':
-                                seg_table = phn_tables[l]
-                            else:
-                                seg_table = wrd_tables[l]
+        return scores, pred_tables, phn_tables, wrd_tables, summary
 
-                            if report_classeval:
-                                summary += '  Using gold segmentations\n'
-                            goldseg_score, summary_cur = self._evaluate_classifier_inner(
-                                seg_table[s + '_label'],
-                                seg_table.label,
-                                plot=plot,
-                                random_baseline=random_baseline,
-                                ix2label=None,
-                                verbose=False
-                            )
-                            scores['classification_scores'][l][s]['goldseg'] = goldseg_score
-                            if report_classeval:
-                                summary += summary_cur
+    def evaluate_segmenter(
+            self,
+            data,
+            whole_file=True,
+            segtype=None,
+            random_baseline=True,
+            plot=True,
+            save_embeddings=True,
+            ix2label=None,
+            verbose=True
+    ):
+        report_classeval = False
 
-                            if report_classeval:
-                                summary += '  Using predicted segmentations\n'
-                            predseg_score, summary_cur = self._evaluate_classifier_inner(
-                                pred_tables[l][s + '_label'],
-                                pred_tables[l].label,
-                                plot=plot,
-                                random_baseline=random_baseline,
-                                ix2label=None,
-                                verbose=False
-                            )
-                            scores['classification_scores'][l][s]['predseg'] = predseg_score
-                            if report_classeval:
-                                summary += summary_cur
+        if verbose:
+            stderr('Evaluating segmenter...\n')
 
-                    if save_embeddings:
-                        if verbose:
-                            stderr('Saving segment tables...\n')
-                        if not os.path.exists(self.outdir + '/tables/'):
-                            os.makedirs(self.outdir + '/tables/')
-                        for l in range(self.layers_encoder - 1):
-                            pred_tables[l].to_csv(
-                                self.outdir + '/tables/embeddings_pred_segs_l%d.csv' % l,
-                                sep=' ',
-                                index=False
-                            )
-                            wrd_tables[l].to_csv(
-                                self.outdir + '/tables/embeddings_gold_wrd_segs_l%d.csv' % l,
-                                sep=' ',
-                                index=False
-                            )
-                            matched_wrd = data.extract_matching_segment_embeddings(
-                                'wrd',
-                                pred_tables[l],
-                                tol=0.02
-                            )
-                            matched_wrd.to_csv(
-                                self.outdir + '/tables/embeddings_matched_wrd_segs_l%d.csv' % l,
-                                sep=' ',
-                                index=False
-                            )
+        if segtype is None:
+            segtype = self.segtype
 
-                            if self.data_type.lower() == 'acoustic':
-                                phn_tables[l].to_csv(
-                                    self.outdir + '/tables/embeddings_gold_phn_segs_l%d.csv' % l, sep=' ',
-                                    index=False
-                                )
-                                matched_phn = data.extract_matching_segment_embeddings(
-                                    'phn',
-                                    pred_tables[l],
-                                    tol=0.02
-                                )
-                                matched_phn.rename(columns={'label': 'phn_label'}, inplace=True)
-                                matched_phn.to_csv(
-                                    self.outdir + '/tables/embeddings_matched_phn_segs_l%d.csv' % l,
-                                    sep=' ',
-                                    index=False
-                                )
+        if 'hmlstm' in self.encoder_type.lower():
+            if verbose:
+                stderr('Evaluating segmenter...\n')
 
-                    stderr(summary)
+            if segtype is None:
+                segtype = self.segtype
 
-                    with open(self.outdir + '/initial_classifier_eval.txt', 'w') as f:
-                        f.write(summary)
+            padding = None
 
-                    self.set_predict_mode(False)
+            seg_dict = self.get_segmentation_arrays(
+                data,
+                whole_file=whole_file,
+                verbose=verbose
+            )
+
+            segmentations = seg_dict['segmentations']
+            states = seg_dict['states']
+            phn_boundaries = seg_dict['phn_boundaries']
+            phn_labels = seg_dict['phn_labels']
+            wrd_boundaries = seg_dict['wrd_boundaries']
+            wrd_labels = seg_dict['wrd_labels']
+
+            scores, pred_tables, phn_tables, wrd_tables, summary = self.get_segmentation_eval(
+                data,
+                segtype=segtype,
+                padding=padding,
+                segmentations=segmentations,
+                states=states,
+                phn_boundaries=phn_boundaries,
+                phn_labels=phn_labels,
+                wrd_boundaries=wrd_boundaries,
+                wrd_labels=wrd_labels,
+                random_baseline=random_baseline,
+                save_embeddings=save_embeddings,
+                report_classeval=report_classeval,
+                plot=plot,
+                verbose=verbose
+            )
+
+            stderr(summary)
 
         else:
             if verbose:
                 stderr('The system is in classification mode and does not perform utterance segmentation. Skipping segmenter evaluation...\n')
             scores = {}
+            summary = ''
 
         return scores, summary
 
@@ -5941,7 +6062,7 @@ class DNNSeg(object):
                     if self.streaming:
                         save = True
                         s = self.global_step.eval(session=self.sess)
-                        if s % 1 == 0 and s >= self.n_pretrain_steps:
+                        if s % 5 == 0 and s >= self.n_pretrain_steps:
                             evaluate = True
                         else:
                             evaluate = False
@@ -6004,8 +6125,12 @@ class DNNSeg(object):
             plot_positional_encodings=False,
             segtype=None,
             invert_spectrograms=True,
+            outdir=None,
             verbose=True
     ):
+        if outdir is None:
+            outdir = self.outdir
+
         seg = 'hmlstm' in self.encoder_type.lower()
         if segtype is None:
             segtype = self.segtype
@@ -6380,7 +6505,7 @@ class DNNSeg(object):
                     sr=sr,
                     hop_length=hop_length,
                     label_map=self.label_map,
-                    directory=self.outdir + '/plots/segs_and_states/'
+                    directory=outdir + '/plots/segs_and_states/'
                 )
 
                 # if invert_spectrograms and self.spectrogram_inverter is not None and not self.residual_targets:
@@ -6404,7 +6529,7 @@ class DNNSeg(object):
                 #         sr=sr,
                 #         offset=data.offset,
                 #         reverse_reconstructions=self.streaming or self.reverse_targets,
-                #         dir=self.outdir,
+                #         dir=outdir,
                 #     )
 
     def plot_label_histogram(self, labels_pred, dir=None):
@@ -6910,6 +7035,9 @@ class DNNSegMLE(DNNSeg):
                                 embeddings = self.encoder_embeddings[l]
                                 segs = self.encoder_segmentations[l]
                                 averaged_inputs = self.averaged_inputs[l]
+                                if l > 0 and self.xent_state_predictions and not self.features_encoder[l]:
+                                    averaged_inputs = (averaged_inputs + 1) / 2
+
                                 if self.sequential_cae:
                                     if l == 0:
                                         mask = self.X_mask
@@ -7069,8 +7197,14 @@ class DNNSegMLE(DNNSeg):
 
                                     correspondence_logits = correspondence_inputs
 
-                                    if not self.backprop_into_targets:
-                                        correspondence_targets = tf.stop_gradient(correspondence_targets)
+                                    if self.correspondence_target_gradient_scale[l] is None or self.correspondence_target_gradient_scale[l] < 1:
+                                        L = self.correspondence_target_gradient_scale[l]
+                                        if L is None:
+                                            L = 0
+                                        correspondence_targets = replace_gradient(
+                                            tf.identity,
+                                            lambda x: -(x * L)
+                                        )(correspondence_targets)
 
                                     if direction == 'topdown':
                                         if l == 0:
@@ -7167,8 +7301,6 @@ class DNNSegMLE(DNNSeg):
 
                     for l in range(self.layers_encoder - 1, -1, -1):
                         loss_scale = self.lm_loss_scale[l]
-                        lm_losses_cur = []
-                        lm_weights_cur = []
 
                         if loss_scale:
                             lm_losses_reduced = 0.

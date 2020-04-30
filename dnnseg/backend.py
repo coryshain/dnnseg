@@ -2221,12 +2221,11 @@ class HMLSTMCell(LayerRNNCell):
                         h_clean = (1 - z_below_cur) * h_behind + z_below_cur * h_clean
 
                     if self._num_features[l] is None:
-                        if self._state_discretizer and self._discretize_state_at_boundary:
+                        if self._state_discretizer and l < (self._num_layers - 1 + self._discretize_final):
                             features_discrete = h_discrete
                             features_discrete_clean = h_discrete_clean
-                            if l < (self._num_layers - 1 + self._discretize_final):
-                                features = features_discrete
-                                features_clean = features_discrete_clean
+                            features = features_discrete
+                            features_clean = features_discrete_clean
                         else:
                             features = h
                             features_clean = h_clean
@@ -2297,7 +2296,7 @@ class HMLSTMCell(LayerRNNCell):
                             features = features_prob
                             features_clean = features_prob
 
-                    if self._state_noise_level or self._feature_noise_level or self._boundary_noise_level:
+                    if False and self._state_noise_level or self._feature_noise_level or self._boundary_noise_level:
                         if self._state_discretizer and l < (self._num_layers - 1 + self._discretize_final):
                             features_target = features_discrete_clean
                         else:
@@ -5283,7 +5282,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                     ]
                     self.q_kernel = compose_lambdas(q_kernel)
     
-                    if self.project_keys:
+                    if self.project_keys and not self.gaussian_attn:
                         k_kernel = [
                             make_lambda(
                                 DenseLayer(

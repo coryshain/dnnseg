@@ -2111,7 +2111,6 @@ class Dataset(object):
             n_samples=1,
             randomize=True
     ):
-        n = self.cache[name]['n']
         feats_inputs = self.cache[name]['feats_inputs']
         feats_targets = self.cache[name]['feats_targets']
         fixed_boundaries = self.cache[name]['fixed_boundaries']
@@ -2134,10 +2133,11 @@ class Dataset(object):
 
         i = 0
         s_ix = np.random.randint(0, window_len_input)
-        ix = s_ix + np.arange(0, len(time_ix) - s_ix, window_len_input)
+        ix = np.concatenate([[0], s_ix + np.arange(0, len(time_ix) - s_ix, window_len_input)], axis=0)
         if randomize:
             perm, _ = get_random_permutation(len(ix))
             ix = ix[perm]
+        n = len(ix)
 
         while i < n:
             indices = ix[i:i+minibatch_size]
@@ -2562,7 +2562,7 @@ class Dataset(object):
 
             dfs = F.get_segment_tables(
                 segmentations=[s[i] for s in segmentations],
-                states=[s[i] for s in states],
+                states=None if states is None else [s[i] for s in states],
                 phn_labels=None if phn_labels is None else phn_labels[i],
                 wrd_labels=None if wrd_labels is None else wrd_labels[i],
                 parent_segment_type=parent_segment_type,
@@ -3306,7 +3306,10 @@ class Datafile(object):
                     wrd_lab = wrd_labels[np.where(segmentations[l])]
 
                 # Get segment embeddings for classification eval
-                embeddings = states[l][np.where(segmentations[l])]
+                if states is None:
+                    embeddings = np.zeros(((segmentations[l]).sum().astype(int), 1))
+                else:
+                    embeddings = states[l][np.where(segmentations[l])]
 
                 # Construct data table
                 df = {

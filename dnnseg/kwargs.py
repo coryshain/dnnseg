@@ -548,6 +548,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of gradients by layer to layerwise encoder correspondence objective. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no correspondence objective is used."
     ),
     Kwarg(
+        'correspondence_target_gradient_scale',
+        None,
+        [float, str, None],
+        "Scale of gradients by layer to layerwise encoder correspondence objective targets. If a scalar is provided, it is applied uniformly to all layers."
+    ),
+    Kwarg(
         'correspondence_loss_implementation',
         3,
         int,
