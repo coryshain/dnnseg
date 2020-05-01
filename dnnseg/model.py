@@ -100,7 +100,6 @@ class DNNSeg(object):
             lr = self.learning_rate.split()
             lr = [float(x) for x in lr]
             self.learning_rates = lr
-            self.learning_rate = lr[0]
         else:
             self.learning_rates = [self.learning_rate]
         
@@ -3182,7 +3181,7 @@ class DNNSeg(object):
                     else:
                         lr = None
                 else:
-                    lr = tf.constant(self.learning_rate, dtype=self.FLOAT_TF)
+                    lr = tf.constant(self.learning_rates[0], dtype=self.FLOAT_TF)
                 if name is None:
                     self.lr = lr
                     return None
