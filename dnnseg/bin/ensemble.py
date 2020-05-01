@@ -20,6 +20,7 @@ if __name__ == '__main__':
     argparser.add_argument('config', nargs='+', help='Path(s) to configuration file.')
     argparser.add_argument('-p', '--preprocess', action='store_true', help='Preprocess data (even if saved data object exists in the model directory)')
     argparser.add_argument('-c', '--force_cpu', action='store_true', help='Do not use GPU. If not specified, GPU usage defaults to the value of the **use_gpu_if_available** configuration parameter.')
+    argparser.add_argument('-o', '--outdir', default=None, help='Directory in which to save outputs.')
     args = argparser.parse_args()
 
     outputs = {}
@@ -170,6 +171,7 @@ if __name__ == '__main__':
             save_embeddings=True,
             report_classeval=False,
             plot=False,
+            outdir=args.outdir,
             verbose=True
     )
 

@@ -7203,7 +7203,7 @@ class DNNSegMLE(DNNSeg):
                                             L = 0
                                         correspondence_targets = replace_gradient(
                                             tf.identity,
-                                            lambda x: -(x * L)
+                                            lambda x: x * L
                                         )(correspondence_targets)
 
                                     if direction == 'topdown':
