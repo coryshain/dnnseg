@@ -438,6 +438,16 @@ class DNNSeg(object):
             self.correspondence_gradient_scale = self.correspondence_gradient_scale
         assert len(self.correspondence_gradient_scale) == self.layers_encoder, 'Misalignment in number of layers between correspondence_gradient_scale and n_units_encoder.'
 
+        if isinstance(self.loss_weights_gradient_scale, str):
+            self.loss_weights_gradient_scale = [float(x) for x in self.loss_weights_gradient_scale.split()]
+            if len(self.loss_weights_gradient_scale) == 1:
+                self.loss_weights_gradient_scale = [self.loss_weights_gradient_scale[0]] * self.layers_encoder
+        elif isinstance(self.loss_weights_gradient_scale, float) or self.loss_weights_gradient_scale is None:
+            self.loss_weights_gradient_scale = [self.loss_weights_gradient_scale] * self.layers_encoder
+        else:
+            self.loss_weights_gradient_scale = self.loss_weights_gradient_scale
+        assert len(self.loss_weights_gradient_scale) == self.layers_encoder, 'Misalignment in number of layers between loss_weights_gradient_scale and n_units_encoder.'
+
         if isinstance(self.correspondence_target_gradient_scale, str):
             self.correspondence_target_gradient_scale = [float(x) for x in self.correspondence_target_gradient_scale.split()]
             if len(self.correspondence_target_gradient_scale) == 1:
@@ -1287,6 +1297,7 @@ class DNNSeg(object):
                         revnet_batch_normalization_decay=self.encoder_revnet_batch_normalization_decay,
                         n_passthru_neurons=self.n_passthru_neurons,
                         l2_normalize_states=self.encoder_l2_normalize_states,
+                        use_outer_product_memory=self.encoder_use_outer_product_memory,
                         bptt=self.encoder_bptt,
                         epsilon=self.epsilon,
                         session=self.sess,
@@ -1397,7 +1408,7 @@ class DNNSeg(object):
                             if l < self.layers_encoder - 1:
                                 encoder_features_by_seg_cur = encoder_features_by_seg_tmp[l]
                                 encoder_feature_deltas_cur = encoder_feature_deltas_tmp[l]
-                            if not self.encoder_state_discretizer and not self.features_encoder[l]:
+                            if not self.encoder_state_discretizer and not self.features_encoder[l] and self.xent_state_predictions:
                                 if l == self.layers_encoder - 1:
                                     activation = self.encoder_activation
                                 else:
@@ -1426,6 +1437,7 @@ class DNNSeg(object):
                         encoder_feature_targets = [x * self.X_mask[..., None] for x in encoder_feature_targets_tmp]
                         encoder_features_by_seg = [x * self.X_mask[..., None] for x in encoder_features_by_seg_tmp]
                         encoder_feature_deltas = [x * self.X_mask[..., None] for x in encoder_feature_deltas_tmp]
+
                     self.encoder_cell_states = encoder_cell_states
                     self.encoder_states = encoder_states
                     self.encoder_features = encoder_features
@@ -1899,7 +1911,7 @@ class DNNSeg(object):
                 if initialize_decoder and \
                         self.decoder_positional_encoding_type is not None and \
                         (not self.decoder_type.lower() == 'seq2seqattn' or
-                         self.decoder_add_positional_encoding_to_top):
+                         self.decoder_add_positional_encoding):
                     pe = construct_positional_encoding(
                         tf.shape(self.X)[1],
                         n_units=self.decoder_positional_encoding_units,
@@ -1931,19 +1943,11 @@ class DNNSeg(object):
                             targets_cur = self.X
                         else:
                             weights_cur = self.encoder_segmentations[l - 1]
-                            if self.backprop_into_loss_weights and self.lm_gradient_scale[l] is not None:
-                                weights_cur = replace_gradient(
-                                    tf.identity,
-                                    lambda x: x * self.lm_gradient_scale[l],
-                                    session=self.sess
-                                )(weights_cur)
                             if self.round_loss_weights:
-                                if self.backprop_into_loss_weights:
+                                if self.loss_weights_gradient_scale[l]:
                                     weights_cur = round_straight_through(weights_cur, session=self.sess)
                                 else:
                                     weights_cur = tf.cast(weights_cur > 0.5, self.FLOAT_TF)
-                            elif not self.backprop_into_loss_weights:
-                                weights_cur = tf.stop_gradient(weights_cur)
                             if drop_masked:
                                 def round_fn():
                                     return tf.cast(
@@ -1993,30 +1997,11 @@ class DNNSeg(object):
 
                         targets_bwd_cur = lag_dict['X_bwd']
                         targets_bwd_src_cur = targets_bwd_cur
-                        if self.lm_target_gradient_scale[l] is None:
-                            scale = 0
-                        else:
-                            scale = self.lm_target_gradient_scale[l]
-
-                        if scale != 1:
-                            targets_bwd_cur = replace_gradient(
-                                tf.identity,
-                                lambda x: x * scale,
-                                session=self.sess
-                            )(targets_bwd_cur)
-                        elif not self.lm_target_gradient_scale[l]:
-                            targets_bwd_cur = tf.stop_gradient(targets_bwd_cur)
                         weights_bwd_cur = lag_dict['weights_bwd']
                         time_ids_bwd_cur = lag_dict['time_ids_bwd']
                         mask_bwd_cur = lag_dict['mask_bwd']
                         targets_fwd_cur = lag_dict['X_fwd']
                         targets_fwd_src_cur = targets_fwd_cur
-                        if scale != 1:
-                            targets_fwd_cur = replace_gradient(
-                                tf.identity,
-                                lambda x: x * scale,
-                                session=self.sess
-                            )(targets_fwd_cur)
                         weights_fwd_cur = lag_dict['weights_fwd']
                         time_ids_fwd_cur = lag_dict['time_ids_fwd']
                         mask_fwd_cur = lag_dict['mask_fwd']
@@ -2218,10 +2203,6 @@ class DNNSeg(object):
 
                                 for x in direction:
                                     if order[x] and l < self.layers_encoder - 1:
-                                        pe_cur[x] = tf.zeros(
-                                            shape=[b_targ, order[x], 0],
-                                            dtype=self.FLOAT_TF
-                                        )
                                         key_val_mask[x] = tf.gather(
                                             tf.pad(weights[x][l + 1][:, : order[x] // C], [(0,1), (0,0)]),
                                             gather_ix,
@@ -2301,23 +2282,6 @@ class DNNSeg(object):
                                             keys[x] = labels[x]
 
                                     else:
-                                        # Construct decoder input timeseries
-                                        # Either a positional encoding or an empty dummy that defines output sequence length
-                                        if self.decoder_positional_encoding_type is not None and \
-                                                self.decoder_add_positional_encoding_to_top:
-                                            if self.decoder_positional_encoding_lock_to_data:
-                                                pe_cur[x] = tf.gather(pe, time_ids[x], axis=0)
-                                            else:
-                                                pe_cur[x] = tf.tile(
-                                                    pe_expanded[:, :order[x]],
-                                                    [b_targ, 1, 1]
-                                                )
-                                        else:
-                                            pe_cur[x] = tf.zeros(
-                                                shape=[b_targ, order[x], 0],
-                                                dtype=self.FLOAT_TF
-                                            )
-
                                         # Other attn vars are null
                                         key_val_mask[x] = None
                                         labels_gold[x] = None
@@ -2328,9 +2292,28 @@ class DNNSeg(object):
                                         key_encodings[x] = None
                                         key_encodings_cell[x] = None
 
+                                    # Construct decoder input timeseries
+                                    # Either a positional encoding or an empty dummy that defines output sequence length
+                                    if self.decoder_positional_encoding_type is not None and \
+                                            self.decoder_add_positional_encoding:
+                                        if self.decoder_positional_encoding_lock_to_data:
+                                            pe_cur[x] = tf.gather(pe, time_ids[x], axis=0)
+                                        else:
+                                            pe_cur[x] = tf.tile(
+                                                pe_expanded[:, :order[x]],
+                                                [b_targ, 1, 1]
+                                            )
+                                    else:
+                                        pe_cur[x] = tf.zeros(
+                                            shape=[b_targ, order[x], 0],
+                                            dtype=self.FLOAT_TF
+                                        )
+
                                 # Set general decoder kwargs
                                 decoder_init_kwargs = {
                                     'training': self.training,
+                                    'implementation': self.decoder_seq2seq_implementation,
+                                    'l2_normalize_states': self.decoder_l2_normalize_states,
                                     'num_query_units': self.decoder_n_query_units,
                                     'project_keys': self.decoder_project_attn_keys,
                                     'activation': self.decoder_inner_activation,
@@ -2590,7 +2573,7 @@ class DNNSeg(object):
                                         x = 'all'
 
                                     if self.decoder_positional_encoding_type is not None and \
-                                            self.decoder_add_positional_encoding_to_top:
+                                            self.decoder_add_positional_encoding:
                                         pe_bwd_cur = pe_cur['bwd']
                                     else:
                                         pe_bwd_cur = None
@@ -2630,9 +2613,12 @@ class DNNSeg(object):
                                     decoder_attn_keys_bwd_cur = None
 
                                 logits_bwd_cur *= mask_bwd_cur[..., None]
+
                             else:
                                 logits_bwd_cur = None
                                 pe_bwd_cur = None
+                                decoder_attn_bwd_cur = None
+                                decoder_attn_keys_bwd_cur = None
 
                             if n_fwd:
                                 if self.decoder_type.lower() == 'seq2seqattn':
@@ -2642,7 +2628,7 @@ class DNNSeg(object):
                                         x = 'all'
 
                                     if self.decoder_positional_encoding_type is not None and \
-                                            self.decoder_add_positional_encoding_to_top:
+                                            self.decoder_add_positional_encoding:
                                         pe_fwd_cur = pe_cur['fwd']
                                     else:
                                         pe_fwd_cur = None
@@ -2684,6 +2670,8 @@ class DNNSeg(object):
                             else:
                                 logits_fwd_cur = None
                                 pe_fwd_cur = None
+                                decoder_attn_fwd_cur = None
+                                decoder_attn_keys_fwd_cur = None
 
                         else:
                             logits_bwd_cur = tf.boolean_mask(logits_bwd_src[l], mask_cur)
@@ -2691,7 +2679,7 @@ class DNNSeg(object):
 
                         targets_unnormalized_bwd_cur = targets_bwd_cur
                         targets_unnormalized_fwd_cur = targets_fwd_cur
-                        if self.l2_normalize_targets and self._lm_distance_func(l) in ['mse', 'cosine', 'arc']:
+                        if (self.l2_normalize_targets or (l > 0 and (self.encoder_l2_normalize_states or self.encoder_use_outer_product_memory))) and self._lm_distance_func(l) in ['mse', 'cosine', 'arc']:
                             if n_bwd:
                                 logits_bwd_cur = tf.nn.l2_normalize(logits_bwd_cur, axis=-1, epsilon=self.epsilon)
                                 norm_bwd_cur = tf.norm(targets_bwd_cur, axis=-1, keepdims=True)
@@ -3076,6 +3064,7 @@ class DNNSeg(object):
                                 recurrent_activation=self.decoder_recurrent_activation,
                                 return_sequences=True,
                                 batch_normalization_decay=self.decoder_batch_normalization_decay,
+                                l2_normalize_states=self.decoder_l2_normalize_states,
                                 name=name + '_l%d' % i,
                                 session=self.sess
                             )(decoder, mask=mask)
@@ -4790,6 +4779,20 @@ class DNNSeg(object):
 
         return eval_dict, summary
 
+    def get_oracle_boundaries(self, batch):
+        oracle_boundaries_batch = None
+        if self.oracle_boundaries:
+            oracle_boundaries_batch = []
+            bounds = self.oracle_boundaries.split()
+            if len(bounds) == 1:
+                bounds *= self.layers_encoder - 1
+            for b in bounds:
+                oracle_boundaries_batch.append(batch[b + '_boundaries'])
+            assert len(
+                bounds) == self.layers_encoder - 1, 'Mismatch between number of layers and number of oracle boundaries.'
+            oracle_boundaries_batch = np.concatenate(oracle_boundaries_batch, axis=-1)
+        return oracle_boundaries_batch
+
     def score_acoustics(self, data, segment_tables, outdir=None):
         if outdir is None:
             outdir = self.outdir
@@ -4964,7 +4967,7 @@ class DNNSeg(object):
                             wrd_labels_batch = np.squeeze(file['wrd_labels'])
                             wrd_labels.append(wrd_labels_batch)
                             if self.oracle_boundaries:
-                                oracle_boundaries_batch = file[self.oracle_boundaries + '_boundaries']
+                                oracle_boundaries_batch = self.get_oracle_boundaries(file)
                             speaker_batch = file['speaker']
 
                             fd_minibatch = {
@@ -5412,7 +5415,7 @@ class DNNSeg(object):
             speaker_batch = batch['speaker']
             fixed_boundaries_batch = batch['fixed_boundaries']
             if self.oracle_boundaries:
-                oracle_boundaries_batch = batch[self.oracle_boundaries + '_boundaries']
+                oracle_boundaries_batch = self.get_oracle_boundaries(file)
 
             to_run = []
             to_run_names = []
@@ -5434,7 +5437,6 @@ class DNNSeg(object):
 
             if self.oracle_boundaries:
                 feed_dict[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
-
 
             with self.sess.as_default():
                 with self.sess.graph.as_default():
@@ -5725,13 +5727,14 @@ class DNNSeg(object):
                     n_pb = n_minibatch
 
                 # if not self.initial_evaluation_complete.eval(session=self.sess):
-                if True:
-                # if False:
+                # if True:
+                if False:
                     self.run_checkpoint(
                         val_data,
                         save=False,
                         log=self.log_freq > 0,
                         evaluate=self.eval_freq > 0,
+                        # evaluate=True,
                         n_plot=n_plot,
                         ix2label=ix2label,
                         save_embeddings=True,
@@ -5820,7 +5823,7 @@ class DNNSeg(object):
                             speaker_batch = batch['speaker']
                             fixed_boundaries_batch = batch['fixed_boundaries']
                             if self.oracle_boundaries:
-                                oracle_boundaries_batch = batch[self.oracle_boundaries + '_boundaries']
+                                oracle_boundaries_batch = self.get_oracle_boundaries(batch)
 
                             if self.min_len:
                                 minibatch_num = self.global_batch_step.eval(self.sess)
@@ -5843,7 +5846,7 @@ class DNNSeg(object):
                             speaker_batch = batch['speaker']
                             fixed_boundaries_batch = batch['fixed_boundaries']
                             if self.oracle_boundaries:
-                                oracle_boundaries_batch = batch[self.oracle_boundaries + '_boundaries']
+                                oracle_boundaries_batch = self.get_oracle_boundaries(batch)
                             i_pb = i
 
                         fd_minibatch = {
@@ -6061,7 +6064,7 @@ class DNNSeg(object):
                     if self.streaming:
                         save = True
                         s = self.global_step.eval(session=self.sess)
-                        if s % 5 == 0 and s >= self.n_pretrain_steps:
+                        if s % 1 == 0 and s >= self.n_pretrain_steps:
                             evaluate = True
                         else:
                             evaluate = False
@@ -6142,7 +6145,7 @@ class DNNSeg(object):
             X_mask_plot = batch['X_mask']
             fixed_boundaries_plot = batch['fixed_boundaries']
             if self.oracle_boundaries:
-                oracle_boundaries_plot = batch[self.oracle_boundaries + '_boundaries']
+                oracle_boundaries_plot = self.get_oracle_boundaries(batch)
             speaker_plot = batch['speaker']
             if self.predict_backward:
                 targs_bwd = batch['y_bwd']
@@ -6178,7 +6181,7 @@ class DNNSeg(object):
             speaker_plot = batch['speaker']
             fixed_boundaries_plot = None
             if self.oracle_boundaries:
-                oracle_boundaries_plot = batch[self.oracle_boundaries + '_boundaries']
+                oracle_boundaries_plot = self.get_oracle_boundaries(batch)
             ix = batch['indices']
 
         with self.sess.as_default():
@@ -6889,6 +6892,8 @@ class DNNSegMLE(DNNSeg):
                 elif self.l2_normalize_targets:
                     # distance_func = 'arc'
                     distance_func = 'cosine'
+                elif l > 0 and (self.encoder_l2_normalize_states or self.encoder_use_outer_product_memory):
+                    distance_func = 'cosine'
                 else:
                     distance_func = 'mse'
 
@@ -7034,8 +7039,11 @@ class DNNSegMLE(DNNSeg):
                                 embeddings = self.encoder_embeddings[l]
                                 segs = self.encoder_segmentations[l]
                                 averaged_inputs = self.averaged_inputs[l]
-                                if l > 0 and self.xent_state_predictions and not self.features_encoder[l]:
-                                    averaged_inputs = (averaged_inputs + 1) / 2
+                                if l > 0:
+                                    if self.encoder_l2_normalize_states or self.encoder_use_outer_product_memory:
+                                        averaged_inputs = tf.nn.l2_normalize(averaged_inputs, epsilon=self.epsilon, axis=-1)
+                                    elif self.xent_state_predictions and not self.features_encoder[l]:
+                                        averaged_inputs = (averaged_inputs + 1) / 2
 
                                 if self.sequential_cae:
                                     if l == 0:
@@ -7044,6 +7052,14 @@ class DNNSegMLE(DNNSeg):
                                     else:
                                         mask = self.encoder_segmentations[l-1]
                                         data_seq = self.encoder_embeddings[l-1]
+
+                                    # Force ends to 1 to ensure partition over time
+                                    # segs_trimmed = segs[..., :-1]
+                                    # mask_trimmed = mask[..., :-1]
+                                    # end = tf.ones_like(segs[..., -1:])
+                                    # segs = tf.concat([segs_trimmed,end], axis=1)
+                                    # mask = tf.concat([mask_trimmed,end], axis=1)
+
                                     data_seq = tf.reshape(data_seq, [-1, data_seq.shape[-1]])
                                     cae_mask_top = segs * mask
                                     cae_mask_top_bool = cae_mask_top > 0.5
@@ -7062,7 +7078,6 @@ class DNNSegMLE(DNNSeg):
                                     )
                                     cae_seg_ix.set_shape([None, None])
                                     cae_seg_mask_bottom.set_shape([None, None])
-
                                     cae_segs = tf.gather(data_seq, cae_seg_ix)
                                     cae_segs_pad = tf.zeros_like(cae_segs)
                                     cae_segs = tf.where(
@@ -7177,32 +7192,46 @@ class DNNSegMLE(DNNSeg):
                                             )
 
                                     if self.round_loss_weights:
-                                        if self.backprop_into_loss_weights:
+                                        if self.loss_weights_gradient_scale[l]:
                                             correspondence_weights = round_straight_through(correspondence_weights, session=self.sess)
                                         else:
                                             correspondence_weights = tf.cast(correspondence_mask, dtype=self.FLOAT_TF)
-                                    elif not self.backprop_into_loss_weights:
-                                        correspondence_weights = tf.stop_gradient(correspondence_weights)
 
-                                    if self.correspondence_gradient_scale[l] is not None and self.correspondence_gradient_scale[l] < 1:
+                                    if self.loss_weights_gradient_scale[l] != 1:
+                                        scale = self.loss_weights_gradient_scale[l]
+                                        if scale is None:
+                                            scale = 0
+                                        correspondence_weights = replace_gradient(
+                                            tf.identity,
+                                            lambda x: x * scale,
+                                            session=self.sess
+                                        )(correspondence_weights)
+
+                                    if self.correspondence_gradient_scale[l] != 1:
+                                        scale = self.correspondence_gradient_scale[l]
+                                        if scale is None:
+                                            scale = 0
                                         correspondence_inputs = replace_gradient(
                                             tf.identity,
-                                            lambda x: x * self.correspondence_gradient_scale[l]
+                                            lambda x: x * scale,
+                                            session=self.sess
                                         )(correspondence_inputs)
                                         correspondence_targets = replace_gradient(
                                             tf.identity,
-                                            lambda x: x * self.correspondence_gradient_scale[l]
+                                            lambda x: x * scale,
+                                            session=self.sess
                                         )(correspondence_targets)
 
                                     correspondence_logits = correspondence_inputs
 
-                                    if self.correspondence_target_gradient_scale[l] is None or self.correspondence_target_gradient_scale[l] < 1:
-                                        L = self.correspondence_target_gradient_scale[l]
-                                        if L is None:
-                                            L = 0
+                                    if self.correspondence_target_gradient_scale[l] != 1:
+                                        scale = self.correspondence_target_gradient_scale[l]
+                                        if scale is None:
+                                            scale = 0
                                         correspondence_targets = replace_gradient(
                                             tf.identity,
-                                            lambda x: x * L
+                                            lambda x: x * scale,
+                                            session=self.sess
                                         )(correspondence_targets)
 
                                     if direction == 'topdown':
@@ -7261,8 +7290,11 @@ class DNNSegMLE(DNNSeg):
                                             name=name
                                         )(correspondence_logits)
 
-                                    if l == 0 and self.speaker_revnet_n_layers:
-                                        correspondence_logits = self.speaker_revnet.backward(correspondence_logits, weights=self.speaker_embeddings)
+                                    if l == 0:
+                                        if self.speaker_revnet_n_layers:
+                                            correspondence_logits = self.speaker_revnet.backward(correspondence_logits, weights=self.speaker_embeddings)
+                                    elif self.encoder_l2_normalize_states or self.encoder_use_outer_product_memory:
+                                        correspondence_logits = tf.nn.l2_normalize(correspondence_logits, epsilon=self.epsilon, axis=-1)
 
                                     if direction == 'topdown':
                                         distance_func = self._lm_distance_func(l)
@@ -7309,6 +7341,27 @@ class DNNSegMLE(DNNSeg):
                                 targets_bwd = self.lm_targets_bwd[l]
                                 weights_bwd = self.lm_weights_bwd[l]
 
+                                if self.lm_target_gradient_scale[l] != 1:
+                                    if self.lm_target_gradient_scale[l] is None:
+                                        scale = 0
+                                    else:
+                                        scale = self.lm_target_gradient_scale[l]
+                                    targets_bwd = replace_gradient(
+                                        tf.identity,
+                                        lambda x: x * scale,
+                                        session=self.sess
+                                    )(targets_bwd)
+
+                                if self.loss_weights_gradient_scale[l] != 1:
+                                    scale = self.loss_weights_gradient_scale[l]
+                                    if scale is None:
+                                        scale = 0
+                                    weights_bwd = replace_gradient(
+                                        tf.identity,
+                                        lambda x: x * scale,
+                                        session=self.sess
+                                    )(weights_bwd)
+
                                 lm_loss_bwd_cur = self._get_loss(
                                     targets_bwd,
                                     logits_bwd,
@@ -7324,6 +7377,27 @@ class DNNSegMLE(DNNSeg):
                                 logits_fwd = self.lm_logits_fwd[l]
                                 targets_fwd = self.lm_targets_fwd[l]
                                 weights_fwd = self.lm_weights_fwd[l]
+
+                                if self.lm_target_gradient_scale[l] != 1:
+                                    if self.lm_target_gradient_scale[l] is None:
+                                        scale = 0
+                                    else:
+                                        scale = self.lm_target_gradient_scale[l]
+                                    targets_fwd = replace_gradient(
+                                        tf.identity,
+                                        lambda x: x * scale,
+                                        session=self.sess
+                                    )(targets_fwd)
+
+                                if self.loss_weights_gradient_scale[l] != 1:
+                                    scale = self.loss_weights_gradient_scale[l]
+                                    if scale is None:
+                                        scale = 0
+                                    weights_fwd = replace_gradient(
+                                        tf.identity,
+                                        lambda x: x * scale,
+                                        session=self.sess
+                                    )(weights_fwd)
 
                                 lm_loss_fwd_cur = self._get_loss(
                                     targets_fwd,
@@ -7376,7 +7450,8 @@ class DNNSegMLE(DNNSeg):
                         speaker_preds = tf.boolean_mask(self.encoder_features[l], self.encoder_segmentations[l])
                         speaker_preds = replace_gradient(
                             tf.identity,
-                            lambda x: -(x * L)
+                            lambda x: -(x * L),
+                            session=self.sess
                         )(speaker_preds)
 
                         for m in range(self.layers_speaker_decoder):
@@ -7419,7 +7494,8 @@ class DNNSegMLE(DNNSeg):
                         passthru_preds = tf.boolean_mask(self.encoder_features[l], self.encoder_segmentations[l])
                         passthru_preds = replace_gradient(
                             tf.identity,
-                            lambda x: -(x * L)
+                            lambda x: -(x * L),
+                            session=self.sess
                         )(passthru_preds)
 
                         for m in range(self.layers_passthru_decoder):

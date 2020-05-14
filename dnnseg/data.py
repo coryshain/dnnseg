@@ -1296,8 +1296,10 @@ class Dataset(object):
         self.clip_timesteps = clip_timesteps
 
         self.data = {}
+        self.preprocessed_data_paths = {}
         self.cache = {}
         self.normalization_cache = {}
+        self.rnd_segment_types = None
 
         data_kwargs = {}
         if self.datatype == 'acoustic':
@@ -1353,6 +1355,7 @@ class Dataset(object):
             if not force_preprocess and os.path.exists(data_path):
                 with open(data_path, 'rb') as f:
                     dir_data = pickle.load(f)
+                self.preprocessed_data_paths[data_path] = list(dir_data.keys())
             else:
                 times = []
                 n = len(filenames)
@@ -1393,12 +1396,12 @@ class Dataset(object):
                         with open(data_path, 'wb') as f:
                             pickle.dump(dir_data, f, protocol=2)
 
+                    self.preprocessed_data_paths[data_path] = list(dir_data.keys())
+
                     t1 = time.time()
                     times.append(t1 - t0)
                     mean_time = sum(times) / len(times)
                     eta = (n - i + 1) * mean_time
-
-
 
             self.data.update(dir_data)
 
@@ -1415,9 +1418,10 @@ class Dataset(object):
             self.char2ix = {}
             for i, x in enumerate(self.ix2char):
                 self.char2ix[x] = i
-            assert not ' ' in self.ix2char, 'Space " " is a reserved character and cannot be used in text inputs to DNNSeg.'
-            self.char2ix[' '] = len(self.ix2char)
-            self.ix2char.append(' ')
+            if not ' ' in self.char2ix:
+                self.char2ix[' '] = len(self.ix2char)
+            if not ' ' in self.ix2char:
+                self.ix2char.append(' ')
             for f in self.fileIDs:
                 self.data[f].update_charset(self.ix2char, self.char2ix)
 
@@ -1633,19 +1637,21 @@ class Dataset(object):
         )
         speaker = self.segments(segments).speaker.values
 
-        phn_boundaries, phn_labels, _ = self.timecourses(
-            inner_segments='phn',
-            outer_segments=segments,
-            padding=input_padding,
-            max_len=max_len
-        )
+        boundary_types = ['phn', 'wrd']
+        if self.rnd_segment_types is not None:
+            for x in self.rnd_segment_types:
+                boundary_types.append(x)
 
-        wrd_boundaries, wrd_labels, _ = self.timecourses(
-            inner_segments='wrd',
-            outer_segments=segments,
-            padding=input_padding,
-            max_len=max_len
-        )
+        boundary_dict = {}
+        for boundary_type in boundary_types:
+            boundaries_cur, labels_cur, _ = self.timecourses(
+                inner_segments=boundary_type,
+                outer_segments=segments,
+                padding=input_padding,
+                max_len=max_len
+            )
+            boundary_dict['%s_boundaries' % boundary_type] = boundaries_cur
+            boundary_dict['%s_labels' % boundary_type] = labels_cur
 
         shift = []
         scale = []
@@ -1677,12 +1683,10 @@ class Dataset(object):
             'file_ix': file_ix,
             'shift': shift,
             'scale': scale,
-            'speaker': speaker,
-            'phn_boundaries': phn_boundaries,
-            'phn_labels': phn_labels,
-            'wrd_boundaries': wrd_boundaries,
-            'wrd_labels': wrd_labels
+            'speaker': speaker
         }
+
+        cache_dict.update(boundary_dict)
 
         self.cache[name] = cache_dict
 
@@ -1820,47 +1824,36 @@ class Dataset(object):
             speaker.append(self.data[f].speaker)
         speaker = np.array(speaker)
 
-        phn_boundaries, phn_labels, _ = self.timecourses(
-            inner_segments='phn',
-            outer_segments=None,
-            padding=None
-        )
-        phn_boundaries_tmp = {}
-        for i, f in enumerate(self.fileIDs):
-            phn_boundaries_tmp[f] = phn_boundaries[i]
-        phn_boundaries = phn_boundaries_tmp
-        phn_boundaries, _, _ = self.features(
-            features=phn_boundaries,
-            boundaries_as_features=True,
-            mask=mask,
-            pad_left=left_pad,
-            pad_right=right_pad
-        )
-        phn_boundaries_tmp = []
-        for x in phn_boundaries:
-            phn_boundaries_tmp.append(x[0])
-        phn_boundaries = pad_sequence(phn_boundaries_tmp, padding='post')
+        boundary_types = ['phn', 'wrd']
+        if self.rnd_segment_types is not None:
+            for x in self.rnd_segment_types:
+                boundary_types.append(x)
 
-        wrd_boundaries, wrd_labels, _ = self.timecourses(
-            inner_segments='wrd',
-            outer_segments=None,
-            padding=None
-        )
-        wrd_boundaries_tmp = {}
-        for i, f in enumerate(self.fileIDs):
-            wrd_boundaries_tmp[f] = wrd_boundaries[i]
-        wrd_boundaries = wrd_boundaries_tmp
-        wrd_boundaries, _, _ = self.features(
-            features=wrd_boundaries,
-            boundaries_as_features=True,
-            mask=mask,
-            pad_left=left_pad,
-            pad_right=right_pad
-        )
-        wrd_boundaries_tmp = []
-        for x in wrd_boundaries:
-            wrd_boundaries_tmp.append(x[0])
-        wrd_boundaries = pad_sequence(wrd_boundaries_tmp, padding='post')
+        boundary_dict = {}
+        for boundary_type in boundary_types:
+            boundaries_cur, labels_cur, _ = self.timecourses(
+                inner_segments=boundary_type,
+                outer_segments=None,
+                padding=None
+            )
+            boundaries_cur_tmp = {}
+            for i, f in enumerate(self.fileIDs):
+                boundaries_cur_tmp[f] = boundaries_cur[i]
+            boundaries_cur = boundaries_cur_tmp
+            boundaries_cur, _, _ = self.features(
+                features=boundaries_cur,
+                boundaries_as_features=True,
+                mask=mask,
+                pad_left=left_pad,
+                pad_right=right_pad
+            )
+            boundaries_cur_tmp = []
+            for x in boundaries_cur:
+                boundaries_cur_tmp.append(x[0])
+            boundaries_cur = pad_sequence(boundaries_cur_tmp, padding='post')
+
+            boundary_dict['%s_boundaries' % boundary_type] = boundaries_cur
+            # boundary_dict['%s_labels' % boundary_type] = labels_cur
 
         cache_dict = {
             'type': 'streaming',
@@ -1875,10 +1868,6 @@ class Dataset(object):
             'time_ix': time_ix,
             'speaker': speaker,
             'fixed_boundaries': fixed_boundaries,
-            'phn_boundaries': phn_boundaries,
-            # 'phn_labels': phn_labels,
-            'wrd_boundaries': wrd_boundaries,
-            # 'wrd_labels': wrd_labels,
             'window_len_input': window_len_input,
             'window_len_bwd': window_len_bwd,
             'window_len_fwd': window_len_fwd,
@@ -1886,6 +1875,8 @@ class Dataset(object):
             'target_fwd_resampling': target_fwd_resampling,
             'predict_deltas': predict_deltas,
         }
+
+        cache_dict.update(boundary_dict)
 
         self.cache[name] = cache_dict
 
@@ -1930,95 +1921,66 @@ class Dataset(object):
             ))
         speaker = np.array(speaker)
 
-        phn_boundaries, phn_labels, _ = self.timecourses(
-            inner_segments='phn',
-            outer_segments=None,
-            padding=None
-        )
-        if mask:
-            phn_boundaries_tmp = []
-            phn_labels_tmp = []
-            for i, f in enumerate(self.fileIDs):
-                phn_boundaries_cur, _, _ = self.data[f].segment_and_stack(
-                    segments=mask,
-                    features=phn_boundaries[i],
-                    boundaries_as_features=True,
-                    padding=None
-                )
-                phn_labels_cur, _, _ = self.data[f].segment_and_stack(
-                    segments=mask,
-                    features=phn_labels[i],
-                    boundaries_as_features=False,
-                    padding=None
-                )
+        boundary_types = ['phn', 'wrd']
+        if self.rnd_segment_types is not None:
+            for x in self.rnd_segment_types:
+                boundary_types.append(x)
 
-                phn_boundaries_cur = np.concatenate(
-                    phn_boundaries_cur,
-                    axis=1
-                )
-                phn_labels_cur = np.concatenate(
-                    phn_labels_cur,
-                    axis=1
-                )
+        boundary_dict = {}
+        for boundary_type in boundary_types:
+            boundaries_cur, labels_cur, _ = self.timecourses(
+                inner_segments=boundary_type,
+                outer_segments=None,
+                padding=None
+            )
+            if mask:
+                boundaries_cur_tmp = []
+                labels_cur_tmp = []
+                for i, f in enumerate(self.fileIDs):
+                    boundaries_cur_f, _, _ = self.data[f].segment_and_stack(
+                        segments=mask,
+                        features=boundaries_cur[i],
+                        boundaries_as_features=True,
+                        padding=None
+                    )
+                    labels_cur_f, _, _ = self.data[f].segment_and_stack(
+                        segments=mask,
+                        features=labels_cur[i],
+                        boundaries_as_features=False,
+                        padding=None
+                    )
 
-                phn_boundaries_tmp.append(phn_boundaries_cur)
-                phn_labels_tmp.append(phn_labels_cur)
+                    boundaries_cur_f = np.concatenate(
+                        boundaries_cur_f,
+                        axis=1
+                    )
+                    labels_cur_f = np.concatenate(
+                        labels_cur_f,
+                        axis=1
+                    )
 
-            phn_boundaries = phn_boundaries_tmp
-            phn_labels = phn_labels_tmp
+                    boundaries_cur_tmp.append(boundaries_cur_f)
+                    labels_cur_tmp.append(labels_cur_f)
 
-        wrd_boundaries, wrd_labels, _ = self.timecourses(
-            inner_segments='wrd',
-            outer_segments=None,
-            padding=None
-        )
-        if mask:
-            wrd_boundaries_tmp = []
-            wrd_labels_tmp = []
-            for i, f in enumerate(self.fileIDs):
-                wrd_boundaries_cur, _, _ = self.data[f].segment_and_stack(
-                    segments=mask,
-                    features=wrd_boundaries[i],
-                    boundaries_as_features=True,
-                    padding=None
-                )
-                wrd_labels_cur, _, _ = self.data[f].segment_and_stack(
-                    segments=mask,
-                    features=wrd_labels[i],
-                    boundaries_as_features=False,
-                    padding=None
-                )
+                boundaries_cur = boundaries_cur_tmp
+                labels_cur = labels_cur_tmp
 
-                wrd_boundaries_cur = np.concatenate(
-                    wrd_boundaries_cur,
-                    axis=1
-                )
-                wrd_labels_cur = np.concatenate(
-                    wrd_labels_cur,
-                    axis=1
-                )
-
-                wrd_boundaries_tmp.append(wrd_boundaries_cur)
-                wrd_labels_tmp.append(wrd_labels_cur)
-
-            wrd_boundaries = wrd_boundaries_tmp
-            wrd_labels = wrd_labels_tmp
+            boundary_dict['%s_boundaries' % boundary_type] = boundaries_cur
+            boundary_dict['%s_labels' % boundary_type] = labels_cur
 
         cache_dict = {
             'type': 'files',
             'n': n,
             'file_lengths': file_lengths,
             'feats': feats,
-            'phn_boundaries': phn_boundaries,
-            'phn_labels': phn_labels,
-            'wrd_boundaries': wrd_boundaries,
-            'wrd_labels': wrd_labels,
             'fixed_boundaries': boundaries,
             'file_ix': file_ix,
             'shift': shift,
             'scale': scale,
             'speaker': speaker
         }
+
+        cache_dict.update(boundary_dict)
 
         self.cache[name] = cache_dict
 
@@ -2073,10 +2035,6 @@ class Dataset(object):
         shift = self.cache[name]['shift']
         scale = self.cache[name]['scale']
         speaker = self.cache[name]['speaker']
-        phn_boundaries = self.cache[name]['phn_boundaries']
-        phn_labels = self.cache[name]['phn_labels']
-        wrd_boundaries = self.cache[name]['wrd_boundaries']
-        wrd_labels = self.cache[name]['wrd_labels']
 
         while i < n:
             indices = ix[i:i + minibatch_size]
@@ -2093,12 +2051,12 @@ class Dataset(object):
                 'shift': shift[indices],
                 'scale': scale[indices],
                 'speaker': speaker[indices],
-                'phn_boundaries': phn_boundaries[indices],
-                'phn_labels': phn_labels[indices],
-                'wrd_boundaries': wrd_boundaries[indices],
-                'wrd_labels': wrd_labels[indices],
                 'indices': indices
             }
+
+            for x in self.cache[name]:
+                if x.endswith('boundaries') or x.endswith('labels'):
+                    out[x] = self.cache[name][x][indices]
 
             i += minibatch_size
 
@@ -2113,17 +2071,12 @@ class Dataset(object):
     ):
         feats_inputs = self.cache[name]['feats_inputs']
         feats_targets = self.cache[name]['feats_targets']
-        fixed_boundaries = self.cache[name]['fixed_boundaries']
         file_ix = self.cache[name]['file_ix']
         reduction_axis = self.cache[name]['reduction_axis']
         shift = self.cache[name]['shift']
         scale = self.cache[name]['scale']
         time_ix = self.cache[name]['time_ix']
         speaker = self.cache[name]['speaker']
-        phn_boundaries = self.cache[name]['phn_boundaries']
-        # phn_labels = self.cache[name]['phn_labels']
-        wrd_boundaries = self.cache[name]['wrd_boundaries']
-        # wrd_labels = self.cache[name]['wrd_labels']
         window_len_input = self.cache[name]['window_len_input']
         window_len_bwd = self.cache[name]['window_len_bwd']
         window_len_fwd = self.cache[name]['window_len_fwd']
@@ -2174,11 +2127,6 @@ class Dataset(object):
             else:
                 frame_slice = slice(0, len(self.ix2char))
 
-            phn_boundaries_cur = phn_boundaries[file_ix_cur[..., None], history_ix]
-            # phn_labels_cur = phn_labels[file_ix_cur[..., None], history_ix]
-            wrd_boundaries_cur = wrd_boundaries[file_ix_cur[..., None], history_ix]
-            # wrd_labels_cur = wrd_labels[file_ix_cur[..., None], history_ix]
-
             y_bwd_cur = feats_targets[file_ix_cur[..., None], bwd_context_ix, frame_slice]
             if target_bwd_resampling:
                 y_bwd_cur = scipy.signal.resample(y_bwd_cur, target_bwd_resampling, axis=1)
@@ -2196,11 +2144,6 @@ class Dataset(object):
             out = {
                 'X': X_cur,
                 'X_mask': np.any(X_cur, axis=-1),
-                'phn_boundaries': phn_boundaries_cur,
-                # 'phn_labels': phn_labels_cur,
-                'wrd_boundaries': wrd_boundaries_cur,
-                # 'wrd_labels': wrd_labels_cur,
-                'fixed_boundaries': fixed_boundaries[file_ix_cur[..., None], history_ix],
                 'y_bwd': y_bwd_cur,
                 'y_bwd_mask': y_bwd_mask_cur,
                 'y_fwd': y_fwd_cur,
@@ -2210,6 +2153,11 @@ class Dataset(object):
                 'scale': scale_cur,
                 'speaker': speaker[file_ix_cur]
             }
+
+            for x in self.cache[name]:
+                # if x.endswith('boundaries') or x.endswith('labels'):
+                if x.endswith('boundaries'):
+                    out[x] = self.cache[name][x][file_ix_cur[..., None], history_ix]
 
             i += minibatch_size
 
@@ -2224,15 +2172,10 @@ class Dataset(object):
         assert n_samples is None or n_samples <= 1, 'n_samples > 1 does not make sense for files data feeds and is not supported. Just reinitialize the data feed after iterating it.'
         n = self.cache[name]['n']
         feats = self.cache[name]['feats']
-        fixed_boundaries = self.cache[name]['fixed_boundaries']
         file_ix = self.cache[name]['file_ix']
         shift = self.cache[name]['shift']
         scale = self.cache[name]['scale']
         speaker = self.cache[name]['speaker']
-        phn_boundaries = self.cache[name]['phn_boundaries']
-        phn_labels = self.cache[name]['phn_labels']
-        wrd_boundaries = self.cache[name]['wrd_boundaries']
-        wrd_labels = self.cache[name]['wrd_labels']
 
         i = 0
         if randomize:
@@ -2242,23 +2185,18 @@ class Dataset(object):
 
         while i < n:
             index = ix[i]
-            phn_boundaries_cur = phn_boundaries[index]
-            phn_labels_cur = phn_labels[index]
-            wrd_boundaries_cur = wrd_boundaries[index]
-            wrd_labels_cur = wrd_labels[index]
 
             out = {
                 'X': feats[index],
-                'fixed_boundaries': fixed_boundaries[index],
-                'phn_boundaries': phn_boundaries_cur,
-                'phn_labels': phn_labels_cur,
-                'wrd_boundaries': wrd_boundaries_cur,
-                'wrd_labels': wrd_labels_cur,
                 'file_ix': file_ix[index],
                 'shift': shift[index],
                 'scale': scale[index],
                 'speaker': speaker[index:index+1],
             }
+
+            for x in self.cache[name]:
+                if x.endswith('boundaries') or x.endswith('labels'):
+                    out[x] = self.cache[name][x][index]
 
             i += 1
 
@@ -2527,9 +2465,20 @@ class Dataset(object):
 
         return out
 
-    def initialize_random_segmentation(self, mean_frames_per_segment):
-        for f in self.data:
-            self.data[f].initialize_random_segmentation(mean_frames_per_segment)
+    def initialize_random_segmentation(self, mean_frames_per_segment, save=True):
+        k = 'rnd%.4f' % mean_frames_per_segment
+        if self.rnd_segment_types is None:
+            self.rnd_segment_types = set()
+        if k not in self.rnd_segment_types:
+            for x in self.data:
+                self.data[x].initialize_random_segmentation(mean_frames_per_segment)
+            self.rnd_segment_types.add(k)
+            if save:
+                for x in self.preprocessed_data_paths:
+                    data_path = x
+                    dir_data = {y: self.data[y] for y in self.preprocessed_data_paths[x]}
+                    with open(data_path, 'wb') as f:
+                        pickle.dump(dir_data, f)
 
     def get_segment_tables(
             self,
@@ -2847,6 +2796,8 @@ class Datafile(object):
 
         self.speaker = None
 
+        self.rnd_segments = None
+
     def __len__(self):
         return self.len
 
@@ -3022,8 +2973,8 @@ class Datafile(object):
                 return self.wrd_segments
             if segment_type == 'phn':
                 return self.phn_segments
-            if segment_type == 'rnd':
-                return self.rnd_segments
+            if segment_type.startswith('rnd'):
+                return self.rnd_segments[segment_type]
             raise ValueError('Unrecognized segment type name "%s".' % segment_type)
         return segment_type
 
@@ -3212,7 +3163,13 @@ class Datafile(object):
         return out
 
     def initialize_random_segmentation(self, mean_frames_per_segment):
-        self.rnd_segments = self.generate_random_segmentation(mean_frames_per_segment)
+        if not hasattr(self, 'rnd_segments'):
+            self.rnd_segments = {}
+        elif self.rnd_segments is None:
+            self.rnd_segments = {}
+        k = 'rnd%.4f' % mean_frames_per_segment
+        if k not in self.rnd_segments:
+            self.rnd_segments[k] = self.generate_random_segmentation(mean_frames_per_segment)
 
     def get_segment_tables(
             self,
@@ -3322,7 +3279,7 @@ class Datafile(object):
                 if state_activation == 'softmax':
                     label = np.argmax(embeddings, axis=-1)
                 else:
-                    if 'sigmoid' in state_activation:
+                    if state_activation and 'sigmoid' in state_activation:
                         threshold = 0.5
                     else:
                         threshold = 0.0
@@ -3617,8 +3574,6 @@ class AcousticDatafile(Datafile):
             else:
                 self.wrd_segments = self.vad_segments
         self.wrd_segments.fileID = self.ID
-
-        self.rnd_segments = None
 
         self.steps_per_second = 1000. / self.offset
         self.seconds_per_step = float(self.offset) / 1000.

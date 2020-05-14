@@ -474,6 +474,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to backprop into weight mask on losses (matters in ``masked_neighbor`` setting for LM loss)."
     ),
     Kwarg(
+        'loss_weights_gradient_scale',
+        None,
+        [float, str, None],
+        "Scale of gradients by layer to weights on objectives. If a scalar is provided, it is applied uniformly to all layers. If ``None`` or 0, no backpropagation into weights."
+    ),
+    Kwarg(
         'round_loss_weights',
         False,
         bool,
@@ -846,6 +852,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Whether to append incoming segment lengths to non-initial HMLSTM layers. Ignored unless the decoder is an HMLSTM."
+    ),
+    Kwarg(
+        'encoder_use_outer_product_memory',
+        False,
+        bool,
+        "Whether to use an outer product memory model to encode segments."
     ),
 
     # Encoder boundaries
@@ -1321,6 +1333,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['recurrent_activation']
     ),
     Kwarg(
+        'decoder_seq2seq_implementation',
+        1,
+        int,
+        "Implementation to use for seq2seq decoder, one of ``[1,2]``. In implementation 1, the previous hidden state is used to generate both attention queries and predictions. In implementation 2, the previous hidden state is only used to generate attention queries, while predictions are generated solely from the context vector and the previous output."
+    ),
+    Kwarg(
         'decoder_n_query_units',
         None,
         [int, None],
@@ -1393,10 +1411,10 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to backpropagate into decoder outputs as inputs to Seq2Seq decoder."
     ),
     Kwarg(
-        'decoder_add_positional_encoding_to_top',
+        'decoder_add_positional_encoding',
         False,
         bool,
-        "Whether to add positional encoding to top layer decoder in the seq2seq setting, since this layer has no attention keys."
+        "Whether to add positional encoding to decoder input in the seq2seq setting."
     ),
     Kwarg(
         'decoder_resnet_n_layers_inner',
@@ -1417,8 +1435,20 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         bool,
         "Compute the decoding as a sum of the network outputs and the mean activations of all cells in the training data."
     ),
+    Kwarg(
+        'decoder_append_seglen',
+        False,
+        bool,
+        "Whether to append segment lengths to the inputs to the decoder.",
+    ),
 
     # Decoder normalization
+    Kwarg(
+        'decoder_l2_normalize_states',
+        False,
+        bool,
+        "Whether to L2 normalize decoder states (seq2seq decoder only).",
+    ),
     Kwarg(
         'decoder_batch_normalization_decay',
         None,

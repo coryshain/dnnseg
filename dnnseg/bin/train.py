@@ -48,9 +48,11 @@ if __name__ == '__main__':
         force_preprocess=args.preprocess,
         save_preprocessed_data=p.save_preprocessed_data
     )
-    if p['oracle_boundaries'] and p['oracle_boundaries'].lower() == 'rnd':
-        assert p['random_oracle_segmentation_rate'], 'random_oracle_segmentation_rate must be provided when oracle_boundaries=="rnd".'
-        train_data.initialize_random_segmentation(p['random_oracle_segmentation_rate'])
+    if p['oracle_boundaries']:
+        for x in p['oracle_boundaries'].split():
+            if x.startswith('rnd'):
+                length = float(x[3:])
+                train_data.initialize_random_segmentation(length, save=True)
 
     stderr('=' * 50 + '\n')
     stderr('TRAINING DATA SUMMARY\n\n')
@@ -68,6 +70,11 @@ if __name__ == '__main__':
             force_preprocess=args.preprocess,
             save_preprocessed_data=p.save_preprocessed_data
         )
+        if p['oracle_boundaries']:
+            for x in p['oracle_boundaries'].split():
+                if x.startswith('rnd'):
+                    length = float(x[3:])
+                    val_data.initialize_random_segmentation(length, save=True)
 
         stderr('=' * 50 + '\n')
         stderr('VALIDATION DATA SUMMARY\n\n')
@@ -81,11 +88,6 @@ if __name__ == '__main__':
 
     stderr('Data loaded in %ds\n\n' %(t1-t0))
     sys.stderr.flush()
-
-    if p['segtype'] == 'rnd':
-        train_data.initialize_random_segmentation(7.4153)
-        if val_data is not None:
-            val_data.initialize_random_segmentation(7.4153)
 
     data = train_data
 

@@ -1,3 +1,4 @@
+import math
 import re
 import collections
 import numpy as np
@@ -136,9 +137,10 @@ def mask_and_lag(X, mask=None, weights=None, n_forward=0, n_backward=0, session=
 
             # BACKWARD
             # Tile
-            tile_bwd = [n_backward, 1]
+            n_backward_cur = max(n_backward, 1)
+            tile_bwd = [n_backward_cur, 1]
             X_tile_bwd = tile_bwd + [1]
-            roll_bwd = tf.range(0, n_backward)
+            roll_bwd = tf.range(0, n_backward_cur)
             X_bwd = tf.tile(X[None, ...], X_tile_bwd)
             batch_ids_bwd = tf.tile(batch_ids[None, ...], tile_bwd)
             weights_bwd = tf.tile(weights[None, ...], tile_bwd)
@@ -162,6 +164,7 @@ def mask_and_lag(X, mask=None, weights=None, n_forward=0, n_backward=0, session=
             # Relativize timesteps to current timestep
             time_ids_0 = time_ids_bwd[..., :1]
             time_ids_bwd = (time_ids_0 - time_ids_bwd) * tf.cast(mask_bwd, dtype=time_ids_0.dtype)
+            X_bwd = X_bwd[:,:n_backward]
 
             # FORWARD
             # Tile
@@ -322,10 +325,46 @@ def get_segment_indices(segs, mask):
     out_mask_bottom = np.array(out_mask_bottom, dtype='float32')
 
     return out_ix, out_mask_bottom
-                
-    
 
 
+def update_binding_matrix(k, v, M=None, beta=0., epsilon=1e-8, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            dims = max([len(x.shape) for x in (k, v)])
+            while len(k.shape) < dims:
+                k = k[None, ...]
+            while len(v.shape) < dims:
+                v = v[None, ...]
+
+            k_shape = tf.shape(k)
+            v_shape = tf.shape(v)
+            K = tf.shape(k_shape[-1])
+            V = tf.shape(v_shape[-1])
+
+            if beta is None:
+                beta = 0
+            if M is None:
+                M = tf.zeros([K, V])
+
+            k_norm = tf.norm(k, axis=-1, keepdims=True)
+            k = tf.nn.l2_normalize(k, epsilon=epsilon, axis=-1)
+            v = tf.nn.l2_normalize(v, epsilon=epsilon, axis=-1)
+            P_denom = tf.maximum(tf.reduce_sum(k**2, axis=-1), epsilon)
+
+            P = (k[..., None] * tf.expand_dims(k, -2)) / P_denom
+            _P = tf.eye(int(k.shape[-1]))
+            while len(_P.shape) < len(P.shape):
+                _P = _P[None, ...]
+            _P -= P
+
+            prev = tf.tensordot(P, M, axes=1)
+            new = k[..., None] * tf.expand_dims(v, -2)
+            out = tf.tensordot(_P, M, axes=1) + beta * prev + (1 - beta) * new
+            while len(out.shape) > 2:
+                out = tf.reduce_mean(out, axis=0)
+
+            return out
 
 
 # Debugged reduce_logsumexp to allow -inf
@@ -562,9 +601,10 @@ def round_straight_through(x, session=None):
             fw_op = tf.round
             # bw_op = tf.identity
             def bw_op(x):
-                st = tf.round(x)
-                corr = tf.stop_gradient((0.5 - tf.abs(st - x)) / 0.5)
-                return x * corr
+                out = tf.round(x)
+                corr = tf.stop_gradient((0.5 - tf.abs(out - x)) / 0.5)
+                out *= corr
+                return out
             return replace_gradient(fw_op, bw_op, session=session)(x)
 
 
@@ -1173,6 +1213,7 @@ class HMLSTMCell(LayerRNNCell):
             revnet_batch_normalization_decay=None,
             n_passthru_neurons=None,
             l2_normalize_states=False,
+            use_outer_product_memory=False,
             bptt=True,
             reuse=None,
             name=None,
@@ -1436,6 +1477,8 @@ class HMLSTMCell(LayerRNNCell):
 
                 self._l2_normalize_states = l2_normalize_states
 
+                self._use_outer_product_memory = use_outer_product_memory
+
                 self._bptt = bptt
 
                 self._epsilon = epsilon
@@ -1514,7 +1557,7 @@ class HMLSTMCell(LayerRNNCell):
             units_lm=units_lm,
             units_cae=units_cae,
             units_passthru=self._n_passthru_neurons,
-            return_lm = self._lm,
+            return_lm=self._lm,
             return_c=True,
             return_z_prob=True,
             return_cell_proposal=True
@@ -1675,6 +1718,9 @@ class HMLSTMCell(LayerRNNCell):
                 if self._implementation == 2:
                     self._kernel_boundary = []
 
+                if self._use_outer_product_memory:
+                    self._binding_matrices = []
+
                 if self._oracle_boundary:
                     n_boundary_dims = self._num_layers - 1
                 else:
@@ -1753,10 +1799,11 @@ class HMLSTMCell(LayerRNNCell):
                     # Build featurizer kernel
                     if self._num_features[l] is not None:
                         featurizer_in_dim = self._num_units[l]
+                        n_feats = self._num_features[l]
                         kernel_featurizer = self.initialize_kernel(
                             l,
                             featurizer_in_dim,
-                            self._num_features[l] * self._neurons_per_feature,
+                            n_feats * self._neurons_per_feature,
                             self._bottomup_initializer,
                             name='featurizer'
                         )
@@ -1780,6 +1827,31 @@ class HMLSTMCell(LayerRNNCell):
                         )
                     else:
                         kernel_embedding = lambda x: x
+                    if self._use_outer_product_memory:
+                        binding_matrix = self.add_variable(
+                            'binding_matrix_l%d' % l,
+                            shape=[self._num_units[l], self._num_units[l]],
+                            initializer=tf.keras.initializers.Identity,
+                            trainable=True
+                        )
+                        self._binding_matrices.append(binding_matrix)
+
+                        def retrieve(x):
+                            out = tf.tensordot(x, self._binding_matrices[l], axes=1)
+                            out = tf.nn.l2_normalize(out, epsilon=self._epsilon, axis=-1)
+
+                            return out
+
+                        def get_embd_fn(retrieve_fn=retrieve, emdb_fn=kernel_embedding):
+                            def fn(x):
+                                out = retrieve_fn(x)
+                                out = emdb_fn(out)
+
+                                return out
+                            return fn
+
+                        kernel_embedding = get_embd_fn()
+
                     self._kernel_embedding.append(kernel_embedding)
 
                     # Build boundary (and, if necessary, boundary kernel)
@@ -2007,8 +2079,8 @@ class HMLSTMCell(LayerRNNCell):
 
                     # h_above: Hidden state of layer above at previous timestep (implicitly 0 if final layer)
                     if l < self._num_layers - 1:
-                        # h_above = state[l + 1].embedding
-                        h_above = state[l + 1].h
+                        h_above = state[l + 1].embedding
+                        # h_above = state[l + 1].h
 
                         # if not self._bptt:
                         #     h_above = tf.stop_gradient(h_above)
@@ -2172,7 +2244,11 @@ class HMLSTMCell(LayerRNNCell):
                         passthru = None
                         passthru_clean = None
 
-                    if self._num_features[l] is None:
+                    if self._l2_normalize_states or (l < self._num_layers - 1 and self._use_outer_product_memory):
+                        h = tf.nn.l2_normalize(h, epsilon=self._epsilon, axis=-1)
+                        h_clean = tf.nn.l2_normalize(h_clean, epsilon=self._epsilon, axis=-1)
+
+                    if self._num_features[l] is None and not self._use_outer_product_memory:
                         # Squash to [-1,1] if state activation is not tanh
                         if (l < self._num_layers - 1 and not self._tanh_inner_activation) \
                                 or (l == self._num_layers - 1 and not self._tanh_activation):
@@ -2252,7 +2328,7 @@ class HMLSTMCell(LayerRNNCell):
                             features_clean = self._feature_neuron_agg_fn(features_clean, axis=-1, keepdims=False)
 
                         # Feature values in {0,1}
-                        features_prob = self._recurrent_activation(features)
+                        features_prob = self._recurrent_activation(features[..., :self._num_features[l]])
 
                         if self._state_discretizer:
                             # Feature probabilities in [0,1]
@@ -2292,7 +2368,7 @@ class HMLSTMCell(LayerRNNCell):
 
                                 features = features_discrete
                                 features_clean = features_discrete_clean
-                        else:
+                        elif not self._use_outer_product_memory:
                             features = features_prob
                             features_clean = features_prob
 
@@ -2307,15 +2383,17 @@ class HMLSTMCell(LayerRNNCell):
                         else:
                             features_target = features
 
-                    if self._forget_at_boundary:
-                        features = copy_prob * features_behind + (1 - copy_prob) * features
-                        features_prob = copy_prob * features_prob_behind + (1 - copy_prob) * features_prob
-                        features_target = copy_prob * features_target_behind + (1 - copy_prob) * features_target
-                    else: # Copy just depends on bottom-up boundary probs
-                        features = (1 - z_below_cur) * features_behind + z_below_cur * features
-                        features_prob = (1 - z_below_cur) * features_prob_behind + z_below_cur * features_prob
-                        features_target = (1 - z_below_cur) * features_target_behind + z_below_cur * features_target
-
+                    if self._num_features[l]:
+                        if self._forget_at_boundary:
+                            features = copy_prob * features_behind + (1 - copy_prob) * features
+                            features_prob = copy_prob * features_prob_behind + (1 - copy_prob) * features_prob
+                            features_target = copy_prob * features_target_behind + (1 - copy_prob) * features_target
+                        else: # Copy just depends on bottom-up boundary probs
+                            features = (1 - z_below_cur) * features_behind + z_below_cur * features
+                            features_prob = (1 - z_below_cur) * features_prob_behind + z_below_cur * features_prob
+                            features_target = (1 - z_below_cur) * features_target_behind + z_below_cur * features_target
+                    else:
+                        features_target = features
 
                     embedding = self._kernel_embedding[l](features)
 
@@ -2644,6 +2722,7 @@ class HMLSTMSegmenter(object):
             revnet_batch_normalization_decay=None,
             n_passthru_neurons=None,
             l2_normalize_states=False,
+            use_outer_product_memory=None,
             bptt=True,
             reuse=None,
             name=None,
@@ -2756,6 +2835,7 @@ class HMLSTMSegmenter(object):
                 self.revnet_batch_normalization_decay = revnet_batch_normalization_decay
                 self.n_passthru_neurons = n_passthru_neurons
                 self.l2_normalize_states = l2_normalize_states
+                self.use_outer_product_memory = use_outer_product_memory
                 self.bptt = bptt
                 self.epsilon = epsilon
 
@@ -2857,6 +2937,7 @@ class HMLSTMSegmenter(object):
                     revnet_batch_normalization_decay = self.revnet_batch_normalization_decay,
                     n_passthru_neurons = self.n_passthru_neurons,
                     l2_normalize_states=self.l2_normalize_states,
+                    use_outer_product_memory=self.use_outer_product_memory,
                     bptt=self.bptt,
                     reuse=self.reuse,
                     name=self.name,
@@ -3253,6 +3334,7 @@ class MaskedLSTMCell(LayerRNNCell):
             use_bias=True,
             global_step=None,
             batch_normalization_decay=None,
+            l2_normalize_states=False,
             reuse=None,
             name=None,
             dtype=None,
@@ -3293,6 +3375,8 @@ class MaskedLSTMCell(LayerRNNCell):
                 self._global_step = global_step
 
                 self._batch_normalization_decay = batch_normalization_decay
+
+                self._l2_normalize_states = l2_normalize_states
 
                 self._epsilon = epsilon
 
@@ -3503,6 +3587,9 @@ class MaskedLSTMCell(LayerRNNCell):
 
                 c = f * c_prev + i * g
                 h = o * self._activation(c)
+
+                if self._l2_normalize_states:
+                    h = tf.nn.l2_normalize(h, epsilon=self._epsilon, axis=-1)
 
                 if mask is not None:
                     c = c * mask + c_prev * (1 - mask)
@@ -4556,6 +4643,7 @@ class MaskedLSTMLayer(object):
             use_bias=True,
             global_step=None,
             batch_normalization_decay=None,
+            l2_normalize_states=False,
             return_sequences=True,
             reuse=None,
             name=None,
@@ -4587,6 +4675,7 @@ class MaskedLSTMLayer(object):
         self.use_bias = use_bias
         self.global_step = global_step
         self.batch_normalization_decay = batch_normalization_decay
+        self.l2_normalize_states = l2_normalize_states
         self.return_sequences = return_sequences
         self.reuse = reuse
         self.name = name
@@ -4630,6 +4719,7 @@ class MaskedLSTMLayer(object):
                         use_bias=self.use_bias,
                         global_step=self.global_step,
                         batch_normalization_decay=self.batch_normalization_decay,
+                        l2_normalize_states=self.l2_normalize_states,
                         reuse=self.reuse,
                         name=self.name,
                         dtype=self.dtype,
@@ -5004,6 +5094,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
             values=None,
             key_val_mask=None,
             gaussian_attn=False,
+            attn_sigma2=0.25,
             training=False,
             num_query_units=None,
             project_keys=False,
@@ -5035,6 +5126,8 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
             weight_normalization=False,
             layer_normalization=False,
             use_bias=True,
+            implementation=1,
+            l2_normalize_states=False,
             reuse=None,
             name=None,
             dtype=tf.float32,
@@ -5050,6 +5143,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 self.num_hidden_units = num_hidden_units
                 self.num_output_units = num_output_units
                 self.gaussian_attn = gaussian_attn
+                self.attn_sigma2 = attn_sigma2
                 self.training = training
                 self.forget_bias = forget_bias
                 self.one_hot_inputs = one_hot_inputs
@@ -5091,6 +5185,9 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 self.weight_normalization = weight_normalization
                 self.layer_normalization = layer_normalization
                 self.use_bias = use_bias
+                self.implementation = implementation
+                self.l2_normalize_states = l2_normalize_states
+                assert self.implementation in [1,2], 'AttentionalLSTMDecoderCell implementation must be 1 or 2.'
                 self.epsilon = epsilon
 
                 self.keys = keys
@@ -5210,24 +5307,25 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 ]
                 self.bottomup_kernel = compose_lambdas(bottomup_kernel)
 
-                recurrent_kernel = [
-                    make_lambda(
-                        DenseLayer(
-                            training=self.training,
-                            units=self.num_hidden_units * 4,
-                            use_bias=False,
-                            kernel_initializer=self.recurrent_initializer,
-                            bias_initializer=self.bias_initializer,
-                            activation=None,
-                            normalize_weights=self.weight_normalization,
-                            session=self.session,
-                            reuse=tf.AUTO_REUSE,
-                            name='recurrent'
-                        )
-                    ),
-                    make_lambda(self.recurrent_dropout)
-                ]
-                self.recurrent_kernel = compose_lambdas(recurrent_kernel)
+                if self.implementation == 1:
+                    recurrent_kernel = [
+                        make_lambda(
+                            DenseLayer(
+                                training=self.training,
+                                units=self.num_hidden_units * 4,
+                                use_bias=False,
+                                kernel_initializer=self.recurrent_initializer,
+                                bias_initializer=self.bias_initializer,
+                                activation=None,
+                                normalize_weights=self.weight_normalization,
+                                session=self.session,
+                                reuse=tf.AUTO_REUSE,
+                                name='recurrent'
+                            )
+                        ),
+                        make_lambda(self.recurrent_dropout)
+                    ]
+                    self.recurrent_kernel = compose_lambdas(recurrent_kernel)
 
                 if not self.layer_normalization and self.use_bias:
                     self.bias = self.add_variable(
@@ -5259,7 +5357,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
 
                 if self.keys is not None or self.gaussian_attn:
                     if self.gaussian_attn:
-                        q_units = 2
+                        q_units = 1
                         self.attn_step_size = self.add_variable('attn_step_size', shape=[], initializer=tf.zeros_initializer)
                     else:
                         q_units = self.num_query_units
@@ -5328,12 +5426,13 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                     q = self.q_kernel(h_prev)
                     if self.gaussian_attn:
                         mu = mu_prev
-                        sigma2 = tf.nn.softplus(1 + q[..., 1:2])
+                        sigma2 = self.attn_sigma2
                         ix = tf.cast(tf.range(tf.shape(self.values)[1]), dtype=tf.float32)[None, ...]
                         a = tf.exp(-(mu-ix)**2/ tf.maximum(sigma2, self.epsilon)) * self.key_val_mask
                         a /= tf.maximum(tf.reduce_sum(a, axis=1, keepdims=True), self.epsilon)
                         context_vector = tf.reduce_sum(self.values * a[..., None], axis=1)
-                        mu += self.attn_step_size * tf.sigmoid(q[..., :1])
+                        # mu += tf.abs(self.attn_step_size) * tf.sigmoid(q)
+                        mu += tf.abs(q)
                     else:
                         q = self.q_kernel(h_prev)
                         k = self.k_kernel(self.keys)
@@ -5355,7 +5454,9 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                     a = tf.zeros(shape=[tf.shape(inputs)[0], 0], dtype=self.dtype)
                     mu = mu_prev
 
-                s = self.bottomup_kernel(x) + self.recurrent_kernel(h_prev) + self.bias
+                s = self.bottomup_kernel(x) + self.bias
+                if self.implementation == 1:
+                    s += self.recurrent_kernel(h_prev)
 
                 # Forget gate
                 f = s[:, :units]
@@ -5383,6 +5484,9 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
 
                 c = f * c_prev + i * g
                 h = o * self.activation(c)
+                
+                if self.l2_normalize_states:
+                    h = tf.nn.l2_normalize(h, epsilon=self.epsilon, axis=-1)
 
                 y = self.projection(h)
 
@@ -5413,6 +5517,7 @@ class AttentionalLSTMDecoderLayer(object):
             values=None,
             key_val_mask=None,
             gaussian_attn=False,
+            attn_sigma2=0.25,
             initial_state=None,
             training=False,
             num_query_units=None,
@@ -5445,6 +5550,8 @@ class AttentionalLSTMDecoderLayer(object):
             weight_normalization=False,
             layer_normalization=False,
             use_bias=True,
+            implementation=1,
+            l2_normalize_states=False,
             reuse=None,
             name=None,
             dtype=tf.float32,
@@ -5463,6 +5570,7 @@ class AttentionalLSTMDecoderLayer(object):
                 self.values = values
                 self.key_val_mask = key_val_mask
                 self.gaussian_attn = gaussian_attn
+                self.attn_sigma2 = attn_sigma2
                 self.initial_state = initial_state
                 self.num_query_units = num_query_units
                 self.project_keys = project_keys
@@ -5495,6 +5603,8 @@ class AttentionalLSTMDecoderLayer(object):
                 self.weight_normalization = weight_normalization
                 self.layer_normalization = layer_normalization
                 self.use_bias = use_bias
+                self.implementation = implementation
+                self.l2_normalize_states = l2_normalize_states
                 self.reuse = reuse
                 self.name = name
                 self.dtype = dtype
@@ -5519,6 +5629,7 @@ class AttentionalLSTMDecoderLayer(object):
                     values=self.values,
                     key_val_mask=self.key_val_mask,
                     gaussian_attn=self.gaussian_attn,
+                    attn_sigma2=self.attn_sigma2,
                     num_query_units=self.num_query_units,
                     project_keys=self.project_keys,
                     training=self.training,
@@ -5550,6 +5661,8 @@ class AttentionalLSTMDecoderLayer(object):
                     weight_normalization=self.weight_normalization,
                     layer_normalization=self.layer_normalization,
                     use_bias=self.use_bias,
+                    implementation=self.implementation,
+                    l2_normalize_states=self.l2_normalize_states,
                     reuse=self.reuse,
                     name=self.name,
                     dtype=self.dtype,
