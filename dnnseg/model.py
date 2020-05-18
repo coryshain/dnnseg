@@ -2247,7 +2247,8 @@ class DNNSeg(object):
 
                                         labels[x] = labels[x]
 
-                                        values[x] = self.segmenter.embedding_fn[l + 1](labels[x])
+                                        # values[x] = self.segmenter.embedding_fn[l + 1](labels[x])
+                                        values[x] = labels[x]
 
                                         if self.decoder_positional_attn_keys:
                                         # if False:
@@ -2333,10 +2334,12 @@ class DNNSeg(object):
                                     # Select decoder state source
                                     if l == self.layers_encoder - 1:
                                         decoder_in['all'] = self.encoder_states[l]
+                                        # decoder_in['all'] = tf.zeros_like(self.encoder_states[l])
                                         decoder_cell_in['all'] = self.encoder_cell_states[l]
                                     else:
                                         select = l + self.decoder_initialize_state_from_above
                                         decoder_in['all'] = self.encoder_states[select]
+                                        # decoder_in['all'] = tf.zeros_like(self.encoder_states[select])
                                         decoder_cell_in['all'] = self.encoder_cell_states[select]
 
                                     # Rescale gradients

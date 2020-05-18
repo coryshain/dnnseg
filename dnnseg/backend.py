@@ -347,22 +347,19 @@ def update_binding_matrix(k, v, M=None, beta=0., epsilon=1e-8, session=None):
             if M is None:
                 M = tf.zeros([K, V])
 
-            k_norm = tf.norm(k, axis=-1, keepdims=True)
             k = tf.nn.l2_normalize(k, epsilon=epsilon, axis=-1)
             v = tf.nn.l2_normalize(v, epsilon=epsilon, axis=-1)
             P_denom = tf.maximum(tf.reduce_sum(k**2, axis=-1), epsilon)
 
-            P = (k[..., None] * tf.expand_dims(k, -2)) / P_denom
+            P = (k[..., None] * tf.expand_dims(k, -2)) / P_denom[..., None, None]
             _P = tf.eye(int(k.shape[-1]))
             while len(_P.shape) < len(P.shape):
                 _P = _P[None, ...]
             _P -= P
 
-            prev = tf.tensordot(P, M, axes=1)
+            prev = tf.matmul(P, M)
             new = k[..., None] * tf.expand_dims(v, -2)
-            out = tf.tensordot(_P, M, axes=1) + beta * prev + (1 - beta) * new
-            while len(out.shape) > 2:
-                out = tf.reduce_mean(out, axis=0)
+            out = tf.matmul(_P, M) + beta * prev + (1 - beta) * new
 
             return out
 
@@ -1020,7 +1017,8 @@ HMLSTM_RETURN_SIGNATURE = [
     'cell_proposal',
     'u',
     'v',
-    'passthru'
+    'passthru',
+    'M'
 ]
 
 
@@ -1037,7 +1035,8 @@ def hmlstm_state_size(
         return_c=True,
         return_z_prob=True,
         return_lm=True,
-        return_cell_proposal=True
+        return_cell_proposal=True,
+        return_M=True
 ):
     if return_lm:
         assert units_lm is not None, 'units_lm must be provided when using return_lm'
@@ -1113,6 +1112,10 @@ def hmlstm_state_size(
                 if l == 0 and units_passthru:
                     include = True
                     value = units_passthru
+            elif name == 'M':
+                if return_M and l < layers - 1:
+                    include = True
+                    value = embedding[l] ** 2
             else:
                 raise ValueError('No case defined for HMLSTM_RETURN_SIGNATURE item "%s".' % name)
 
@@ -1560,7 +1563,8 @@ class HMLSTMCell(LayerRNNCell):
             return_lm=self._lm,
             return_c=True,
             return_z_prob=True,
-            return_cell_proposal=True
+            return_cell_proposal=True,
+            return_M=self._use_outer_product_memory
         )
 
     @property
@@ -1719,7 +1723,7 @@ class HMLSTMCell(LayerRNNCell):
                     self._kernel_boundary = []
 
                 if self._use_outer_product_memory:
-                    self._binding_matrices = []
+                    self._key_val_maps = []
 
                 if self._oracle_boundary:
                     n_boundary_dims = self._num_layers - 1
@@ -1822,29 +1826,29 @@ class HMLSTMCell(LayerRNNCell):
                             n_feats,
                             self._num_embdims[l],
                             self._bottomup_initializer,
-                            depth=1,
                             name='embedding'
                         )
                     else:
                         kernel_embedding = lambda x: x
                     if self._use_outer_product_memory:
-                        binding_matrix = self.add_variable(
-                            'binding_matrix_l%d' % l,
-                            shape=[self._num_units[l], self._num_units[l]],
-                            initializer=tf.keras.initializers.Identity,
-                            trainable=True
+                        key_val_map = self.initialize_kernel(
+                            l,
+                            self._num_units[l],
+                            self._num_units[l],
+                            self._bottomup_initializer,
+                            name='key_val_map'
                         )
-                        self._binding_matrices.append(binding_matrix)
+                        self._key_val_maps.append(key_val_map)
 
-                        def retrieve(x):
-                            out = tf.tensordot(x, self._binding_matrices[l], axes=1)
+                        def retrieve(x, d):
+                            out = self._key_val_maps[d](x)
                             out = tf.nn.l2_normalize(out, epsilon=self._epsilon, axis=-1)
 
                             return out
 
-                        def get_embd_fn(retrieve_fn=retrieve, emdb_fn=kernel_embedding):
+                        def get_embd_fn(retrieve_fn=retrieve, d=l, emdb_fn=kernel_embedding):
                             def fn(x):
-                                out = retrieve_fn(x)
+                                out = retrieve_fn(x, d)
                                 out = emdb_fn(out)
 
                                 return out
@@ -2500,6 +2504,7 @@ class HMLSTMCell(LayerRNNCell):
                         feature_deltas = None
 
                     if l < self._num_layers - 1:
+                        # Compute segment lengths and averaged segment values
                         u_behind = state[l].u
                         v_behind = state[l].v
 
@@ -2519,8 +2524,27 @@ class HMLSTMCell(LayerRNNCell):
                             (v_behind * tf.maximum(u - 1, 0) + feats * z_below_cur) / tf.where(cond, u, tf.ones_like(u)), # The redundant use of tf.where is needed here because of a bug that backprops NaNs from the false branch even though it isn't selected
                             tf.zeros_like(v_behind)
                         )
+
+                        # Update binding matrix M
+                        if self._use_outer_product_memory:
+                            key = features
+                            val = embedding
+                            M_prev = layer.M
+                            M_prev_shape = tf.shape(M_prev)
+                            final_dim = int(M_prev.shape[-1])
+                            b = []
+                            for i in range(len(M_prev.shape) - 1):
+                                b.append(M_prev_shape[i])
+                            side_len = tf.cast(tf.sqrt(tf.cast(final_dim, dtype=tf.float32)), dtype=tf.int32)
+                            M_prev = tf.reshape(M_prev, b + [side_len, side_len])
+                            M_new = update_binding_matrix(key, val, M=M_prev, beta=0., epsilon=self._epsilon, session=self._session)
+                            M = M_new * z[..., None] + M_prev * (1 - z)[..., None]
+                            embedding = tf.squeeze(tf.matmul(tf.expand_dims(key, -2), M), axis=-2)
+                            M = tf.reshape(M, b + [final_dim])
+                        else:
+                            M = None
                     else:
-                        v = u = None
+                        v = u = M = None
 
                     name_map = {
                         'c': c,
@@ -2536,7 +2560,8 @@ class HMLSTMCell(LayerRNNCell):
                         'cell_proposal': c_flush,
                         'passthru': passthru,
                         'v': v,
-                        'u': u
+                        'u': u,
+                        'M': M
                     }
 
                     h_below = embedding
@@ -2623,6 +2648,8 @@ class HMLSTMCell(LayerRNNCell):
                         elif self._n_passthru_neurons and l == 0 and name == 'passthru':
                             include = True
                         elif l < self._num_layers - 1 and name in ['features_by_seg', 'feature_deltas']:
+                            include = True
+                        elif name == 'M' and name_map[name] is not None:
                             include = True
 
                         if include and name in name_map:
