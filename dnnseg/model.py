@@ -2522,7 +2522,7 @@ class DNNSeg(object):
                                         in_cur = projection(in_cur)
 
                                         in_cur = get_activation(
-                                            self.decoder_activation_inner,
+                                            self.decoder_inner_activation,
                                             session=self.sess,
                                             training=self.training,
                                             from_logits=True,
