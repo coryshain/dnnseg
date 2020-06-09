@@ -2333,9 +2333,11 @@ class DNNSeg(object):
                                 else:
                                     # Select decoder state source
                                     if l == self.layers_encoder - 1:
-                                        decoder_in['all'] = self.encoder_states[l]
+                                        # decoder_in['all'] = self.encoder_states[l]
+                                        decoder_in['all'] = self.encoder_embeddings[l]
                                         # decoder_in['all'] = tf.zeros_like(self.encoder_states[l])
-                                        decoder_cell_in['all'] = self.encoder_cell_states[l]
+                                        # decoder_cell_in['all'] = self.encoder_cell_states[l]
+                                        decoder_cell_in['all'] = self.encoder_embeddings[l]
                                     else:
                                         select = l + self.decoder_initialize_state_from_above
                                         decoder_in['all'] = self.encoder_states[select]
@@ -2438,28 +2440,33 @@ class DNNSeg(object):
                                     speaker_embeddings = tf.gather(self.speaker_embeddings, batch_ids_at_pred)
                                 else:
                                     speaker_embeddings = None
-                                if self.n_passthru_neurons:
-                                    passthru_neurons = tf.boolean_mask(self.passthru_neurons, mask_cur)
-                                else:
-                                    passthru_neurons = None
+                                # if self.n_passthru_neurons:
+                                #     passthru_neurons = tf.boolean_mask(self.passthru_neurons, mask_cur)
+                                # else:
+                                #     passthru_neurons = None
+                            if self.n_passthru_neurons:
+                                passthru_neurons = tf.boolean_mask(self.passthru_neurons[l], mask_cur)
+                            else:
+                                passthru_neurons = None
 
                             hidden_units = {}
                             output_units = {}
                             initial_state = {}
 
                             for x in decoder_in:
+                                in_cur = [decoder_in[x]]
                                 if l == 0:
-                                    in_cur = decoder_in[x]
-                                    in_cur = [in_cur]
                                     if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
                                         in_cur.append(speaker_embeddings)
-                                    if self.n_passthru_neurons:
-                                        in_cur.append(passthru_neurons)
-                                    if len(in_cur) > 1:
-                                        in_cur = tf.concat(in_cur, axis=-1)
-                                    else:
-                                        in_cur = in_cur[0]
-                                    decoder_in[x] = in_cur
+                                    # if self.n_passthru_neurons:
+                                    #     in_cur.append(passthru_neurons)
+                                if self.n_passthru_neurons:
+                                    in_cur.append(passthru_neurons)
+                                if len(in_cur) > 1:
+                                    in_cur = tf.concat(in_cur, axis=-1)
+                                else:
+                                    in_cur = in_cur[0]
+                                decoder_in[x] = in_cur
 
                                 if self.project_decoder_inputs:
                                     to_project = [decoder_in]
@@ -2513,6 +2520,15 @@ class DNNSeg(object):
                                         projection = compose_lambdas(projection_lambdas)
 
                                         in_cur = projection(in_cur)
+
+                                        in_cur = get_activation(
+                                            self.decoder_activation_inner,
+                                            session=self.sess,
+                                            training=self.training,
+                                            from_logits=True,
+                                            sample_at_train=self.sample_at_train,
+                                            sample_at_eval=self.sample_at_eval
+                                        )(in_cur)
 
                                         y[x] = in_cur
 
@@ -7139,15 +7155,15 @@ class DNNSegMLE(DNNSeg):
                                                     [1, cae_segs_shape[1], 1]
                                                 )
                                                 correspondence_inputs.append(speaker_embeddings)
-                                            if self.n_passthru_neurons:
-                                                passthru_neurons = self.passthru_neurons
-                                                passthru_neurons = tf.boolean_mask(passthru_neurons, cae_mask_top_bool)
-                                                passthru_neurons = tf.expand_dims(passthru_neurons, 1)
-                                                passthru_neurons = tf.tile(
-                                                    passthru_neurons,
-                                                    [1, cae_segs_shape[1], 1]
-                                                )
-                                                correspondence_inputs.append(passthru_neurons)
+                                        if self.n_passthru_neurons:
+                                            passthru_neurons = self.passthru_neurons[l]
+                                            passthru_neurons = tf.boolean_mask(passthru_neurons, cae_mask_top_bool)
+                                            passthru_neurons = tf.expand_dims(passthru_neurons, 1)
+                                            passthru_neurons = tf.tile(
+                                                passthru_neurons,
+                                                [1, cae_segs_shape[1], 1]
+                                            )
+                                            correspondence_inputs.append(passthru_neurons)
                                         if pe is not None:
                                             correspondence_inputs.append(
                                                 tf.tile(
@@ -7168,16 +7184,16 @@ class DNNSegMLE(DNNSeg):
                                         else: # direction == 'bottomup'
                                             correspondence_inputs = averaged_inputs
                                             correspondence_targets = embeddings
+                                        correspondence_inputs = [correspondence_inputs]
                                         if l == 0:
-                                            correspondence_inputs = [correspondence_inputs]
                                             if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
                                                 correspondence_inputs.append(self.speaker_embeddings_tiled)
-                                            if self.n_passthru_neurons:
-                                                correspondence_inputs.append(self.passthru_neurons)
-                                            if len(correspondence_inputs) == 1:
-                                                correspondence_inputs = correspondence_inputs[0]
-                                            else:
-                                                correspondence_inputs = tf.concat(correspondence_inputs, axis=-1)
+                                        if self.n_passthru_neurons:
+                                            correspondence_inputs.append(self.passthru_neurons)
+                                        if len(correspondence_inputs) == 1:
+                                            correspondence_inputs = correspondence_inputs[0]
+                                        else:
+                                            correspondence_inputs = tf.concat(correspondence_inputs, axis=-1)
 
                                         if self.lm_masking_mode.lower() in ['drop_masked', 'predict_at_boundaries']:
                                             correspondence_mask = tf.cast(tf.round(correspondence_weights), dtype=tf.bool)
@@ -7486,11 +7502,10 @@ class DNNSegMLE(DNNSeg):
                 if self.passthru_adversarial_gradient_scale:
                     self.encoder_passthru_adversarial_losses = []
 
-                    passthru_targets_base = self.passthru_neurons
-                    if not self.backprop_into_targets:
-                        passthru_targets_base = tf.stop_gradient(passthru_targets_base)
-
                     for l in range(self.layers_encoder - 1):
+                        passthru_targets_base = self.passthru_neurons[l]
+                        if not self.backprop_into_targets:
+                            passthru_targets_base = tf.stop_gradient(passthru_targets_base)
                         passthru_targets = tf.boolean_mask(passthru_targets_base, self.encoder_segmentations[l])
 
                         L = self.passthru_adversarial_gradient_scale

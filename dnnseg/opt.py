@@ -3,8 +3,6 @@ from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes, ops
 from tensorflow.python.ops import control_flow_ops, gradients, state_ops, resource_variable_ops, variables
-from tensorflow.python.training.optimizer import _get_variable_for, _get_processor, Optimizer
-from tensorflow.python.util import nest
 
 from .backend import get_session
 

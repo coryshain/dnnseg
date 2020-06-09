@@ -1071,7 +1071,8 @@ def hmlstm_state_size(
             if name == 'c' and return_c:
                 include = True
                 value = units[l]
-                if l == 0 and units_passthru:
+                # if l == 0 and units_passthru:
+                if units_passthru:
                     value += units_passthru
             elif name == 'h':
                 include = True
@@ -1099,7 +1100,8 @@ def hmlstm_state_size(
                 if return_cell_proposal:
                     include = True
                     value = units[l]
-                    if l == 0 and units_passthru:
+                    # if l == 0 and units_passthru:
+                    if units_passthru:
                         value += units_passthru
             elif name in ['u', 'v']:
                 if units_cae[l] is not None and l < layers - 1:
@@ -1109,7 +1111,8 @@ def hmlstm_state_size(
                     else:
                         value = units_cae[l]
             elif name == 'passthru':
-                if l == 0 and units_passthru:
+                # if l == 0 and units_passthru:
+                if units_passthru:
                     include = True
                     value = units_passthru
             elif name == 'M':
@@ -1746,7 +1749,8 @@ class HMLSTMCell(LayerRNNCell):
                         recurrent_dim += 2 * self._num_features[l]
 
                     output_dim = self._num_units[l]
-                    if l == 0 and self._n_passthru_neurons:
+                    # if l == 0 and self._n_passthru_neurons:
+                    if self._n_passthru_neurons:
                         output_dim += self._n_passthru_neurons
                     output_dim *= 4 # forget, input, and output gates, plus cell proposal
                     if self._implementation == 1:
@@ -1891,8 +1895,10 @@ class HMLSTMCell(LayerRNNCell):
                             if l == 0:
                                 if self._decoder_embedding is not None:
                                     lm_bottomup_in_dim += int(self._decoder_embedding.shape[-1])
-                                if self._n_passthru_neurons:
-                                    lm_bottomup_in_dim += self._n_passthru_neurons
+                                # if self._n_passthru_neurons: # Alternates with following two lines
+                                #     lm_bottomup_in_dim += self._n_passthru_neurons
+                            if self._n_passthru_neurons:
+                                lm_bottomup_in_dim += self._n_passthru_neurons
                             lm_recurrent_in_dim = bottomup_dim * (self._lm_order_bwd + self._lm_order_fwd)
                             if l == 0 and self._decoder_embedding is not None:
                                 lm_recurrent_in_dim += int(self._decoder_embedding.shape[-1])
@@ -1935,8 +1941,10 @@ class HMLSTMCell(LayerRNNCell):
                             if l == 0:
                                 if self._decoder_embedding is not None:
                                     lm_in_dim += int(self._decoder_embedding.shape[-1])
-                                if self._n_passthru_neurons:
-                                    lm_in_dim += self._n_passthru_neurons
+                                # if self._n_passthru_neurons: # Alternates with following two lines
+                                #     lm_in_dim += self._n_passthru_neurons
+                            if self._n_passthru_neurons:
+                                lm_in_dim += self._n_passthru_neurons
                             self._kernel_lm.append(
                                 self.initialize_kernel(
                                     l,
@@ -2054,7 +2062,8 @@ class HMLSTMCell(LayerRNNCell):
                         # Use outer activation if final layer
                         activation = self._activation
                     units = self._num_units[l]
-                    if l == 0 and self._n_passthru_neurons:
+                    # if l == 0 and self._n_passthru_neurons:
+                    if self._n_passthru_neurons:
                         units += self._n_passthru_neurons
 
                     # EXTRACT DEPENDENCIES (c_behind, h_behind, h_above, h_below, z_behind, z_below):
@@ -2239,7 +2248,8 @@ class HMLSTMCell(LayerRNNCell):
                     h = activation(h) * o
                     h_clean = activation(h_clean) * o_clean
 
-                    if l == 0 and self._n_passthru_neurons:
+                    # if l == 0 and self._n_passthru_neurons:
+                    if self._n_passthru_neurons:
                         passthru = h[:, :self._n_passthru_neurons]
                         passthru_clean = h_clean[:, :self._n_passthru_neurons]
                         h = h[:, self._n_passthru_neurons:]
@@ -2645,7 +2655,8 @@ class HMLSTMCell(LayerRNNCell):
                             include = True
                         elif l < self._num_layers - 1 and name in ['u', 'v']:
                             include = True
-                        elif self._n_passthru_neurons and l == 0 and name == 'passthru':
+                        # elif self._n_passthru_neurons and l == 0 and name == 'passthru':
+                        elif self._n_passthru_neurons and name == 'passthru':
                             include = True
                         elif l < self._num_layers - 1 and name in ['features_by_seg', 'feature_deltas']:
                             include = True
@@ -3114,8 +3125,10 @@ class HMLSTMOutput(object):
     def passthru_neurons(self, mask=None):
         with self.session.as_default():
             with self.session.graph.as_default():
+                # return self.l[0].passthru_neurons(mask=mask)
 
-                return self.l[0].passthru_neurons(mask=mask)
+                passthru_neurons = [l.passthru_neurons(mask=mask) for l in self.l]
+                return passthru_neurons
 
     def lm_logits(self, mask=None):
         with self.session.as_default():
