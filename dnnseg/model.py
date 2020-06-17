@@ -1912,10 +1912,14 @@ class DNNSeg(object):
                         self.decoder_positional_encoding_type is not None and \
                         (not self.decoder_type.lower() == 'seq2seqattn' or
                          self.decoder_add_positional_encoding):
+                    if self.max_len:
+                        n_timesteps = self.max_len
+                    else:
+                        n_timesteps = tf.shape(self.X)[1] # doesn't work with prediction windows of 1, broadcasting leads to unlicensed undefined shapes
                     pe = construct_positional_encoding(
-                        tf.shape(self.X)[1],
+                        n_timesteps,
                         n_units=self.decoder_positional_encoding_units,
-                        n_batch=tf.shape(self.X)[1],
+                        n_batch=tf.shape(self.X)[0],
                         positional_encoding_type=self.decoder_positional_encoding_type,
                         positional_encoding_transform=self.decoder_positional_encoding_transform,
                         positional_encoding_activation=self.decoder_positional_encoding_activation,

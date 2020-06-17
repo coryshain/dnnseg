@@ -5467,7 +5467,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                     if self.gaussian_attn:
                         mu = mu_prev
                         sigma2 = self.attn_sigma2
-                        ix = tf.cast(tf.range(tf.shape(self.values)[1]), dtype=tf.float32)[None, ...]
+                        ix = tf.cast(tf.range(self.values.shape[1]), dtype=tf.float32)[None, ...]
                         a = tf.exp(-(mu-ix)**2/ tf.maximum(sigma2, self.epsilon)) * self.key_val_mask
                         a /= tf.maximum(tf.reduce_sum(a, axis=1, keepdims=True), self.epsilon)
                         context_vector = tf.reduce_sum(self.values * a[..., None], axis=1)
