@@ -466,7 +466,7 @@ def plot_class_similarity(
     similarity_matrix = similarity_matrix.reindex(classes, axis=0)
     similarity_matrix = similarity_matrix.reindex(classes, axis=1)
 
-    ax.pcolormesh(similarity_matrix, cmap=cmap, vmin=0., vmax=1.)
+    ax.pcolormesh(similarity_matrix, cmap=cmap)
     ax.set_xticks(np.arange(0.5, len(similarity_matrix.columns), 1), minor=False)
     ax.set_xticklabels(similarity_matrix.columns)
     ax.set_yticks(np.arange(0.5, len(similarity_matrix.index), 1), minor=False)
@@ -530,18 +530,11 @@ def plot_projections(
         sns.set_style('white')
 
         with sns.plotting_context(rc={'legend.fontsize': 'small', 'lines.markersize': 10}):
-            vals = sorted(list(df[c].unique()))
-            print(vals)
-            marker_map = {x:y for x, y in zip(vals, marker_keys[:len(vals)])}
-
             g = sns.relplot(
                 x='Projection 1',
                 y='Projection 2',
                 kind='scatter',
                 hue=c,
-                style=c,
-                marker=marker_map,
-                style_order=vals,
                 data=df,
                 palette=cmap,
                 legend='full',

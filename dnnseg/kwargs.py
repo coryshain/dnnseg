@@ -1681,6 +1681,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Frequency with which to evaluate model. If **streaming**, frequency is in minibatches and model is evaluated after each iteration; otherwise it's in iterations."
     ),
     Kwarg(
+        'incremental_eval',
+        True,
+        bool,
+        "Whether to evaluate incrementally during training."
+    ),
+    Kwarg(
         'log_freq',
         1,
         int,

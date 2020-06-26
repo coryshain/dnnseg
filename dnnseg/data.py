@@ -852,7 +852,7 @@ def compute_class_similarity(table, class_column_name='phn_label'):
 
             # dist = num / np.maximum(denom, 1e-5)
             
-            dist = spatial.distance.cdist(valid[i], valid[j], metric='cityblock')
+            dist = spatial.distance.cdist(valid[i], valid[j])
             
             n_cells = np.prod(dist.shape)
             if i == j:

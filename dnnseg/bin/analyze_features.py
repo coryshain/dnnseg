@@ -7,6 +7,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree  import DecisionTreeClassifier, export_graphviz
 from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 import pydot
 import argparse
@@ -21,7 +22,7 @@ if __name__ == '__main__':
     ''')
     argparser.add_argument('config', nargs='+', help='Path(s) to config file(s) defining DNNSeg model(s).')
     argparser.add_argument('-c', '--classes', nargs='+', default=['features'], help='Names of column in data set to use as regression target.')
-    argparser.add_argument('-t', '--classifier_type', default='logreg', help='Type of classifier to use. One of ``["logreg", "random_forest"]``.')
+    argparser.add_argument('-t', '--classifier_type', default='logreg', help='Type of classifier to use. One of ``["logreg", "mlp", "random_forest"]``.')
     argparser.add_argument('-d', '--direction', type=str, default='pred2gold', help='Direction of classification. One of ["gold2pred", "pred2gold"].')
     argparser.add_argument('-r', '--regularization_scale', type=float, default=1., help='Level of regularization to use in MLR classification.')
     argparser.add_argument('-M', '--max_depth', type=float, default=None, help='Maximum permissible tree depth.')
@@ -29,12 +30,15 @@ if __name__ == '__main__':
     argparser.add_argument('-n', '--n_estimators', type=int, default=100, help='Number of estimators (trees) in random forest.')
     argparser.add_argument('-f', '--n_folds', type=int, default=5, help='Number of folds in cross-validation (>= 2).')
     argparser.add_argument('-l', '--layers', default=None, nargs='+', help='IDs of layers to plot (0, ..., L). If unspecified, plots all available layers.')
+    argparser.add_argument('-u', '--units', default=[100], nargs='+', help='Space-delimited list of integers representing number of hidden units to use in MLP classifier.')
     argparser.add_argument('-b', '--compare_to_baseline', action='store_true', help='Whether to compute scores for a matched random baseline.')
     argparser.add_argument('-i', '--images', action='store_true', help='Dump representative images of decision trees.')
     argparser.add_argument('-v', '--verbose', action='store_true', help='Report progress to standard error.')
     args = argparser.parse_args()
 
     is_embedding_dimension = re.compile('d([0-9]+)')
+
+    units = [int(x) for x in args.units]
 
     for config_path in args.config:
         p = Config(config_path)
@@ -152,7 +156,14 @@ if __name__ == '__main__':
                                                 class_weight='balanced',
                                                 C = args.regularization_scale,
                                                 solver='lbfgs',
-                                                multi_class='auto'
+                                                multi_class='auto',
+                                                max_iter=200
+                                            )
+                                        elif args.classifier_type.lower() in ['mlp', 'neural_network']:
+                                            classifier = MLPClassifier(
+                                                units,
+                                                alpha = args.regularization_scale,
+                                                max_iter=200
                                             )
 
                                         train_select = np.zeros(len(X_cur)).astype('bool')
@@ -265,7 +276,14 @@ if __name__ == '__main__':
                                                 class_weight='balanced',
                                                 C = args.regularization_scale,
                                                 solver='lbfgs',
-                                                multi_class='auto'
+                                                multi_class='auto',
+                                                max_iter=500
+                                            )
+                                        elif args.classifier_type.lower() in ['mlp', 'neural_network']:
+                                            classifier = MLPClassifier(
+                                                units,
+                                                alpha=args.regularization_scale,
+                                                max_iter=500
                                             )
 
                                         train_select = np.zeros(len(X)).astype('bool')
