@@ -3977,7 +3977,7 @@ class DNNSeg(object):
                 for l in range(len(segment_tables)):
                     embeddings_cur = []
                     for f in data.fileIDs:
-                        embeddings_cur.append(segment_tables[l][f][['d%d' %u for u in range(n_units[l])]].as_matrix())
+                        embeddings_cur.append(segment_tables[l][f][['d%d' %u for u in range(n_units[l])]].values)
                     embeddings.append(np.concatenate(embeddings_cur, axis=0))
 
                 return embeddings, y
