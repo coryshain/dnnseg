@@ -491,6 +491,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         bool,
         "Whether to convert encoder state values to probabilities and predict them using cross-entropy."
     ),
+    Kwarg(
+        'use_mae',
+        False,
+        bool,
+        "Whether to use mean absolute error (rather than the default mean squared error) for regression-based targetss."
+    ),
 
     # Correspondence AE
     Kwarg(

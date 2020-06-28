@@ -4434,6 +4434,8 @@ class DNNSeg(object):
                             labels=targets,
                             logits=preds
                         )
+                    elif distance_func.lower() in ['mae', 'l1norm']:
+                        loss = tf.abs(targets - preds)
                     elif distance_func.lower() in ['mse', 'l2norm']:
                         loss = (targets - preds) ** 2
                     elif distance_func.lower() == 'cosine':
@@ -6917,6 +6919,8 @@ class DNNSegMLE(DNNSeg):
                     distance_func = 'cosine'
                 elif l > 0 and (self.encoder_l2_normalize_states or self.encoder_use_outer_product_memory):
                     distance_func = 'cosine'
+                elif self.use_mae:
+                    distance_funct = 'mae'
                 else:
                     distance_func = 'mse'
 
