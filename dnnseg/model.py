@@ -5636,6 +5636,8 @@ class DNNSeg(object):
                             summary_segmentation = self.sess.run(self.summary_segmentation, feed_dict=fd_summary)
                             self.writer.add_summary(summary_segmentation, self.step.eval(session=self.sess))
 
+                    self.writer.flush()
+
                     if verbose:
                         t1 = time.time()
                         time_str = pretty_print_seconds(t1 - t0)
