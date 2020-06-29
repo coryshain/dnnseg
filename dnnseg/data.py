@@ -2043,6 +2043,7 @@ class Dataset(object):
                 indices = np.repeat(indices, n_samples, axis=0)
 
             out = {
+                'n_minibatch': int(math.ceil(n/minibatch_size)),
                 'X': X[indices],
                 'X_mask': X_mask[indices],
                 'y': y[indices],
@@ -2142,6 +2143,7 @@ class Dataset(object):
                 y_fwd_mask_cur = np.any(y_fwd_cur, axis=-1)
 
             out = {
+                'n_minibatch': int(math.ceil(n/minibatch_size)),
                 'X': X_cur,
                 'X_mask': np.any(X_cur, axis=-1),
                 'y_bwd': y_bwd_cur,
@@ -2187,6 +2189,7 @@ class Dataset(object):
             index = ix[i]
 
             out = {
+                'n_minibatch': n,
                 'X': feats[index],
                 'file_ix': file_ix[index],
                 'shift': shift[index],

@@ -5723,37 +5723,9 @@ class DNNSeg(object):
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                if self.pad_seqs:
-                    if not np.isfinite(self.minibatch_size):
-                        minibatch_size = n_train
-                    else:
-                        minibatch_size = self.minibatch_size
-                    n_minibatch = math.ceil(float(n_train) / minibatch_size)
-                else:
-                    minibatch_size = 1
-                    n_minibatch = n_train
-
-                if self.streaming:
-                    if self.eval_freq:
-                        eval_freq = self.eval_freq
-                    else:
-                        eval_freq = np.inf
-                    if self.save_freq:
-                        save_freq = self.save_freq
-                    else:
-                        save_freq = np.inf
-                    if self.log_freq:
-                        log_freq = self.log_freq
-                    else:
-                        log_freq = np.inf
-
-                    n_pb = min(n_minibatch, eval_freq, save_freq, log_freq)
-                else:
-                    n_pb = n_minibatch
-
                 # if not self.initial_evaluation_complete.eval(session=self.sess):
-                if True:
-                # if False:
+                # if True:
+                if False:
                     self.run_checkpoint(
                         val_data,
                         save=False,
@@ -5769,46 +5741,16 @@ class DNNSeg(object):
                     self.sess.run(self.set_initial_evaluation_complete)
                     self.save()
 
+                if self.pad_seqs:
+                    if not np.isfinite(self.minibatch_size):
+                        minibatch_size = n_train
+                    else:
+                        minibatch_size = self.minibatch_size
+                else:
+                    minibatch_size = 1
+
                 while self.global_step.eval(session=self.sess) < n_iter:
                     self.set_update_mode(verbose=False)
-
-                    if verbose:
-                        t0_iter = time.time()
-                        stderr('-' * 50 + '\n')
-                        stderr('Iteration %d\n' % int(self.global_step.eval(session=self.sess) + 1))
-                        stderr('\n')
-
-                        if self.streaming:
-                            if n_pb > 1:
-                                stderr('Running minibatches %d-%d (out of %d)...\n' % (1, n_pb, n_minibatch))
-                            else:
-                                stderr('Running minibatch %d (out of %d)...\n' % (n_pb, n_minibatch))
-                        else:
-                            stderr('Running minibatch updates...\n')
-
-                        stderr('Update mode: %s\n' % self.get_update_mode())
-
-                        if self.n_pretrain_steps and (self.step.eval(session=self.sess) <= self.n_pretrain_steps):
-                            stderr('Pretraining decoder...\n')
-
-                        if self.optim_name is not None and self.print_learning_rate:
-                            stderr('Learning rate: %s\n' % self.lr.eval(session=self.sess))
-
-                        if self.curriculum_t is not None:
-                            if self.curriculum_type.lower() == 'hard':
-                                stderr('Curriculum window length: %s\n' % self.curriculum_t.eval(session=self.sess))
-                            elif self.curriculum_type.lower() == 'exp':
-                                stderr('Curriculum decay rate: %s\n' % (1. / self.curriculum_t.eval(session=self.sess)))
-                            else:
-                                stderr('Curriculum window soft bound location: %s\n' % self.curriculum_t.eval(session=self.sess))
-
-                        if self.boundary_slope_annealing_rate:
-                            sys.stderr.write('Boundary slope annealing coefficient: %s\n' % self.boundary_slope_coef.eval(session=self.sess))
-
-                        if self.state_slope_annealing_rate:
-                            sys.stderr.write('State slope annealing coefficient: %s\n' % self.state_slope_coef.eval(session=self.sess))
-
-                        pb = tf.contrib.keras.utils.Progbar(n_pb)
 
                     loss_total = 0.
                     reg_total = 0.
@@ -5838,6 +5780,69 @@ class DNNSeg(object):
                     i_pb_base = 0
 
                     for i, batch in enumerate(data_feed_train):
+                        if i == 0 and verbose:
+                            n_minibatch = batch['n_minibatch']
+
+                            if self.streaming:
+                                if self.eval_freq:
+                                    eval_freq = self.eval_freq
+                                else:
+                                    eval_freq = np.inf
+                                if self.save_freq:
+                                    save_freq = self.save_freq
+                                else:
+                                    save_freq = np.inf
+                                if self.log_freq:
+                                    log_freq = self.log_freq
+                                else:
+                                    log_freq = np.inf
+
+                                n_pb = min(n_minibatch, eval_freq, save_freq, log_freq)
+                            else:
+                                n_pb = n_minibatch
+
+                            t0_iter = time.time()
+                            stderr('-' * 50 + '\n')
+                            stderr('Iteration %d\n' % int(self.global_step.eval(session=self.sess) + 1))
+                            stderr('\n')
+
+                            if self.streaming:
+                                if n_pb > 1:
+                                    stderr('Running minibatches %d-%d (out of %d)...\n' % (1, n_pb, n_minibatch))
+                                else:
+                                    stderr('Running minibatch %d (out of %d)...\n' % (n_pb, n_minibatch))
+                            else:
+                                stderr('Running minibatch updates...\n')
+
+                            stderr('Update mode: %s\n' % self.get_update_mode())
+
+                            if self.n_pretrain_steps and (self.step.eval(session=self.sess) <= self.n_pretrain_steps):
+                                stderr('Pretraining decoder...\n')
+
+                            if self.optim_name is not None and self.print_learning_rate:
+                                stderr('Learning rate: %s\n' % self.lr.eval(session=self.sess))
+
+                            if self.curriculum_t is not None:
+                                if self.curriculum_type.lower() == 'hard':
+                                    stderr('Curriculum window length: %s\n' % self.curriculum_t.eval(session=self.sess))
+                                elif self.curriculum_type.lower() == 'exp':
+                                    stderr('Curriculum decay rate: %s\n' % (
+                                                1. / self.curriculum_t.eval(session=self.sess)))
+                                else:
+                                    stderr('Curriculum window soft bound location: %s\n' % self.curriculum_t.eval(
+                                        session=self.sess))
+
+                            if self.boundary_slope_annealing_rate:
+                                sys.stderr.write(
+                                    'Boundary slope annealing coefficient: %s\n' % self.boundary_slope_coef.eval(
+                                        session=self.sess))
+
+                            if self.state_slope_annealing_rate:
+                                sys.stderr.write('State slope annealing coefficient: %s\n' % self.state_slope_coef.eval(
+                                    session=self.sess))
+
+                            pb = tf.contrib.keras.utils.Progbar(n_pb)
+
                         if self.streaming:
                             X_batch = batch['X']
                             X_mask_batch = batch['X_mask']
