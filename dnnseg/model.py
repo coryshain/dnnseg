@@ -6920,7 +6920,7 @@ class DNNSegMLE(DNNSeg):
                 elif l > 0 and (self.encoder_l2_normalize_states or self.encoder_use_outer_product_memory):
                     distance_func = 'cosine'
                 elif self.use_mae:
-                    distance_funct = 'mae'
+                    distance_func = 'mae'
                 else:
                     distance_func = 'mse'
 
