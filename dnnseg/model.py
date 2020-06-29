@@ -5752,8 +5752,8 @@ class DNNSeg(object):
                     n_pb = n_minibatch
 
                 # if not self.initial_evaluation_complete.eval(session=self.sess):
-                # if True:
-                if False:
+                if True:
+                # if False:
                     self.run_checkpoint(
                         val_data,
                         save=False,
@@ -6064,25 +6064,25 @@ class DNNSeg(object):
                                     encoder_passthru_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
                                 i_pb_base = i+1
 
-                    loss_total /= n_pb
-                    reg_total /= n_pb
+                    loss_total /= (i+1)
+                    reg_total /= (i+1)
                     for l in range(len(seg_rate_total)):
-                        seg_rate_total[l] = seg_rate_total[l] / n_pb
+                        seg_rate_total[l] = seg_rate_total[l] / (i+1)
                     if not self.streaming or self.predict_backward:
-                        reconstruction_loss_total /= n_pb
+                        reconstruction_loss_total /= (i+1)
                     if self.streaming and self.predict_forward:
-                        prediction_loss_total /= n_pb
+                        prediction_loss_total /= (i+1)
                     for l in range(len(correspondence_loss_total)):
-                        correspondence_loss_total[l] = correspondence_loss_total[l] / n_pb
+                        correspondence_loss_total[l] = correspondence_loss_total[l] / (i+1)
                     if self.lm_loss_scale:
                         for l in range(self.layers_encoder):
-                            encoder_lm_loss_total[l] = encoder_lm_loss_total[l] / n_pb
+                            encoder_lm_loss_total[l] = encoder_lm_loss_total[l] / (i+1)
                     if self.speaker_adversarial_gradient_scale:
                         for l in range(self.layers_encoder - 1):
-                            encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] / n_pb
+                            encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] / (i+1)
                     if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
                         for l in range(self.layers_encoder - 1):
-                            encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] / n_pb
+                            encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] / (i+1)
 
                     self.sess.run(self.incr_global_step)
 
