@@ -6046,8 +6046,10 @@ class DNNSeg(object):
                             encoder_lm_loss_bwd_total[l] = encoder_lm_loss_bwd_total[l] / (i + 1)
                         if self.lm_order_fwd:
                             encoder_lm_loss_fwd_total[l] = encoder_lm_loss_fwd_total[l] / (i + 1)
-                    out_dict['lm_loss_bwd'] = encoder_lm_loss_bwd_total
-                    out_dict['lm_loss_fwd'] = encoder_lm_loss_fwd_total
+                    if self.lm_order_bwd:
+                        out_dict['lm_loss_bwd'] = encoder_lm_loss_bwd_total
+                    if self.lm_order_fwd:
+                        out_dict['lm_loss_fwd'] = encoder_lm_loss_fwd_total
                 if self.speaker_adversarial_gradient_scale:
                     for l in range(self.layers_encoder - 1):
                         encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] / (i + 1)
