@@ -52,12 +52,12 @@ if __name__ == '__main__':
         else:
             feature_table = None
 
-        if args.feature_names.lower() == 'all' and p['feature_map_file'].startswith('eng'):
+        if args.feature_names == ['all'] and p['feature_map_file'].startswith('eng'):
             feature_names = ['syllabic', 'consonantal', 'sonorant', 'continuant', 'delayed_release', 'approximant',
                              'nasal', 'voice', 'spread_glottis', 'labial', 'round', 'labiodental', 'coronal',
                              'anterior', 'distributed', 'strident', 'lateral', 'dorsal', 'high', 'low', 'front', 'back',
                              'tense', 'stress', 'diphthong']
-        elif args.feature_names.lower() == 'all' and p['feature_map_file'].startswith('xit'):
+        elif args.feature_names == ['all'] and p['feature_map_file'].startswith('xit'):
             feature_names = ['syllabic', 'consonantal', 'sonorant', 'continuant', 'delayed_release', 'approximant',
                              'trill', 'nasal', 'voice', 'spread_glottis', 'constricted_glottis', 'labial', 'round',
                              'labiodental', 'coronal', 'anterior', 'distributed', 'strident', 'lateral', 'dorsal',
