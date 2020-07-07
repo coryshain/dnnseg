@@ -18,7 +18,7 @@ if __name__ == '__main__':
     Evaluate a trained DNNSeg model.
     ''')
     argparser.add_argument('configs', nargs='+', help='Path(s) to configuration file(s).')
-    argparser.add_argument('-d', '--data', nargs='+', default='val', help='Data to use for evaluation (space-delimited). Either one of ``["train", "val", "test"]``, or a path to a directory containing evaluation data. Each argument to this option is treated as a separate evaluation set.')
+    argparser.add_argument('-d', '--data', nargs='+', default=['val'], help='Data to use for evaluation (space-delimited). Either one of ``["train", "val", "test"]``, or a path to a directory containing evaluation data. Each argument to this option is treated as a separate evaluation set.')
     argparser.add_argument('-N', '--names', nargs='*', help='Names for evaluation data. If empty, names are inferred. Otherwise, must have the same number of elements as ``data``.')
     argparser.add_argument('-e', '--eval_measures', nargs='+', default=['all'], help='Measures to output. One of ``["all", "segmentation", "classification", "objective", "label_probe", "feature_probe"]``. ``"segmentation"`` runs boundary and word segmentation scores for words and (if relevant) phones. ``"classification"`` creates hard labels by rounding embeddings and performs unsupervised clustering evaluation for word and (if relevant) phone categories. ``"objective"`` computes the mean value of each of the loss components over the dataset, without updating the model. ``"label_probe"`` runs a supervised MLP probe for phone labels if relevant, otherwise skipped. ``"feature_probe"`` runs a supervised MLP probe for features if relevant, otherwise skipped. ``"all"`` runs all measures.')
     argparser.add_argument('-t', '--classifier_type', default='mlp',help='Type of classifier to use. One of ``["logreg", "mlp", "random_forest"]``.')
@@ -67,7 +67,7 @@ if __name__ == '__main__':
                     n_coef=p['n_coef'],
                     order=p['order'],
                     force_preprocess=False,
-                    save_preprocessed_data=p.save_preprocessed_data
+                    save_preprocessed_data=True
                 )
                 if p['oracle_boundaries']:
                     for x in p['oracle_boundaries'].split():
@@ -106,7 +106,7 @@ if __name__ == '__main__':
                 n_coef=p['n_coef'],
                 order=p['order'],
                 force_preprocess=False,
-                save_preprocessed_data=p.save_preprocessed_data
+                save_preprocessed_data=True
             )
             if p['oracle_boundaries']:
                 for x in p['oracle_boundaries'].split():

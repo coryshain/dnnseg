@@ -46,7 +46,7 @@ if __name__ == '__main__':
         n_coef=p['n_coef'],
         order=p['order'],
         force_preprocess=args.preprocess,
-        save_preprocessed_data=p.save_preprocessed_data
+        save_preprocessed_data=True
     )
     if p['oracle_boundaries']:
         for x in p['oracle_boundaries'].split():
@@ -68,7 +68,7 @@ if __name__ == '__main__':
             n_coef=p['n_coef'],
             order=p['order'],
             force_preprocess=args.preprocess,
-            save_preprocessed_data=p.save_preprocessed_data
+            save_preprocessed_data=True
         )
         if p['oracle_boundaries']:
             for x in p['oracle_boundaries'].split():

@@ -406,7 +406,6 @@ class DNNSeg(object):
         assert len(self.lm_loss_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_loss_scale and n_units_encoder.' 
 
         self.use_lm_loss = [True if (x or self.decoder_type.lower() == 'seq2seqattn') else False for x in self.lm_loss_scale]
-        print(self.use_lm_loss)
 
         self.lm_gradient_scale = self._get_layerwise_scalar(self.lm_gradient_scale)
         assert len(self.lm_gradient_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_gradient_scale and n_units_encoder.'
