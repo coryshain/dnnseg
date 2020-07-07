@@ -19,6 +19,8 @@ marker_keys = list(markers.MarkerStyle.markers.keys())[2:-3]
 
 is_embedding_dimension = re.compile('d([0-9]+)')
 
+from dnnseg.data import project_matching_segments, compute_class_similarity
+
 
 def get_cmap(i):
     j = i % 6
@@ -550,5 +552,82 @@ def plot_projections(
             stderr('IO error when saving plot. Skipping plotting...\n')
 
         plt.close('all')
+
+
+def run_classification_plots(
+        segment_table,
+        seg_type,
+        plot_types=None,
+        class_limit=256,
+        projection_method='tsne',
+        label_map=None,
+        feature_table=None,
+        feature_names=None,
+        outdir='./plots/',
+        prefix='plots'
+):
+    stderr('    Plotting segment type: %s...\n' % seg_type)
+    gold_col = seg_type + '_label'
+    if class_limit.lower() == 'inf':
+        class_limit = np.inf
+    else:
+        class_limit = int(class_limit)
+    if gold_col in segment_table.columns and 'label' in segment_table.columns:
+        embedding_cols = [x for x in segment_table.columns if is_embedding_dimension.match(x)]
+        unique_classes = segment_table[gold_col].unique()
+        unique_labels = segment_table['label'].unique()
+
+        prefix = prefix + '_'
+        if not os.path.exists(outdir):
+            os.makedirs(outdir)
+
+        if gold_col == 'phn_label' and 'IPA' in segment_table.columns:
+            gold_col = 'IPA'
+
+        if plot_types is None or 'unit_heatmap'.lower() in plot_types:
+            stderr('      Plotting unit heatmap...\n')
+            if len(embedding_cols) < class_limit and len(unique_classes) < class_limit:
+                plot_binary_unit_heatmap(
+                    segment_table,
+                    class_column_name=gold_col,
+                    directory=outdir + '/classification/',
+                    prefix=prefix,
+                    suffix='.png')
+
+        if plot_types is None or 'label_heatmap'.lower() in plot_types:
+            if len(embedding_cols) < class_limit and len(unique_labels) < class_limit:
+                stderr('      Plotting label heatmap...\n')
+                plot_label_heatmap(
+                    segment_table,
+                    class_column_name=gold_col,
+                    directory=outdir + '/classification/',
+                    prefix=prefix,
+                    suffix='.png')
+
+        if plot_types is None or 'confusion_matrix'.lower() in plot_types:
+            if len(unique_classes) < class_limit:
+                stderr('      Plotting confusion matrix...\n')
+                sim = compute_class_similarity(segment_table, class_column_name=gold_col)
+                plot_class_similarity(
+                    sim,
+                    directory=outdir + '/classification/',
+                    prefix=prefix,
+                )
+
+        if (plot_types is None or 'projection'.lower() in plot_types):
+            stderr('      Plotting segment projections...\n')
+
+            projections = project_matching_segments(segment_table, method=projection_method)
+
+            plot_projections(
+                projections,
+                label_map=label_map,
+                feature_table=feature_table,
+                feature_names=feature_names,
+                directory=outdir + '/projections/',
+                prefix=prefix + '_%s_' % projection_method,
+                suffix='.png'
+            )
+
 
 

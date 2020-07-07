@@ -1443,7 +1443,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'decoder_append_seglen',
-        False,
+        True,
         bool,
         "Whether to append segment lengths to the inputs to the decoder.",
     ),
@@ -1644,13 +1644,13 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'minibatch_size',
-        128,
+        16,
         [int, None],
         "Size of minibatches to use for fitting (full-batch if ``None``)."
     ),
     Kwarg(
         'eval_minibatch_size',
-        100000,
+        64,
         [int, None],
         "Size of minibatches to use for prediction/evaluation (full-batch if ``None``)."
     ),

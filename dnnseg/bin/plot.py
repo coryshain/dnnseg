@@ -5,8 +5,7 @@ import pandas as pd
 import argparse
 
 from dnnseg.config import Config
-from dnnseg.data import project_matching_segments, compute_class_similarity
-from dnnseg.plot import plot_binary_unit_heatmap, plot_label_heatmap, plot_class_similarity, plot_projections
+from dnnseg.plot import run_classification_plots
 from dnnseg.util import stderr
 
 
@@ -80,62 +79,15 @@ if __name__ == '__main__':
                     segs = pd.read_csv(os.path.join(p['outdir'] + '/tables/', path), sep=' ')
 
                     for s in args.seg_types:
-                        stderr('    Plotting segment type: %s...\n' % s)
-                        gold_col = s + '_label'
-                        if gold_col in segs.columns and 'label' in segs.columns:
-                            embedding_cols = [x for x in segs.columns if is_embedding_dimension.match(x)]
-                            unique_classes = segs[gold_col].unique()
-                            unique_labels = segs['label'].unique()
-
-                            outdir = p['outdir'] + '/plots'
-                            prefix = path[:-4] + '_'
-                            if not os.path.exists(outdir):
-                                os.makedirs(outdir)
-
-                            if gold_col == 'phn_label' and 'IPA' in segs.columns:
-                                gold_col = 'IPA'
-
-                            if args.plot_types is None or 'unit_heatmap'.lower() in args.plot_types:
-                                stderr('      Plotting unit heatmap...\n')
-                                if len(embedding_cols) < class_limit and len(unique_classes) < class_limit:
-                                    plot_binary_unit_heatmap(
-                                        segs,
-                                        class_column_name=gold_col,
-                                        directory=outdir + '/classification/',
-                                        prefix=prefix,
-                                        suffix='.png')
-
-                            if args.plot_types is None or 'label_heatmap'.lower() in args.plot_types:
-                                if len(embedding_cols) < class_limit and len(unique_labels) < class_limit:
-                                    stderr('      Plotting label heatmap...\n')
-                                    plot_label_heatmap(
-                                        segs,
-                                        class_column_name=gold_col,
-                                        directory=outdir + '/classification/',
-                                        prefix=prefix,
-                                        suffix='.png')
-
-                            if args.plot_types is None or 'confusion_matrix'.lower() in args.plot_types:
-                                if len(unique_classes) < class_limit:
-                                    stderr('      Plotting confusion matrix...\n')
-                                    sim = compute_class_similarity(segs, class_column_name=gold_col)
-                                    plot_class_similarity(
-                                        sim,
-                                        directory=outdir + '/classification/',
-                                        prefix=prefix,
-                                    )
-
-                            if (args.plot_types is None or 'projection'.lower() in args.plot_types):
-                                stderr('      Plotting segment projections...\n')
-
-                                projections = project_matching_segments(segs, method=args.projection_method)
-
-                                plot_projections(
-                                    projections,
-                                    label_map=label_map,
-                                    feature_table=feature_table,
-                                    feature_names=feature_names,
-                                    directory=outdir + '/projections/',
-                                    prefix=prefix + '_%s_' % args.projection_method,
-                                    suffix='.png'
-                                )
+                        run_classification_plots(
+                            segs,
+                            s,
+                            plot_types=args.plot_types,
+                            class_limit=args.class_limit,
+                            projection_method=args.projection_method,
+                            label_map=label_map,
+                            feature_table=feature_table,
+                            feature_names=feature_names,
+                            outdir=os.path.join(p['outdir'] + '/tables/'),
+                            prefix=path[:-4]
+                        )

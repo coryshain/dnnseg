@@ -1170,6 +1170,7 @@ def get_padded_lags(X, n, backward=True, clip_feat=None):
 def cache_data(
         train_data=None,
         val_data=None,
+        other_data=None,
         streaming=False,
         max_len=None,
         window_len_bwd=1,
@@ -1188,48 +1189,21 @@ def cache_data(
         task='segmenter',
         data_type='acoustic'
 ):
-    if val_data is None:
-        val_data = train_data
-
+    datasets = []
     if train_data is not None:
-        if streaming:
-            if not val_data.cached('streaming'):
-                train_data.cache_streaming_data(
-                    'streaming',
-                    max_len,
-                    window_len_bwd,
-                    window_len_fwd,
-                    mask=segtype,
-                    input_normalization=data_normalization,
-                    target_normalization=data_normalization,
-                    reduction_axis=reduction_axis,
-                    use_normalization_mask=use_normalization_mask,
-                    predict_deltas=predict_deltas,
-                    target_bwd_resampling=resample_targets_bwd,
-                    target_fwd_resampling=resample_targets_fwd
-                )
-        else:
-            if not val_data.cached('utt'):
-                train_data.cache_utterance_data(
-                    'utt',
-                    segments=segtype,
-                    max_len=max_len,
-                    input_normalization=data_normalization,
-                    target_normalization=data_normalization,
-                    reduction_axis=reduction_axis,
-                    use_normalization_mask=use_normalization_mask,
-                    predict_deltas=predict_deltas,
-                    input_padding=input_padding,
-                    input_resampling=resample_inputs,
-                    target_padding=target_padding,
-                    target_resampling=resample_targets_bwd,
-                    reverse_targets=reverse_targets
-                )
-
+        datasets.append(train_data)
     if val_data is not None:
+        datasets.append(val_data)
+
+    if other_data is not None:
+        if not (isinstance(other_data, list) or isinstance(other_data, tuple)):
+            other_data = [other_data]
+        datasets += other_data
+
+    for dataset in datasets:
         if streaming:
-            if not val_data.cached('streaming'):
-                val_data.cache_streaming_data(
+            if not dataset.cached('streaming'):
+                dataset.cache_streaming_data(
                     'streaming',
                     max_len,
                     window_len_bwd,
@@ -1244,10 +1218,10 @@ def cache_data(
                     target_fwd_resampling=resample_targets_fwd
                 )
         else:
-            if not val_data.cached('utt'):
+            if not dataset.cached('utt'):
                 if task.lower() != 'classifier':
                     max_len = None
-                val_data.cache_utterance_data(
+                dataset.cache_utterance_data(
                     'utt',
                     segments=segtype,
                     max_len=max_len,
@@ -1262,14 +1236,29 @@ def cache_data(
                     target_resampling=resample_targets_bwd,
                     reverse_targets=reverse_targets
                 )
-        if task.lower() == 'segmenter' and not val_data.cached('files'):
-            val_data.cache_files_data(
+
+        if task.lower() == 'segmenter' and not dataset.cached('files'):
+            dataset.cache_files_data(
                 'files',
                 mask=segtype,
                 normalization=data_normalization,
                 reduction_axis=reduction_axis,
                 use_normalization_mask=use_normalization_mask
             )
+
+
+def segment_table_to_csv(df, verbose=False):
+    out = ''
+    gb = df.groupby('label')
+    n = len(df.label.unique())
+    for i, (c, x) in enumerate(gb):
+        if verbose and ((i==0) or ((i+1) % 1000 == 0) or (i == n - 1)):
+            sys.stderr.write('\r  Processing class %d/%d       ' % (i+1, n))
+        out += 'Class %s\n' % c
+        out += '\n'.join(x[['fileID', 'start', 'end']].astype(str).agg(' '.join, axis=1).to_list())
+        out += '\n\n'
+
+    return out
 
 
 class Dataset(object):
