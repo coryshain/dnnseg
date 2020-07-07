@@ -1008,7 +1008,6 @@ HMLSTM_RETURN_SIGNATURE = [
     'features',
     'features_prob',
     'embedding',
-    'features_target',
     'features_by_seg',
     'feature_deltas',
     'z_prob',
@@ -2087,7 +2086,6 @@ class HMLSTMCell(LayerRNNCell):
 
                     # Previous features
                     features_behind = layer.features
-                    features_target_behind = layer.features_target
                     features_prob_behind = layer.features_prob
 
                     # h_above: Hidden state of layer above at previous timestep (implicitly 0 if final layer)
@@ -2386,28 +2384,13 @@ class HMLSTMCell(LayerRNNCell):
                             features = features_prob
                             features_clean = features_prob
 
-                    if False and self._state_noise_level or self._feature_noise_level or self._boundary_noise_level:
-                        if self._state_discretizer and l < (self._num_layers - 1 + self._discretize_final):
-                            features_target = features_discrete_clean
-                        else:
-                            features_target = features_clean
-                    else:
-                        if self._state_discretizer and l < (self._num_layers - 1 + self._discretize_final):
-                            features_target = features_discrete
-                        else:
-                            features_target = features
-
                     if self._num_features[l]:
                         if self._forget_at_boundary:
                             features = copy_prob * features_behind + (1 - copy_prob) * features
                             features_prob = copy_prob * features_prob_behind + (1 - copy_prob) * features_prob
-                            features_target = copy_prob * features_target_behind + (1 - copy_prob) * features_target
                         else: # Copy just depends on bottom-up boundary probs
                             features = (1 - z_below_cur) * features_behind + z_below_cur * features
                             features_prob = (1 - z_below_cur) * features_prob_behind + z_below_cur * features_prob
-                            features_target = (1 - z_below_cur) * features_target_behind + z_below_cur * features_target
-                    else:
-                        features_target = features
 
                     embedding = self._kernel_embedding[l](features)
 
@@ -2525,7 +2508,7 @@ class HMLSTMCell(LayerRNNCell):
                         if l == 0:
                             feats = input_feats
                         else:
-                            feats = state[l-1].features_target
+                            feats = state[l-1].features
 
                         cond = tf.squeeze(u > 0, axis=-1)
 
@@ -2561,7 +2544,6 @@ class HMLSTMCell(LayerRNNCell):
                         'h': h,
                         'features': features,
                         'features_prob': features_prob,
-                        'features_target': features_target,
                         'features_by_seg': features_by_seg,
                         'feature_deltas': feature_deltas,
                         'embedding': embedding,
@@ -2647,7 +2629,7 @@ class HMLSTMCell(LayerRNNCell):
 
                     for name in HMLSTM_RETURN_SIGNATURE:
                         include = False
-                        if name in ['c', 'h', 'features', 'features_prob', 'embedding', 'features_target', 'cell_proposal']:
+                        if name in ['c', 'h', 'features', 'features_prob', 'embedding', 'cell_proposal']:
                             include = True
                         elif name in ['z', 'z_prob'] and l < self._num_layers - 1:
                             include = True
@@ -3068,14 +3050,6 @@ class HMLSTMOutput(object):
             out = self.l[level].embedding_vectors(mask=mask)
 
         return out
-
-    def feature_vectors_target(self, level=None, mask=None):
-        if level is None:
-            out = tuple([l.feature_vectors_target(mask=mask) for l in self.l])
-        else:
-            out = self.l[level].feature_vectors_target(mask=mask)
-
-        return out
     
     def feature_vectors_by_seg(self, level=None, mask=None):
         if level is None:
@@ -3212,18 +3186,6 @@ class HMLSTMOutputLevel(object):
         with self.session.as_default():
             with self.session.graph.as_default():
                 out = self.embedding
-
-                if mask is not None:
-                    while len(mask.shape) < len(out.shape):
-                        mask = mask[..., None]
-                    out = out * mask
-
-                return out
-
-    def feature_vectors_target(self, mask=None):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                out = self.features_target
 
                 if mask is not None:
                     while len(mask.shape) < len(out.shape):

@@ -980,11 +980,18 @@ class DNNSeg(object):
                 if self.predict_forward:
                     self.loss_prediction_summary = tf.placeholder(tf.float32, name='loss_prediction_summary_placeholder')
                 if self.lm_loss_scale:
-                    self.encoder_lm_loss_summary = []
-                    for l in range(self.layers_encoder):
-                        self.encoder_lm_loss_summary.append(
-                            tf.placeholder(tf.float32, name='encoder_lm_loss_%d_summary_placeholder' % (l+1))
-                        )
+                    if self.lm_order_bwd:
+                        self.encoder_lm_loss_bwd_summary = []
+                        for l in range(self.layers_encoder):
+                            self.encoder_lm_loss_bwd_summary.append(
+                                tf.placeholder(tf.float32, name='encoder_lm_loss_bwd_%d_summary_placeholder' % (l+1))
+                            )
+                    if self.lm_order_fwd:
+                        self.encoder_lm_loss_fwd_summary = []
+                        for l in range(self.layers_encoder):
+                            self.encoder_lm_loss_fwd_summary.append(
+                                tf.placeholder(tf.float32, name='encoder_lm_loss_fwd_%d_summary_placeholder' % (l+1))
+                            )
                 if self.speaker_adversarial_gradient_scale:
                     self.encoder_speaker_adversarial_loss_summary = []
                     for l in range(self.layers_encoder - 1):
@@ -1392,19 +1399,16 @@ class DNNSeg(object):
                     encoder_features_by_seg_tmp = self.segmenter_output.feature_vectors_by_seg(mask=self.X_mask)
                     encoder_feature_deltas_tmp = self.segmenter_output.feature_delta_vectors(mask=self.X_mask)
                     encoder_embeddings_tmp = self.segmenter_output.embedding_vectors(mask=self.X_mask)
-                    encoder_feature_targets_tmp = self.segmenter_output.feature_vectors_target(mask=self.X_mask)
                     encoder_states = [x * self.X_mask[..., None] for x in encoder_states_tmp]
                     encoder_cell_states = [x * self.X_mask[..., None] for x in encoder_cell_states_tmp]
                     if self.xent_state_predictions:
                         encoder_features = []
                         encoder_embeddings = []
-                        encoder_feature_targets = []
                         encoder_features_by_seg = []
                         encoder_feature_deltas = []
                         for l in range(self.layers_encoder):
                             encoder_features_cur = encoder_features_tmp[l]
                             encoder_embeddings_cur = encoder_embeddings_tmp[l]
-                            encoder_feature_targets_cur = encoder_feature_targets_tmp[l]
                             if l < self.layers_encoder - 1:
                                 encoder_features_by_seg_cur = encoder_features_by_seg_tmp[l]
                                 encoder_feature_deltas_cur = encoder_feature_deltas_tmp[l]
@@ -1415,26 +1419,22 @@ class DNNSeg(object):
                                     activation = self.encoder_inner_activation
                                 if activation == 'tanh':
                                     encoder_features_cur = ((encoder_features_cur + 1) / 2)
-                                    encoder_feature_targets_cur = (encoder_feature_targets_cur + 1) / 2
                                     if l < self.layers_encoder - 1:
                                         encoder_features_by_seg_cur = (encoder_features_by_seg_cur + 1) / 2
                                         encoder_feature_deltas_cur = (encoder_feature_deltas_cur + 1) / 2
                             encoder_features_cur *= self.X_mask[..., None]
                             encoder_embeddings_cur *= self.X_mask[..., None]
-                            encoder_feature_targets_cur *= self.X_mask[..., None]
                             if l < self.layers_encoder - 1:
                                 encoder_features_by_seg_cur *= self.X_mask[..., None]
                                 encoder_feature_deltas_cur *= self.X_mask[..., None]
                             encoder_features.append(encoder_features_cur)
                             encoder_embeddings.append(encoder_embeddings_cur)
-                            encoder_feature_targets.append(encoder_feature_targets_cur)
                             if l < self.layers_encoder - 1:
                                 encoder_features_by_seg.append(encoder_features_by_seg_cur)
                                 encoder_feature_deltas.append(encoder_feature_deltas_cur)
                     else:
                         encoder_features = [x * self.X_mask[..., None] for x in encoder_features_tmp]
                         encoder_embeddings = [x * self.X_mask[..., None] for x in encoder_embeddings_tmp]
-                        encoder_feature_targets = [x * self.X_mask[..., None] for x in encoder_feature_targets_tmp]
                         encoder_features_by_seg = [x * self.X_mask[..., None] for x in encoder_features_by_seg_tmp]
                         encoder_feature_deltas = [x * self.X_mask[..., None] for x in encoder_feature_deltas_tmp]
 
@@ -1442,7 +1442,6 @@ class DNNSeg(object):
                     self.encoder_states = encoder_states
                     self.encoder_features = encoder_features
                     self.encoder_embeddings = encoder_embeddings
-                    self.encoder_feature_targets = encoder_feature_targets
                     self.encoder_features_by_seg = encoder_features_by_seg
                     self.encoder_feature_deltas = encoder_feature_deltas
                     self.encoder_states_tmp = []
@@ -1758,7 +1757,7 @@ class DNNSeg(object):
                     if l == 0:
                         lm_targets_cur = self.X
                     else:
-                        lm_targets_cur = self.encoder_feature_targets[l - 1]
+                        lm_targets_cur = self.encoder_features[l - 1]
 
                     # if l > 0 and self.encoder_state_discretizer and self.encoder_discretize_state_at_boundary:
                     #     lm_targets_cur = tf.round(lm_targets_cur)
@@ -1980,7 +1979,7 @@ class DNNSeg(object):
                             else:
                                 mask_cur = self.X_mask
 
-                            targets_cur = self.encoder_feature_targets[l - 1]
+                            targets_cur = self.encoder_features[l - 1]
 
                             # if l > 0:
                             #     targets_cur = tf.Print(targets_cur, ['l%d' % l, targets_cur], summarize=100)
@@ -2184,7 +2183,7 @@ class DNNSeg(object):
 
                                 # Compute backward and forward values
                                 if self.decoder_encode_keys and l < self.layers_encoder - 1:
-                                    encoder_in = self.encoder_feature_targets[l]
+                                    encoder_in = self.encoder_features[l]
                                     key_encoder = MaskedLSTMLayer(
                                         training=self.training,
                                         units=self.units_encoder[l],
@@ -2452,6 +2451,8 @@ class DNNSeg(object):
                                 passthru_neurons = tf.boolean_mask(self.passthru_neurons[l], mask_cur)
                             else:
                                 passthru_neurons = None
+                            if self.decoder_append_seglen and l < self.layers_encoder - 1:
+                                seglen = tf.boolean_mask(self.segment_lengths[l], mask_cur)
 
                             hidden_units = {}
                             output_units = {}
@@ -2466,6 +2467,8 @@ class DNNSeg(object):
                                     #     in_cur.append(passthru_neurons)
                                 if self.n_passthru_neurons:
                                     in_cur.append(passthru_neurons)
+                                if self.decoder_append_seglen and l < self.layers_encoder - 1:
+                                    in_cur.append(seglen)
                                 if len(in_cur) > 1:
                                     in_cur = tf.concat(in_cur, axis=-1)
                                 else:
@@ -3295,7 +3298,10 @@ class DNNSeg(object):
                             tf.summary.scalar('objective/correspondence_loss_l%d' % (l+1), self.correspondence_loss_summary[l], collections=['objective'])
                 if self.lm_loss_scale:
                     for l in range(self.layers_encoder):
-                        tf.summary.scalar('objective/encoder_lm_loss_l%d' % (l+1), self.encoder_lm_loss_summary[l], collections=['objective'])
+                        if self.lm_order_bwd:
+                            tf.summary.scalar('objective/encoder_lm_loss_bwd_l%d' % (l+1), self.encoder_lm_loss_bwd_summary[l], collections=['objective'])
+                        if self.lm_order_fwd:
+                            tf.summary.scalar('objective/encoder_lm_loss_fwd_l%d' % (l+1), self.encoder_lm_loss_fwd_summary[l], collections=['objective'])
                 if self.speaker_adversarial_gradient_scale:
                     for l in range(self.layers_encoder - 1):
                         tf.summary.scalar('objective/speaker_adversarial_loss_l%d' % (l+1), self.encoder_speaker_adversarial_loss_summary[l], collections=['objective'])
@@ -4542,7 +4548,20 @@ class DNNSeg(object):
                 for op in self.check_numerics_ops:
                     self.sess.run(op)
 
-    def run_train_step(self, feed_dict, return_losses=True, return_reconstructions=False, return_labels=False):
+    def run_train_step(
+            self,
+            feed_dict,
+            return_loss=True,
+            return_regularizer_loss=True,
+            return_segmentation_rate=True,
+            return_reconstructions=False,
+            return_labels=False,
+            return_label_probs=False,
+            return_encoding_entropy=False,
+            return_segmentation_probs=False,
+            verbose=True,
+            update=True
+    ):
         return NotImplementedError
 
     def classify_utterances(
@@ -5014,7 +5033,7 @@ class DNNSeg(object):
                                 [
                                     self.segmentation_probs,
                                     self.segmentations,
-                                    self.encoder_feature_targets
+                                    self.encoder_features
                                 ],
                                 feed_dict=fd_minibatch
                             )
@@ -5096,6 +5115,7 @@ class DNNSeg(object):
     def get_segmentation_eval(
             self,
             data,
+            data_name='val',
             segtype=None,
             padding=None,
             segmentations=None,
@@ -5256,12 +5276,12 @@ class DNNSeg(object):
                 os.makedirs(outdir + '/tables/')
             for l in range(self.layers_encoder - 1):
                 pred_tables[l].to_csv(
-                    outdir + '/tables/embeddings_pred_segs_l%d.csv' % l,
+                    outdir + '/tables/embeddings_pred_segs_%s_l%d.csv' % (data_name, l),
                     sep=' ',
                     index=False
                 )
                 wrd_tables[l].to_csv(
-                    outdir + '/tables/embeddings_gold_wrd_segs_l%d.csv' % l,
+                    outdir + '/tables/embeddings_gold_wrd_segs_%s_l%d.csv' % (data_name, l),
                     sep=' ',
                     index=False
                 )
@@ -5271,14 +5291,14 @@ class DNNSeg(object):
                     tol=0.02
                 )
                 matched_wrd.to_csv(
-                    outdir + '/tables/embeddings_matched_wrd_segs_l%d.csv' % l,
+                    outdir + '/tables/embeddings_matched_wrd_segs_%s_l%d.csv' % (data_name, l),
                     sep=' ',
                     index=False
                 )
 
                 if self.data_type.lower() == 'acoustic':
                     phn_tables[l].to_csv(
-                        outdir + '/tables/embeddings_gold_phn_segs_l%d.csv' % l, sep=' ',
+                        outdir + '/tables/embeddings_gold_phn_segs_%s_l%d.csv' % (data_name, l), sep=' ',
                         index=False
                     )
                     matched_phn = data.extract_matching_segment_embeddings(
@@ -5288,7 +5308,7 @@ class DNNSeg(object):
                     )
                     matched_phn.rename(columns={'label': 'phn_label'}, inplace=True)
                     matched_phn.to_csv(
-                        outdir + '/tables/embeddings_matched_phn_segs_l%d.csv' % l,
+                        outdir + '/tables/embeddings_matched_phn_segs_%s_l%d.csv' % (data_name, l),
                         sep=' ',
                         index=False
                     )
@@ -5298,6 +5318,7 @@ class DNNSeg(object):
     def evaluate_segmenter(
             self,
             data,
+            data_name='val',
             whole_file=True,
             segtype=None,
             random_baseline=True,
@@ -5338,6 +5359,7 @@ class DNNSeg(object):
 
             scores, pred_tables, phn_tables, wrd_tables, summary = self.get_segmentation_eval(
                 data,
+                data_name=data_name,
                 segtype=segtype,
                 padding=padding,
                 segmentations=segmentations,
@@ -5500,7 +5522,8 @@ class DNNSeg(object):
             reconstruction_loss=None,
             prediction_loss=None,
             correspondence_loss=None,
-            encoder_lm_losses=None,
+            encoder_lm_losses_bwd=None,
+            encoder_lm_losses_fwd=None,
             encoder_speaker_adversarial_losses=None,
             encoder_passthru_adversarial_losses=None,
             random_baseline=True,
@@ -5563,9 +5586,13 @@ class DNNSeg(object):
                                 if self.correspondence_loss_scale[l]:
                                     fd_summary[self.correspondence_loss_summary[l]] = correspondence_loss[l]
 
-                        if encoder_lm_losses is not None:
+                        if encoder_lm_losses_bwd is not None:
                             for l in range(self.layers_encoder):
-                                fd_summary[self.encoder_lm_loss_summary[l]] = encoder_lm_losses[l]
+                                fd_summary[self.encoder_lm_loss_bwd_summary[l]] = encoder_lm_losses_bwd[l]
+
+                        if encoder_lm_losses_fwd is not None:
+                            for l in range(self.layers_encoder):
+                                fd_summary[self.encoder_lm_loss_fwd_summary[l]] = encoder_lm_losses_fwd[l]
 
                         if encoder_speaker_adversarial_losses is not None:
                             for l in range(self.layers_encoder - 1):
@@ -5649,6 +5676,455 @@ class DNNSeg(object):
                         stderr('Numerics check failed. Aborting and reloading from previous checkpoint...\n')
                     self.load()
 
+    def run_train_iter(
+            self,
+            data_feed,
+            val_data=None,
+            ix2label=None,
+            n_plot=10,
+            verbose=True,
+            update=True
+    ):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                loss_total = 0.
+                reg_total = 0.
+                seg_rate_total = [0.] * (self.layers_encoder - 1)
+                if not self.streaming or self.predict_backward:
+                    reconstruction_loss_total = 0.
+                if self.streaming and self.predict_forward:
+                    prediction_loss_total = 0.
+                correspondence_loss_total = [0.] * (self.layers_encoder - 1)
+                if self.lm_loss_scale:
+                    if self.lm_order_bwd:
+                        encoder_lm_loss_bwd_total = [0.] * self.layers_encoder
+                    if self.lm_order_fwd:
+                        encoder_lm_loss_fwd_total = [0.] * self.layers_encoder
+                if self.speaker_adversarial_gradient_scale:
+                    encoder_speaker_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
+                if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
+                    encoder_passthru_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
+
+                i_pb_base = 0
+
+                for i, batch in enumerate(data_feed):
+                    if i == 0 and verbose:
+                        n_minibatch = batch['n_minibatch']
+
+                        if self.streaming:
+                            if self.eval_freq:
+                                eval_freq = self.eval_freq
+                            else:
+                                eval_freq = np.inf
+                            if self.save_freq:
+                                save_freq = self.save_freq
+                            else:
+                                save_freq = np.inf
+                            if self.log_freq:
+                                log_freq = self.log_freq
+                            else:
+                                log_freq = np.inf
+
+                            n_pb = min(n_minibatch, eval_freq, save_freq, log_freq)
+                        else:
+                            n_pb = n_minibatch
+
+                        t0_iter = time.time()
+                        stderr('-' * 50 + '\n')
+
+                        if update:
+                            stderr('Iteration %d\n' % int(self.global_step.eval(session=self.sess) + 1))
+                            stderr('\n')
+
+                        if self.streaming:
+                            if n_pb > 1:
+                                stderr('Running minibatches %d-%d (out of %d)...\n' % (1, n_pb, n_minibatch))
+                            else:
+                                stderr('Running minibatch %d (out of %d)...\n' % (n_pb, n_minibatch))
+                        else:
+                            stderr('Running minibatch updates...\n')
+
+                        if update:
+                            stderr('Update mode: %s\n' % self.get_update_mode())
+
+                            if self.n_pretrain_steps and (self.step.eval(session=self.sess) <= self.n_pretrain_steps):
+                                stderr('Pretraining decoder...\n')
+
+                            if self.optim_name is not None and self.print_learning_rate:
+                                stderr('Learning rate: %s\n' % self.lr.eval(session=self.sess))
+
+                        if self.curriculum_t is not None:
+                            if self.curriculum_type.lower() == 'hard':
+                                stderr('Curriculum window length: %s\n' % self.curriculum_t.eval(session=self.sess))
+                            elif self.curriculum_type.lower() == 'exp':
+                                stderr('Curriculum decay rate: %s\n' % (
+                                        1. / self.curriculum_t.eval(session=self.sess)))
+                            else:
+                                stderr('Curriculum window soft bound location: %s\n' % self.curriculum_t.eval(
+                                    session=self.sess))
+
+                        if self.boundary_slope_annealing_rate:
+                            sys.stderr.write(
+                                'Boundary slope annealing coefficient: %s\n' % self.boundary_slope_coef.eval(
+                                    session=self.sess))
+
+                        if self.state_slope_annealing_rate:
+                            sys.stderr.write('State slope annealing coefficient: %s\n' % self.state_slope_coef.eval(
+                                session=self.sess))
+
+                        pb = tf.contrib.keras.utils.Progbar(n_pb)
+
+                    if self.streaming:
+                        X_batch = batch['X']
+                        X_mask_batch = batch['X_mask']
+                        y_bwd_batch = batch['y_bwd']
+                        y_bwd_mask_batch = batch['y_bwd_mask']
+                        y_fwd_batch = batch['y_fwd']
+                        y_fwd_mask_batch = batch['y_fwd_mask']
+                        speaker_batch = batch['speaker']
+                        fixed_boundaries_batch = batch['fixed_boundaries']
+                        if self.oracle_boundaries:
+                            oracle_boundaries_batch = self.get_oracle_boundaries(batch)
+
+                        if self.min_len:
+                            minibatch_num = self.global_batch_step.eval(self.sess)
+                            n_steps = X_batch.shape[1]
+                            start_ix = max(0, n_steps - (
+                                        self.min_len + int(math.floor(minibatch_num / self.curriculum_steps))))
+
+                            X_batch = X_batch[:, start_ix:]
+                            X_mask_batch = X_mask_batch[:, start_ix:]
+                            if self.oracle_boundaries:
+                                oracle_boundaries_batch = oracle_boundaries_batch[:, start_ix:]
+                            if fixed_boundaries_batch is not None:
+                                fixed_boundaries_batch = fixed_boundaries_batch[:, start_ix:]
+
+                        i_pb = i - i_pb_base
+                    else:
+                        X_batch = batch['X']
+                        X_mask_batch = batch['X_mask']
+                        y_bwd_batch = batch['y']
+                        y_bwd_mask_batch = batch['y_mask']
+                        speaker_batch = batch['speaker']
+                        fixed_boundaries_batch = batch['fixed_boundaries']
+                        if self.oracle_boundaries:
+                            oracle_boundaries_batch = self.get_oracle_boundaries(batch)
+                        i_pb = i
+
+                    fd_minibatch = {
+                        self.X: X_batch,
+                        self.X_mask: X_mask_batch
+                    }
+
+                    if self.data_type.lower() == 'acoustic':
+                        fd_minibatch[self.speaker] = speaker_batch
+
+                    if not self.streaming or self.predict_backward:
+                        fd_minibatch[self.y_bwd] = y_bwd_batch
+                        fd_minibatch[self.y_bwd_mask] = y_bwd_mask_batch
+                    if self.streaming and self.predict_forward:
+                        fd_minibatch[self.y_fwd] = y_fwd_batch
+                        fd_minibatch[self.y_fwd_mask] = y_fwd_mask_batch
+
+                    if self.oracle_boundaries:
+                        fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
+                    if fixed_boundaries_batch is not None:
+                        fd_minibatch[self.fixed_boundaries_placeholder] = fixed_boundaries_batch
+
+                    info_dict = self.run_train_step(fd_minibatch, update=update)
+                    loss_cur = info_dict['loss']
+                    reg_cur = info_dict['regularizer_loss']
+                    seg_rate_cur = [info_dict['seg_rate_l%d' % l] if 'seg_rate_l%d' % l in info_dict else 0. for l in
+                                    range(self.layers_encoder - 1)]
+                    if not self.streaming or self.predict_backward:
+                        reconstruction_loss_cur = info_dict['reconstruction_loss']
+                    if self.streaming and self.predict_forward:
+                        prediction_loss_cur = info_dict['prediction_loss']
+                    if self.use_correspondence_loss:
+                        correspondence_loss_cur = [info_dict[
+                                                       'correspondence_loss_l%d' % l] if 'correspondence_loss_l%d' % l in info_dict else 0.
+                                                   for l in range(self.layers_encoder - 1)]
+                    if self.lm_loss_scale:
+                        if self.lm_order_bwd:
+                            encoder_lm_loss_bwd_cur = [info_dict['encoder_lm_loss_bwd_l%d' % l] for l in
+                                                       range(self.layers_encoder)]
+                        if self.lm_order_fwd:
+                            encoder_lm_loss_fwd_cur = [info_dict['encoder_lm_loss_fwd_l%d' % l] for l in
+                                                       range(self.layers_encoder)]
+                    if self.speaker_adversarial_gradient_scale:
+                        encoder_speaker_adversarial_loss_cur = [info_dict['encoder_speaker_adversarial_loss_l%d' % l]
+                                                                for l in range(self.layers_encoder - 1)]
+                    if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
+                        encoder_passthru_adversarial_loss_cur = [info_dict['encoder_passthru_adversarial_loss_l%d' % l]
+                                                                 for l in range(self.layers_encoder - 1)]
+
+                    if self.ema_decay:
+                        self.sess.run(self.ema_op)
+                    if not np.isfinite(loss_cur):
+                        loss_cur = 0
+                    loss_total += loss_cur
+                    reg_total += reg_cur
+                    for l in range(len(seg_rate_total)):
+                        seg_rate_total[l] += seg_rate_cur[l]
+                    if not self.streaming or self.predict_backward:
+                        reconstruction_loss_total += reconstruction_loss_cur
+                    if self.streaming and self.predict_forward:
+                        prediction_loss_total += prediction_loss_cur
+                    if self.use_correspondence_loss:
+                        for l in range(len(correspondence_loss_total)):
+                            correspondence_loss_total[l] = correspondence_loss_total[l] + correspondence_loss_cur[l]
+                    if self.lm_loss_scale:
+                        for l in range(self.layers_encoder):
+                            if self.lm_order_bwd:
+                                encoder_lm_loss_bwd_total[l] = encoder_lm_loss_bwd_total[l] + encoder_lm_loss_bwd_cur[l]
+                            if self.lm_order_fwd:
+                                encoder_lm_loss_fwd_total[l] = encoder_lm_loss_fwd_total[l] + encoder_lm_loss_fwd_cur[l]
+                    if self.speaker_adversarial_gradient_scale:
+                        for l in range(self.layers_encoder - 1):
+                            encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] + \
+                                                                        encoder_speaker_adversarial_loss_cur[l]
+                    if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
+                        for l in range(self.layers_encoder - 1):
+                            encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] + \
+                                                                         encoder_passthru_adversarial_loss_cur[l]
+
+                    if verbose:
+                        pb_update_vector = [('loss', loss_cur), ('reg', reg_cur)]
+                        for l in range(self.layers_encoder - 1):
+                            pb_update_vector.append(('rate L%d' % (l + 1), seg_rate_cur[l]))
+                        if self.use_jtps:
+                            pb_update_vector.append(('l', info_dict['jtps_lambda_mean']))
+                        pb.update(i_pb + 1, values=pb_update_vector)
+
+                    self.check_numerics()
+
+                    if self.streaming and update:
+                        evaluate = (self.eval_freq > 0) \
+                                   and ((i + 1) % self.eval_freq == 0) \
+                                   and (self.step.eval(session=self.sess) > self.n_pretrain_steps)
+                        save = evaluate or ((self.save_freq > 0) and ((i + 1) % self.save_freq == 0))
+                        log = (self.log_freq > 0) and ((i + 1) % self.log_freq == 0)
+                        n_plot_cur = n_plot if log else None
+                        verbose_cur = verbose and evaluate
+
+                        self.run_checkpoint(
+                            val_data,
+                            save=save,
+                            log=log,
+                            evaluate=evaluate,
+                            n_plot=n_plot_cur,
+                            loss=loss_total / (i_pb + 1),
+                            reg_loss=reg_total / (i_pb + 1),
+                            seg_rate=[x / (i_pb + 1) for x in seg_rate_total],
+                            reconstruction_loss=reconstruction_loss_total / (i_pb + 1) if (
+                                        not self.streaming or self.predict_backward) else None,
+                            prediction_loss=prediction_loss_total / (i_pb + 1) if (
+                                        self.streaming and self.predict_forward) else None,
+                            correspondence_loss=[x / (i_pb + 1) for x in
+                                                 correspondence_loss_total] if self.use_correspondence_loss else None,
+                            encoder_lm_losses_bwd=[x / (i_pb + 1) for x in encoder_lm_loss_bwd_total] if (
+                                        self.lm_loss_scale and self.lm_order_bwd) else None,
+                            encoder_lm_losses_fwd=[x / (i_pb + 1) for x in encoder_lm_loss_fwd_total] if (
+                                        self.lm_loss_scale and self.lm_order_fwd) else None,
+                            encoder_speaker_adversarial_losses=[x / (i_pb + 1) for x in
+                                                                encoder_speaker_adversarial_loss_total] if self.speaker_adversarial_gradient_scale else None,
+                            encoder_passthru_adversarial_losses=[x / (i_pb + 1) for x in
+                                                                 encoder_passthru_adversarial_loss_total] if self.passthru_adversarial_gradient_scale else None,
+                            ix2label=ix2label,
+                            check_numerics=False,
+                            verbose=verbose_cur
+                        )
+
+                        self.set_update_mode(verbose=False)
+
+                        if self.streaming and (save or evaluate or log):
+                            if verbose:
+                                if save:
+                                    next_save = self.save_freq
+                                elif self.save_freq:
+                                    next_save = self.save_freq - ((i + 1) % self.save_freq)
+                                else:
+                                    next_save = np.inf
+
+                                if log:
+                                    next_log = self.log_freq
+                                elif self.log_freq:
+                                    next_log = self.log_freq - ((i + 1) % self.log_freq)
+                                else:
+                                    next_log = np.inf
+
+                                if evaluate:
+                                    next_evaluate = self.eval_freq
+                                elif self.eval_freq:
+                                    next_evaluate = self.eval_freq - ((i + 1) % self.eval_freq)
+                                else:
+                                    next_evaluate = np.inf
+
+                                n_pb = min(
+                                    n_minibatch - (i + 1),
+                                    next_save,
+                                    next_log,
+                                    next_evaluate
+                                )
+
+                                if n_pb > 1:
+                                    sys.stderr.write('Running minibatches %d-%d (out of %d)...\n' % (
+                                    i + 2, i + 1 + n_pb, n_minibatch))
+                                else:
+                                    sys.stderr.write(
+                                        'Running minibatch %d (out of %d)...\n' % (i + 1 + n_pb, n_minibatch))
+
+                                stderr('Update mode: %s\n' % self.get_update_mode())
+
+                                if self.optim_name is not None and self.print_learning_rate:
+                                    sys.stderr.write('Learning rate: %s\n' % self.lr.eval(session=self.sess))
+
+                                if self.curriculum_type:
+                                    if self.curriculum_type.lower() == 'hard':
+                                        sys.stderr.write('Curriculum window length: %s\n' % self.curriculum_t.eval(
+                                            session=self.sess))
+                                    if self.curriculum_type.lower() == 'exp':
+                                        sys.stderr.write('Curriculum decay rate: %s\n' % (
+                                                    1. / self.curriculum_t.eval(session=self.sess)))
+                                    else:
+                                        sys.stderr.write(
+                                            'Curriculum window soft bound location: %s\n' % self.curriculum_t.eval(
+                                                session=self.sess))
+
+                                if self.boundary_slope_annealing_rate:
+                                    sys.stderr.write(
+                                        'Boundary slope annealing coefficient: %s\n' % self.boundary_slope_coef.eval(
+                                            session=self.sess))
+
+                                if self.state_slope_annealing_rate:
+                                    sys.stderr.write(
+                                        'State slope annealing coefficient: %s\n' % self.state_slope_coef.eval(
+                                            session=self.sess))
+
+                                if self.n_pretrain_steps and (
+                                        self.step.eval(session=self.sess) <= self.n_pretrain_steps):
+                                    sys.stderr.write('Pretraining decoder...\n')
+
+                                pb = tf.contrib.keras.utils.Progbar(n_pb)
+
+                            loss_total = 0.
+                            reg_total = 0.
+                            seg_rate_total = [0.] * (self.layers_encoder - 1)
+                            if not self.streaming or self.predict_backward:
+                                reconstruction_loss_total = 0.
+                            if self.streaming and self.predict_forward:
+                                prediction_loss_total = 0.
+                            if self.use_correspondence_loss:
+                                correspondence_loss_total = [0.] * (self.layers_encoder - 1)
+                            if self.lm_loss_scale:
+                                if self.lm_order_bwd:
+                                    encoder_lm_loss_bwd_total = [0.] * self.layers_encoder
+                                if self.lm_order_fwd:
+                                    encoder_lm_loss_fwd_total = [0.] * self.layers_encoder
+                            if self.speaker_adversarial_gradient_scale:
+                                encoder_speaker_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
+                            if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
+                                encoder_passthru_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
+                            i_pb_base = i + 1
+
+                out_dict = {}
+                loss_total /= (i + 1)
+                out_dict['loss'] = loss_total
+                reg_total /= (i + 1)
+                out_dict['reg'] = reg_total
+                for l in range(len(seg_rate_total)):
+                    seg_rate_total[l] = seg_rate_total[l] / (i + 1)
+                out_dict['seg_rate'] = seg_rate_total
+                if not self.streaming or self.predict_backward:
+                    reconstruction_loss_total /= (i + 1)
+                    out_dict['reconstruction_loss'] = reconstruction_loss_total
+                if self.streaming and self.predict_forward:
+                    prediction_loss_total /= (i + 1)
+                    out_dict['prediction_loss'] = prediction_loss_total
+                for l in range(len(correspondence_loss_total)):
+                    correspondence_loss_total[l] = correspondence_loss_total[l] / (i + 1)
+                out_dict['correspondence_loss'] = correspondence_loss_total
+                if self.lm_loss_scale:
+                    for l in range(self.layers_encoder):
+                        if self.lm_order_bwd:
+                            encoder_lm_loss_bwd_total[l] = encoder_lm_loss_bwd_total[l] / (i + 1)
+                        if self.lm_order_fwd:
+                            encoder_lm_loss_fwd_total[l] = encoder_lm_loss_fwd_total[l] / (i + 1)
+                    out_dict['lm_loss_bwd'] = encoder_lm_loss_bwd_total
+                    out_dict['lm_loss_fwd'] = encoder_lm_loss_fwd_total
+                if self.speaker_adversarial_gradient_scale:
+                    for l in range(self.layers_encoder - 1):
+                        encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] / (i + 1)
+                    out_dict['speaker_adversarial_loss'] = encoder_speaker_adversarial_loss_total
+                if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
+                    for l in range(self.layers_encoder - 1):
+                        encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] / (i + 1)
+                    out_dict['passthru_adversarial_loss'] = encoder_passthru_adversarial_loss_total
+
+                if update:
+                    self.sess.run(self.incr_global_step)
+
+                    if self.streaming:
+                        save = True
+                        s = self.global_step.eval(session=self.sess)
+                        if self.incremental_eval and s % 1 == 0 and s >= self.n_pretrain_steps:
+                            evaluate = True
+                        else:
+                            evaluate = False
+                        n_plot_cur = n_plot
+                        log = True
+
+                        if self.eval_freq:
+                            eval_freq = self.eval_freq
+                        else:
+                            eval_freq = np.inf
+                        if self.save_freq:
+                            save_freq = self.save_freq
+                        else:
+                            save_freq = np.inf
+                        if self.log_freq:
+                            log_freq = self.log_freq
+                        else:
+                            log_freq = np.inf
+
+                    else:
+                        step = self.step.eval(session=self.sess)
+                        save = self.save_freq > 0 and step % self.save_freq == 0
+                        evaluate = self.eval_freq and step % self.eval_freq == 0
+                        log = self.log_freq and step % self.log_freq == 0
+                        n_plot_cur = n_plot if save else None
+
+                    self.run_checkpoint(
+                        val_data,
+                        save=save,
+                        evaluate=evaluate,
+                        log=log,
+                        loss=loss_total,
+                        reg_loss=reg_total,
+                        seg_rate=seg_rate_total,
+                        reconstruction_loss=reconstruction_loss_total if (
+                                    not self.streaming or self.predict_backward) else None,
+                        prediction_loss=prediction_loss_total if (self.streaming and self.predict_forward) else None,
+                        correspondence_loss=correspondence_loss_total,
+                        encoder_lm_losses_bwd=encoder_lm_loss_bwd_total if (
+                                    self.lm_loss_scale and self.lm_order_bwd) else None,
+                        encoder_lm_losses_fwd=encoder_lm_loss_fwd_total if (
+                                    self.lm_loss_scale and self.lm_order_fwd) else None,
+                        encoder_speaker_adversarial_losses=encoder_speaker_adversarial_loss_total if self.speaker_adversarial_gradient_scale else None,
+                        encoder_passthru_adversarial_losses=encoder_passthru_adversarial_loss_total if self.passthru_adversarial_gradient_scale else None,
+                        ix2label=ix2label,
+                        n_plot=n_plot_cur,
+                        verbose=verbose
+                    )
+
+                if verbose:
+                    t1_iter = time.time()
+                    time_str = pretty_print_seconds(t1_iter - t0_iter)
+                    sys.stderr.write('Iteration time: %s\n' % time_str)
+
+                return out_dict
+
+
     def fit(
             self,
             train_data,
@@ -5719,10 +6195,6 @@ class DNNSeg(object):
             stderr('\n')
             stderr('*' * 100 + '\n\n')
 
-        if self.n_correspondence and not self.correspondence_live_targets:
-            segment_embeddings = None
-            segment_spans = None
-
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 # if not self.initial_evaluation_complete.eval(session=self.sess):
@@ -5754,400 +6226,96 @@ class DNNSeg(object):
                 while self.global_step.eval(session=self.sess) < n_iter:
                     self.set_update_mode(verbose=False)
 
-                    loss_total = 0.
-                    reg_total = 0.
-                    seg_rate_total = [0.] * (self.layers_encoder - 1)
-                    if not self.streaming or self.predict_backward:
-                        reconstruction_loss_total = 0.
-                    if self.streaming and self.predict_forward:
-                        prediction_loss_total = 0.
-                    correspondence_loss_total = [0.] * (self.layers_encoder - 1)
-                    if self.lm_loss_scale:
-                        encoder_lm_loss_total = [0.] * self.layers_encoder
-                    if self.speaker_adversarial_gradient_scale:
-                        encoder_speaker_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
-                    if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                        encoder_passthru_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
-
-                    # Collect correspondence targets if necessary
-                    if self.static_correspondence_targets() and (segment_embeddings is None or segment_spans is None):
-                        segment_embeddings, segment_spans = self.collect_correspondence_targets(data=train_data)
-
                     data_feed_train = train_data.get_data_feed(
                         self.train_data_name,
                         minibatch_size=minibatch_size,
                         randomize=True,
                         n_samples=self.n_samples
                     )
-                    i_pb_base = 0
 
-                    for i, batch in enumerate(data_feed_train):
-                        if i == 0 and verbose:
-                            n_minibatch = batch['n_minibatch']
-
-                            if self.streaming:
-                                if self.eval_freq:
-                                    eval_freq = self.eval_freq
-                                else:
-                                    eval_freq = np.inf
-                                if self.save_freq:
-                                    save_freq = self.save_freq
-                                else:
-                                    save_freq = np.inf
-                                if self.log_freq:
-                                    log_freq = self.log_freq
-                                else:
-                                    log_freq = np.inf
-
-                                n_pb = min(n_minibatch, eval_freq, save_freq, log_freq)
-                            else:
-                                n_pb = n_minibatch
-
-                            t0_iter = time.time()
-                            stderr('-' * 50 + '\n')
-                            stderr('Iteration %d\n' % int(self.global_step.eval(session=self.sess) + 1))
-                            stderr('\n')
-
-                            if self.streaming:
-                                if n_pb > 1:
-                                    stderr('Running minibatches %d-%d (out of %d)...\n' % (1, n_pb, n_minibatch))
-                                else:
-                                    stderr('Running minibatch %d (out of %d)...\n' % (n_pb, n_minibatch))
-                            else:
-                                stderr('Running minibatch updates...\n')
-
-                            stderr('Update mode: %s\n' % self.get_update_mode())
-
-                            if self.n_pretrain_steps and (self.step.eval(session=self.sess) <= self.n_pretrain_steps):
-                                stderr('Pretraining decoder...\n')
-
-                            if self.optim_name is not None and self.print_learning_rate:
-                                stderr('Learning rate: %s\n' % self.lr.eval(session=self.sess))
-
-                            if self.curriculum_t is not None:
-                                if self.curriculum_type.lower() == 'hard':
-                                    stderr('Curriculum window length: %s\n' % self.curriculum_t.eval(session=self.sess))
-                                elif self.curriculum_type.lower() == 'exp':
-                                    stderr('Curriculum decay rate: %s\n' % (
-                                                1. / self.curriculum_t.eval(session=self.sess)))
-                                else:
-                                    stderr('Curriculum window soft bound location: %s\n' % self.curriculum_t.eval(
-                                        session=self.sess))
-
-                            if self.boundary_slope_annealing_rate:
-                                sys.stderr.write(
-                                    'Boundary slope annealing coefficient: %s\n' % self.boundary_slope_coef.eval(
-                                        session=self.sess))
-
-                            if self.state_slope_annealing_rate:
-                                sys.stderr.write('State slope annealing coefficient: %s\n' % self.state_slope_coef.eval(
-                                    session=self.sess))
-
-                            pb = tf.contrib.keras.utils.Progbar(n_pb)
-
-                        if self.streaming:
-                            X_batch = batch['X']
-                            X_mask_batch = batch['X_mask']
-                            y_bwd_batch = batch['y_bwd']
-                            y_bwd_mask_batch = batch['y_bwd_mask']
-                            y_fwd_batch = batch['y_fwd']
-                            y_fwd_mask_batch = batch['y_fwd_mask']
-                            speaker_batch = batch['speaker']
-                            fixed_boundaries_batch = batch['fixed_boundaries']
-                            if self.oracle_boundaries:
-                                oracle_boundaries_batch = self.get_oracle_boundaries(batch)
-
-                            if self.min_len:
-                                minibatch_num = self.global_batch_step.eval(self.sess)
-                                n_steps = X_batch.shape[1]
-                                start_ix = max(0, n_steps - (self.min_len + int(math.floor(minibatch_num / self.curriculum_steps))))
-
-                                X_batch = X_batch[:,start_ix:]
-                                X_mask_batch = X_mask_batch[:,start_ix:]
-                                if self.oracle_boundaries:
-                                    oracle_boundaries_batch = oracle_boundaries_batch[:,start_ix:]
-                                if fixed_boundaries_batch is not None:
-                                    fixed_boundaries_batch = fixed_boundaries_batch[:,start_ix:]
-
-                            i_pb = i - i_pb_base
-                        else:
-                            X_batch = batch['X']
-                            X_mask_batch = batch['X_mask']
-                            y_bwd_batch = batch['y']
-                            y_bwd_mask_batch = batch['y_mask']
-                            speaker_batch = batch['speaker']
-                            fixed_boundaries_batch = batch['fixed_boundaries']
-                            if self.oracle_boundaries:
-                                oracle_boundaries_batch = self.get_oracle_boundaries(batch)
-                            i_pb = i
-
-                        fd_minibatch = {
-                            self.X: X_batch,
-                            self.X_mask: X_mask_batch
-                        }
-
-                        if self.data_type.lower() == 'acoustic':
-                            fd_minibatch[self.speaker] = speaker_batch
-
-                        if not self.streaming or self.predict_backward:
-                            fd_minibatch[self.y_bwd] = y_bwd_batch
-                            fd_minibatch[self.y_bwd_mask] = y_bwd_mask_batch
-                        if self.streaming and self.predict_forward:
-                            fd_minibatch[self.y_fwd] = y_fwd_batch
-                            fd_minibatch[self.y_fwd_mask] = y_fwd_mask_batch
-
-                        # Feed correspondence targets if necessary
-                        if self.static_correspondence_targets():
-                            for l in range(len(segment_embeddings)):
-                                fd_minibatch[self.correspondence_hidden_state_placeholders[l]] = segment_embeddings[l]
-                                fd_minibatch[self.correspondence_feature_placeholders[l]] = segment_spans[l]
-
-                        if self.oracle_boundaries:
-                            fd_minibatch[self.oracle_boundaries_placeholder] = oracle_boundaries_batch
-                        if fixed_boundaries_batch is not None:
-                            fd_minibatch[self.fixed_boundaries_placeholder] = fixed_boundaries_batch
-
-                        info_dict = self.run_train_step(fd_minibatch)
-                        loss_cur = info_dict['loss']
-                        reg_cur = info_dict['regularizer_loss']
-                        seg_rate_cur = [info_dict['seg_rate_l%d' % l] if 'seg_rate_l%d' % l in info_dict else 0. for l in range(self.layers_encoder - 1)]
-                        if not self.streaming or self.predict_backward:
-                            reconstruction_loss_cur = info_dict['reconstruction_loss']
-                        if self.streaming and self.predict_forward:
-                            prediction_loss_cur = info_dict['prediction_loss']
-                        if self.use_correspondence_loss:
-                            correspondence_loss_cur = [info_dict['correspondence_loss_l%d' % l] if 'correspondence_loss_l%d' % l in info_dict else 0. for l in range(self.layers_encoder - 1)]
-                        if self.lm_loss_scale:
-                            encoder_lm_loss_cur = [info_dict['encoder_lm_loss_l%d' % l] for l in range(self.layers_encoder)]
-                        if self.speaker_adversarial_gradient_scale:
-                            encoder_speaker_adversarial_loss_cur = [info_dict['encoder_speaker_adversarial_loss_l%d' % l] for l in range(self.layers_encoder - 1)]
-                        if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                            encoder_passthru_adversarial_loss_cur = [info_dict['encoder_passthru_adversarial_loss_l%d' % l] for l in range(self.layers_encoder - 1)]
-
-                        # Collect correspondence targets if necessary
-                        if self.static_correspondence_targets():
-                            segment_embeddings, segment_spans = self.collect_correspondence_targets(data=train_data)
-
-                        if self.ema_decay:
-                            self.sess.run(self.ema_op)
-                        if not np.isfinite(loss_cur):
-                            loss_cur = 0
-                        loss_total += loss_cur
-                        reg_total += reg_cur
-                        for l in range(len(seg_rate_total)):
-                            seg_rate_total[l] += seg_rate_cur[l]
-                        if not self.streaming or self.predict_backward:
-                            reconstruction_loss_total += reconstruction_loss_cur
-                        if self.streaming and self.predict_forward:
-                            prediction_loss_total += prediction_loss_cur
-                        if self.use_correspondence_loss:
-                            for l in range(len(correspondence_loss_total)):
-                                correspondence_loss_total[l] = correspondence_loss_total[l] + correspondence_loss_cur[l]
-                        if self.lm_loss_scale:
-                            for l in range(self.layers_encoder):
-                                encoder_lm_loss_total[l] = encoder_lm_loss_total[l] + encoder_lm_loss_cur[l]
-                        if self.speaker_adversarial_gradient_scale:
-                            for l in range(self.layers_encoder - 1):
-                                encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] + encoder_speaker_adversarial_loss_cur[l]
-                        if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                            for l in range(self.layers_encoder - 1):
-                                encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] + encoder_passthru_adversarial_loss_cur[l]
-
-                        if verbose:
-                            pb_update_vector = [('loss', loss_cur), ('reg', reg_cur)]
-                            for l in range(self.layers_encoder - 1):
-                                pb_update_vector.append(('rate L%d' % (l+1), seg_rate_cur[l]))
-                            if self.use_jtps:
-                                pb_update_vector.append(('l', info_dict['jtps_lambda_mean']))
-                            pb.update(i_pb+1, values=pb_update_vector)
-
-                        self.check_numerics()
-
-                        if self.streaming:
-                            evaluate = (self.eval_freq > 0) \
-                                       and ((i+1) % self.eval_freq == 0) \
-                                       and (self.step.eval(session=self.sess) > self.n_pretrain_steps)
-                            save = evaluate or ((self.save_freq > 0) and ((i+1) % self.save_freq == 0))
-                            log = (self.log_freq > 0) and ((i+1) % self.log_freq == 0)
-                            n_plot_cur = n_plot if log else None
-                            verbose_cur = verbose and evaluate
-
-                            self.run_checkpoint(
-                                val_data,
-                                save=save,
-                                log=log,
-                                evaluate=evaluate,
-                                n_plot=n_plot_cur,
-                                loss=loss_total / (i_pb + 1),
-                                reg_loss=reg_total / (i_pb + 1),
-                                seg_rate=[x / (i_pb + 1) for x in seg_rate_total],
-                                reconstruction_loss=reconstruction_loss_total / (i_pb + 1) if (not self.streaming or self.predict_backward) else None,
-                                prediction_loss=prediction_loss_total / (i_pb + 1) if (self.streaming and self.predict_forward) else None,
-                                correspondence_loss=[x / (i_pb + 1) for x in correspondence_loss_total] if self.use_correspondence_loss else None,
-                                encoder_lm_losses=[x / (i_pb + 1) for x in encoder_lm_loss_total] if self.lm_loss_scale else None,
-                                encoder_speaker_adversarial_losses=[x / (i_pb + 1) for x in encoder_speaker_adversarial_loss_total] if self.speaker_adversarial_gradient_scale else None,
-                                encoder_passthru_adversarial_losses=[x / (i_pb + 1) for x in encoder_passthru_adversarial_loss_total] if self.passthru_adversarial_gradient_scale else None,
-                                ix2label=ix2label,
-                                check_numerics=False,
-                                verbose=verbose_cur
-                            )
-
-                            self.set_update_mode(verbose=False)
-
-                            if self.streaming and (save or evaluate or log):
-                                if verbose:
-                                    if save:
-                                        next_save = self.save_freq
-                                    elif self.save_freq:
-                                        next_save = self.save_freq - ((i + 1) % self.save_freq)
-                                    else:
-                                        next_save = np.inf
-                                        
-                                    if log:
-                                        next_log = self.log_freq
-                                    elif self.log_freq:
-                                        next_log = self.log_freq - ((i + 1) % self.log_freq)
-                                    else:
-                                        next_log = np.inf
-
-                                    if evaluate:
-                                        next_evaluate = self.eval_freq
-                                    elif self.eval_freq:
-                                        next_evaluate = self.eval_freq - ((i + 1) % self.eval_freq)
-                                    else:
-                                        next_evaluate = np.inf
-                                        
-                                        
-                                    n_pb = min(
-                                        n_minibatch - (i+1),
-                                        next_save,
-                                        next_log,
-                                        next_evaluate
-                                    )
-
-                                    if n_pb > 1:
-                                        sys.stderr.write('Running minibatches %d-%d (out of %d)...\n' % (i + 2, i + 1 + n_pb, n_minibatch))
-                                    else:
-                                        sys.stderr.write('Running minibatch %d (out of %d)...\n' % (i + 1 + n_pb, n_minibatch))
-
-                                    stderr('Update mode: %s\n' % self.get_update_mode())
-
-                                    if self.optim_name is not None and self.print_learning_rate:
-                                        sys.stderr.write('Learning rate: %s\n' % self.lr.eval(session=self.sess))
-
-                                    if self.curriculum_type:
-                                        if self.curriculum_type.lower() == 'hard':
-                                            sys.stderr.write('Curriculum window length: %s\n' % self.curriculum_t.eval(session=self.sess))
-                                        if self.curriculum_type.lower() == 'exp':
-                                            sys.stderr.write('Curriculum decay rate: %s\n' % (1. / self.curriculum_t.eval(session=self.sess)))
-                                        else:
-                                            sys.stderr.write('Curriculum window soft bound location: %s\n' % self.curriculum_t.eval(session=self.sess))
-
-                                    if self.boundary_slope_annealing_rate:
-                                        sys.stderr.write('Boundary slope annealing coefficient: %s\n' % self.boundary_slope_coef.eval(session=self.sess))
-
-                                    if self.state_slope_annealing_rate:
-                                        sys.stderr.write('State slope annealing coefficient: %s\n' % self.state_slope_coef.eval(session=self.sess))
-
-                                    if self.n_pretrain_steps and (self.step.eval(session=self.sess) <= self.n_pretrain_steps):
-                                        sys.stderr.write('Pretraining decoder...\n')
-
-                                    pb = tf.contrib.keras.utils.Progbar(n_pb)
-
-                                loss_total = 0.
-                                reg_total = 0.
-                                seg_rate_total = [0.] * (self.layers_encoder - 1)
-                                if not self.streaming or self.predict_backward:
-                                    reconstruction_loss_total = 0.
-                                if self.streaming and self.predict_forward:
-                                    prediction_loss_total = 0.
-                                if self.use_correspondence_loss:
-                                    correspondence_loss_total = [0.] * (self.layers_encoder - 1)
-                                if self.lm_loss_scale:
-                                    encoder_lm_loss_total = [0.] * self.layers_encoder
-                                if self.speaker_adversarial_gradient_scale:
-                                    encoder_speaker_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
-                                if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                                    encoder_passthru_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
-                                i_pb_base = i+1
-
-                    loss_total /= (i+1)
-                    reg_total /= (i+1)
-                    for l in range(len(seg_rate_total)):
-                        seg_rate_total[l] = seg_rate_total[l] / (i+1)
-                    if not self.streaming or self.predict_backward:
-                        reconstruction_loss_total /= (i+1)
-                    if self.streaming and self.predict_forward:
-                        prediction_loss_total /= (i+1)
-                    for l in range(len(correspondence_loss_total)):
-                        correspondence_loss_total[l] = correspondence_loss_total[l] / (i+1)
-                    if self.lm_loss_scale:
-                        for l in range(self.layers_encoder):
-                            encoder_lm_loss_total[l] = encoder_lm_loss_total[l] / (i+1)
-                    if self.speaker_adversarial_gradient_scale:
-                        for l in range(self.layers_encoder - 1):
-                            encoder_speaker_adversarial_loss_total[l] = encoder_speaker_adversarial_loss_total[l] / (i+1)
-                    if self.passthru_adversarial_gradient_scale and self.n_passthru_neurons:
-                        for l in range(self.layers_encoder - 1):
-                            encoder_passthru_adversarial_loss_total[l] = encoder_passthru_adversarial_loss_total[l] / (i+1)
-
-                    self.sess.run(self.incr_global_step)
-
-                    if self.streaming:
-                        save = True
-                        s = self.global_step.eval(session=self.sess)
-                        if self.incremental_eval and s % 1 == 0 and s >= self.n_pretrain_steps:
-                            evaluate = True
-                        else:
-                            evaluate = False
-                        n_plot_cur = n_plot
-                        log = True
-
-                        if self.eval_freq:
-                            eval_freq = self.eval_freq
-                        else:
-                            eval_freq = np.inf
-                        if self.save_freq:
-                            save_freq = self.save_freq
-                        else:
-                            save_freq = np.inf
-                        if self.log_freq:
-                            log_freq = self.log_freq
-                        else:
-                            log_freq = np.inf
-
-                        n_pb = min(n_minibatch, eval_freq, save_freq, log_freq)
-
-                    else:
-                        step = self.step.eval(session=self.sess)
-                        save = self.save_freq > 0 and step % self.save_freq == 0
-                        evaluate = self.eval_freq and step % self.eval_freq == 0
-                        log = self.log_freq and step % self.log_freq == 0
-                        n_plot_cur = n_plot if save else None
-
-                    self.run_checkpoint(
-                        val_data,
-                        save=save,
-                        evaluate=evaluate,
-                        log=log,
-                        loss=loss_total,
-                        reg_loss=reg_total,
-                        seg_rate=seg_rate_total,
-                        reconstruction_loss=reconstruction_loss_total if (not self.streaming or self.predict_backward) else None,
-                        prediction_loss=prediction_loss_total if (self.streaming and self.predict_forward) else None,
-                        correspondence_loss=correspondence_loss_total,
-                        encoder_lm_losses=encoder_lm_loss_total if self.lm_loss_scale else None,
-                        encoder_speaker_adversarial_losses=encoder_speaker_adversarial_loss_total if self.speaker_adversarial_gradient_scale else None,
-                        encoder_passthru_adversarial_losses=encoder_passthru_adversarial_loss_total if self.passthru_adversarial_gradient_scale else None,
+                    self.run_train_iter(
+                        data_feed_train,
+                        val_data=val_data,
                         ix2label=ix2label,
-                        n_plot=n_plot_cur,
-                        verbose=verbose
+                        n_plot=n_plot,
+                        verbose=verbose,
+                        update=True
                     )
 
-                    if verbose:
-                        t1_iter = time.time()
-                        time_str = pretty_print_seconds(t1_iter - t0_iter)
-                        sys.stderr.write('Iteration time: %s\n' % time_str)
+    def get_loss(
+            self,
+            data,
+            verbose=True
+    ):
+        if verbose:
+            usingGPU = tf.test.is_gpu_available()
+            stderr('Using GPU: %s\n' % usingGPU)
+
+        stderr('Extracting data...\n')
+        t0 = time.time()
+
+        cache_data(
+            other_data=data,
+            streaming=self.streaming,
+            max_len=self.max_len,
+            window_len_bwd=self.window_len_bwd,
+            window_len_fwd=self.window_len_fwd,
+            segtype=self.segtype,
+            data_normalization=self.data_normalization,
+            reduction_axis=self.reduction_axis,
+            use_normalization_mask=self.use_normalization_mask,
+            predict_deltas=self.predict_deltas,
+            input_padding=self.input_padding,
+            target_padding=self.target_padding,
+            reverse_targets=self.reverse_targets,
+            resample_inputs=self.resample_inputs,
+            resample_targets_bwd=self.resample_targets_bwd,
+            resample_targets_fwd=self.resample_targets_fwd,
+            task=self.task,
+            data_type=self.data_type
+        )
+
+        n = data.get_n(self.train_data_name)
+
+        t1 = time.time()
+
+        stderr('Data extracted in %ds\n\n' % (t1 - t0))
+        sys.stderr.flush()
+
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                if self.pad_seqs:
+                    if not np.isfinite(self.eval_minibatch_size):
+                        minibatch_size = n
+                    else:
+                        minibatch_size = self.eval_minibatch_size
+                else:
+                    minibatch_size = 1
+
+                self.set_update_mode(verbose=False)
+
+                if self.streaming:
+                    data_name = 'streaming'
+                else:
+                    data_name = 'utt'
+
+                data_feed = data.get_data_feed(
+                    data_name,
+                    minibatch_size=minibatch_size,
+                    randomize=True,
+                    n_samples=self.n_samples
+                )
+
+                out_dict = self.run_train_iter(
+                    data_feed,
+                    val_data=None,
+                    ix2label=None,
+                    n_plot=None,
+                    verbose=verbose,
+                    update=False
+                )
+
+                return out_dict
 
     def plot_utterances(
             self,
@@ -7085,7 +7253,7 @@ class DNNSegMLE(DNNSeg):
                                         data_seq = self.X
                                     else:
                                         mask = self.encoder_segmentations[l-1]
-                                        data_seq = self.encoder_embeddings[l-1]
+                                        data_seq = self.encoder_features[l-1]
 
                                     # Force ends to 1 to ensure partition over time
                                     # segs_trimmed = segs[..., :-1]
@@ -7186,6 +7354,16 @@ class DNNSegMLE(DNNSeg):
                                                     [cae_segs_shape[0], 1, 1]
                                                 )
                                             )
+                                        if self.decoder_append_seglen and l < self.layers_encoder - 1:
+                                            seglen = self.segment_lengths[l]
+                                            seglen = tf.boolean_mask(seglen, cae_mask_top_bool)
+                                            seglen = tf.expand_dims(seglen, 1)
+                                            seglen = tf.tile(
+                                                seglen,
+                                                [1, cae_segs_shape[1], 1]
+                                            )
+                                            correspondence_inputs.append(seglen)
+
                                         if len(correspondence_inputs) == 1:
                                             correspondence_inputs = correspondence_inputs[0]
                                         else:
@@ -7204,7 +7382,9 @@ class DNNSegMLE(DNNSeg):
                                             if self.speaker_emb_dim and self.append_speaker_emb_to_decoder_inputs:
                                                 correspondence_inputs.append(self.speaker_embeddings_tiled)
                                         if self.n_passthru_neurons:
-                                            correspondence_inputs.append(self.passthru_neurons)
+                                            correspondence_inputs.append(self.passthru_neurons[l])
+                                        if self.decoder_append_seglen and l < self.layers_encoder - 1:
+                                            correspondence_inputs.append(self.segment_lengths[l])
                                         if len(correspondence_inputs) == 1:
                                             correspondence_inputs = correspondence_inputs[0]
                                         else:
@@ -7362,14 +7542,11 @@ class DNNSegMLE(DNNSeg):
 
                     self.lm_losses_bwd = []
                     self.lm_losses_fwd = []
-                    self.lm_losses = []
 
-                    for l in range(self.layers_encoder - 1, -1, -1):
+                    for l in range(self.layers_encoder):
                         loss_scale = self.lm_loss_scale[l]
 
                         if loss_scale:
-                            lm_losses_reduced = 0.
-
                             if self.lm_targets_bwd[l] is not None and self.lm_order_bwd:
                                 logits_bwd = self.lm_logits_bwd[l]
                                 targets_bwd = self.lm_targets_bwd[l]
@@ -7405,7 +7582,10 @@ class DNNSegMLE(DNNSeg):
                                     reduce=True,
                                     name='lm_bwd_loss_L%d' % l
                                 ) * loss_scale
-                                lm_losses_reduced += lm_loss_bwd_cur
+                                loss.append(lm_loss_bwd_cur)
+                            else:
+                                lm_loss_bwd_cur = tf.constant(0.)
+                            self.lm_losses_bwd.append(lm_loss_bwd_cur)
 
                             if self.lm_targets_fwd[l] is not None and self.lm_order_fwd:
                                 logits_fwd = self.lm_logits_fwd[l]
@@ -7442,36 +7622,11 @@ class DNNSegMLE(DNNSeg):
                                     reduce=True,
                                     name='lm_fwd_loss_L%d' % l
                                 ) * loss_scale
-                                lm_losses_reduced += lm_loss_fwd_cur
-                        else:
-                            lm_losses_reduced = None
+                                loss.append(lm_loss_fwd_cur)
+                            else:
+                                lm_loss_fwd_cur = tf.constant(0.)
+                            self.lm_losses_fwd.append(lm_loss_fwd_cur)
 
-                        if lm_losses_reduced is not None:
-                            self.lm_losses.insert(0, lm_losses_reduced)
-                            loss.insert(0, lm_losses_reduced)
-                            reduction_weights.append(1.)
-                        else:
-                            self.lm_losses.insert(0, tf.constant(0.))
-                    
-                    # loss_bwd = tf.stack(self.lm_losses_bwd, axis=-1)
-                    # loss_total_bwd = tf.reduce_sum(loss_bwd, axis=-1, keepdims=True)
-                    # loss_weights_bwd = loss_bwd / tf.maximum(loss_total_bwd, self.epsilon)
-                    # loss_bwd_weighted = tf.reduce_sum(loss_bwd * loss_weights_bwd, axis=-1)
-                    # loss_fwd = tf.stack(self.lm_losses_fwd, axis=-1)
-                    # loss_total_fwd = tf.reduce_sum(loss_fwd, axis=-1, keepdims=True)
-                    # loss_weights_fwd = loss_fwd / tf.maximum(loss_total_fwd, self.epsilon)
-                    # loss_fwd_weighted = tf.reduce_sum(loss_fwd * loss_weights_fwd, axis=-1)
-                    #
-                    # lm_losses = tf.stack(lm_losses, axis=-1)
-                    # lm_losses_total = tf.reduce_sum(lm_losses, axis=-1, keepdims=True)
-                    # if self.normalize_lm_losses:
-                    #     lm_loss_weights = lm_losses / tf.maximum(lm_losses_total, self.epsilon)
-                    #     lm_losses_weighted = tf.reduce_sum(lm_losses * lm_loss_weights, axis=-1)
-                    # else:
-                    #     lm_losses_weighted = lm_losses_total[0]
-
-                    # lm_losses_weighted = tf.Print(lm_losses_weighted, [lm_losses, lm_losses_total, lm_loss_weights, lm_losses_weighted])
-                    
                 adversarial_losses = []
 
                 if self.speaker_adversarial_gradient_scale:
@@ -7668,20 +7823,27 @@ class DNNSegMLE(DNNSeg):
             return_labels=False,
             return_label_probs=False,
             return_encoding_entropy=False,
-            return_segmentation_probs=False
+            return_segmentation_probs=False,
+            verbose=True,
+            update=True
     ):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 out_dict = {}
 
                 if return_loss or return_reconstructions or return_labels or return_label_probs:
-                    if self.n_pretrain_steps and self.step.eval(session=self.sess) < self.n_pretrain_steps:
-                        train_op = self.train_ops['decoder']
-                    else:
-                        train_op = self.train_ops[self.get_update_mode()]
+                    if update:
+                        if self.n_pretrain_steps and self.step.eval(session=self.sess) < self.n_pretrain_steps:
+                            train_op = self.train_ops['decoder']
+                        else:
+                            train_op = self.train_ops[self.get_update_mode()]
 
-                    to_run = [train_op]
+                        to_run = [train_op]
+                    else:
+                        to_run = []
+
                     to_run_names = []
+
                     if return_loss:
                         to_run.append(self.loss)
                         to_run_names.append('loss')
@@ -7702,8 +7864,12 @@ class DNNSegMLE(DNNSeg):
                                     to_run_names.append('correspondence_loss_l%d' % l)
                         if self.lm_loss_scale:
                             for l in range(self.layers_encoder):
-                                to_run.append(self.lm_losses[l])
-                                to_run_names.append('encoder_lm_loss_l%d' % l)
+                                if self.lm_losses_bwd[l] is not None:
+                                    to_run.append(self.lm_losses_bwd[l])
+                                    to_run_names.append('encoder_lm_loss_bwd_l%d' % l)
+                                if self.lm_losses_fwd[l] is not None:
+                                    to_run.append(self.lm_losses_fwd[l])
+                                    to_run_names.append('encoder_lm_loss_fwd_l%d' % l)
                         if self.speaker_adversarial_gradient_scale:
                             for l in range(self.layers_encoder - 1):
                                 to_run.append(self.encoder_speaker_adversarial_losses[l])
@@ -7756,7 +7922,7 @@ class DNNSegMLE(DNNSeg):
 
                     output = self.sess.run(to_run, feed_dict=feed_dict)
 
-                    for i, x in enumerate(output[1:]):
+                    for i, x in enumerate(output[int(update):]): # If update==True, the first element is the train op, so skip it.
                         out_dict[to_run_names[i]] = x
 
                 return out_dict
