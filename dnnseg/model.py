@@ -403,13 +403,10 @@ class DNNSeg(object):
                 self.n_timesteps_output_fwd = self.window_len_fwd
 
         self.lm_loss_scale = self._get_layerwise_scalar(self.lm_loss_scale)
-        assert len(self.lm_loss_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_loss_scale and n_units_encoder.'
+        assert len(self.lm_loss_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_loss_scale and n_units_encoder.' 
 
-        self.use_lm_loss = False
-        for x in self.lm_loss_scale:
-            if x:
-                self.use_lm_loss = True
-                break
+        self.use_lm_loss = [True if (x or self.decoder_type.lower() == 'seq2seqattn') else False for x in self.lm_loss_scale]
+        print(self.use_lm_loss)
 
         self.lm_gradient_scale = self._get_layerwise_scalar(self.lm_gradient_scale)
         assert len(self.lm_gradient_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_gradient_scale and n_units_encoder.'
@@ -979,7 +976,7 @@ class DNNSeg(object):
                     self.loss_reconstruction_summary = tf.placeholder(tf.float32, name='loss_reconstruction_summary_placeholder')
                 if self.predict_forward:
                     self.loss_prediction_summary = tf.placeholder(tf.float32, name='loss_prediction_summary_placeholder')
-                if self.lm_loss_scale:
+                if self.use_lm_loss:
                     self.encoder_lm_loss_summary = []
                     for l in range(self.layers_encoder):
                         self.encoder_lm_loss_summary.append(
@@ -1209,7 +1206,7 @@ class DNNSeg(object):
                     else:
                         boundaries = None
 
-                    if self.lm_loss_type.lower() == 'srn' and self.lm_loss_scale is not None:
+                    if self.lm_loss_type.lower() == 'srn' and self.use_lm_loss:
                         return_lm_predictions = True
                         if self.speaker_adversarial_gradient_scale:
                             decoder_embedding = self.speaker_embeddings
@@ -1565,7 +1562,7 @@ class DNNSeg(object):
                             self.correspondence_hidden_states.append(correspondence_tensors[3])
                             self.correspondence_speaker_ids.append(correspondence_tensors[4])
 
-                    if self.lm_loss_scale:
+                    if self.use_lm_loss:
                         self._initialize_lm()
 
                 elif self.encoder_type.lower() in ['rnn', 'cnn_rnn']:
@@ -1940,7 +1937,7 @@ class DNNSeg(object):
                 direction = ['bwd', 'fwd']
 
                 for l in range(self.layers_encoder - 1, -1, -1):
-                    if self.lm_loss_scale[l]:
+                    if self.use_lm_loss[l]:
                         if l == 0:
                             weights_cur = self.X_mask
                             mask_cur = weights_cur
@@ -3293,7 +3290,7 @@ class DNNSeg(object):
                     for l in range(self.layers_encoder - 1):
                         if self.correspondence_loss_scale[l]:
                             tf.summary.scalar('objective/correspondence_loss_l%d' % (l+1), self.correspondence_loss_summary[l], collections=['objective'])
-                if self.lm_loss_scale:
+                if self.use_lm_loss:
                     for l in range(self.layers_encoder):
                         tf.summary.scalar('objective/encoder_lm_loss_l%d' % (l+1), self.encoder_lm_loss_summary[l], collections=['objective'])
                 if self.speaker_adversarial_gradient_scale:
@@ -5762,7 +5759,7 @@ class DNNSeg(object):
                     if self.streaming and self.predict_forward:
                         prediction_loss_total = 0.
                     correspondence_loss_total = [0.] * (self.layers_encoder - 1)
-                    if self.lm_loss_scale:
+                    if self.use_lm_loss:
                         encoder_lm_loss_total = [0.] * self.layers_encoder
                     if self.speaker_adversarial_gradient_scale:
                         encoder_speaker_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
@@ -5917,7 +5914,7 @@ class DNNSeg(object):
                             prediction_loss_cur = info_dict['prediction_loss']
                         if self.use_correspondence_loss:
                             correspondence_loss_cur = [info_dict['correspondence_loss_l%d' % l] if 'correspondence_loss_l%d' % l in info_dict else 0. for l in range(self.layers_encoder - 1)]
-                        if self.lm_loss_scale:
+                        if self.use_lm_loss:
                             encoder_lm_loss_cur = [info_dict['encoder_lm_loss_l%d' % l] for l in range(self.layers_encoder)]
                         if self.speaker_adversarial_gradient_scale:
                             encoder_speaker_adversarial_loss_cur = [info_dict['encoder_speaker_adversarial_loss_l%d' % l] for l in range(self.layers_encoder - 1)]
@@ -5943,7 +5940,7 @@ class DNNSeg(object):
                         if self.use_correspondence_loss:
                             for l in range(len(correspondence_loss_total)):
                                 correspondence_loss_total[l] = correspondence_loss_total[l] + correspondence_loss_cur[l]
-                        if self.lm_loss_scale:
+                        if self.use_lm_loss:
                             for l in range(self.layers_encoder):
                                 encoder_lm_loss_total[l] = encoder_lm_loss_total[l] + encoder_lm_loss_cur[l]
                         if self.speaker_adversarial_gradient_scale:
@@ -5984,7 +5981,7 @@ class DNNSeg(object):
                                 reconstruction_loss=reconstruction_loss_total / (i_pb + 1) if (not self.streaming or self.predict_backward) else None,
                                 prediction_loss=prediction_loss_total / (i_pb + 1) if (self.streaming and self.predict_forward) else None,
                                 correspondence_loss=[x / (i_pb + 1) for x in correspondence_loss_total] if self.use_correspondence_loss else None,
-                                encoder_lm_losses=[x / (i_pb + 1) for x in encoder_lm_loss_total] if self.lm_loss_scale else None,
+                                encoder_lm_losses=[x / (i_pb + 1) for x in encoder_lm_loss_total] if self.use_lm_loss else None,
                                 encoder_speaker_adversarial_losses=[x / (i_pb + 1) for x in encoder_speaker_adversarial_loss_total] if self.speaker_adversarial_gradient_scale else None,
                                 encoder_passthru_adversarial_losses=[x / (i_pb + 1) for x in encoder_passthru_adversarial_loss_total] if self.passthru_adversarial_gradient_scale else None,
                                 ix2label=ix2label,
@@ -6063,7 +6060,7 @@ class DNNSeg(object):
                                     prediction_loss_total = 0.
                                 if self.use_correspondence_loss:
                                     correspondence_loss_total = [0.] * (self.layers_encoder - 1)
-                                if self.lm_loss_scale:
+                                if self.use_lm_loss:
                                     encoder_lm_loss_total = [0.] * self.layers_encoder
                                 if self.speaker_adversarial_gradient_scale:
                                     encoder_speaker_adversarial_loss_total = [0.] * (self.layers_encoder - 1)
@@ -6081,7 +6078,7 @@ class DNNSeg(object):
                         prediction_loss_total /= (i+1)
                     for l in range(len(correspondence_loss_total)):
                         correspondence_loss_total[l] = correspondence_loss_total[l] / (i+1)
-                    if self.lm_loss_scale:
+                    if self.use_lm_loss:
                         for l in range(self.layers_encoder):
                             encoder_lm_loss_total[l] = encoder_lm_loss_total[l] / (i+1)
                     if self.speaker_adversarial_gradient_scale:
@@ -6136,7 +6133,7 @@ class DNNSeg(object):
                         reconstruction_loss=reconstruction_loss_total if (not self.streaming or self.predict_backward) else None,
                         prediction_loss=prediction_loss_total if (self.streaming and self.predict_forward) else None,
                         correspondence_loss=correspondence_loss_total,
-                        encoder_lm_losses=encoder_lm_loss_total if self.lm_loss_scale else None,
+                        encoder_lm_losses=encoder_lm_loss_total if self.use_lm_loss else None,
                         encoder_speaker_adversarial_losses=encoder_speaker_adversarial_loss_total if self.speaker_adversarial_gradient_scale else None,
                         encoder_passthru_adversarial_losses=encoder_passthru_adversarial_loss_total if self.passthru_adversarial_gradient_scale else None,
                         ix2label=ix2label,
@@ -6263,7 +6260,7 @@ class DNNSeg(object):
                     if plot_positional_encodings and self.pe_fwd is not None:
                         to_run.append(self.pe_fwd)
                         to_run_names.append('pe_fwd')
-                if self.streaming and not self.predict_backward and not self.predict_forward and self.lm_loss_scale:
+                if self.streaming and not self.predict_backward and not self.predict_forward and self.use_lm_loss:
                     if self.lm_order_bwd:
                         to_run.append(self.lm_plot_preds_bwd)
                         to_run_names.append('preds_bwd')
@@ -7357,7 +7354,7 @@ class DNNSegMLE(DNNSeg):
                                     loss.append(cae_loss)
                                     reduction_weights.append(1.)
 
-                if self.lm_loss_scale:
+                if self.use_lm_loss:
                     assert not self.residual_targets, 'residual_targets is currently broken. Do not use.'
 
                     self.lm_losses_bwd = []
@@ -7367,7 +7364,7 @@ class DNNSegMLE(DNNSeg):
                     for l in range(self.layers_encoder - 1, -1, -1):
                         loss_scale = self.lm_loss_scale[l]
 
-                        if loss_scale:
+                        if self.use_lm_loss[l]:
                             lm_losses_reduced = 0.
 
                             if self.lm_targets_bwd[l] is not None and self.lm_order_bwd:
@@ -7700,7 +7697,7 @@ class DNNSegMLE(DNNSeg):
                                 if self.correspondence_loss_scale[l]:
                                     to_run.append(self.correspondence_losses[l])
                                     to_run_names.append('correspondence_loss_l%d' % l)
-                        if self.lm_loss_scale:
+                        if self.use_lm_loss:
                             for l in range(self.layers_encoder):
                                 to_run.append(self.lm_losses[l])
                                 to_run_names.append('encoder_lm_loss_l%d' % l)
