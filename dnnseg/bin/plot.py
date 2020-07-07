@@ -21,7 +21,7 @@ if __name__ == '__main__':
     argparser.add_argument('-s', '--seg_types', default=['phn'], nargs='+', help='Space-delimited list of segment types. Available types: "phn", "wrd".')
     argparser.add_argument('-p', '--plot_types', default=None, nargs='+', help='Space-delimited list of plot types. Available types: "unit_heatmap", "label_heatmap", "confusion_matrix", "projection". If unspecified, all available types will be generated.')
     argparser.add_argument('-c', '--class_limit', default='256', type=str, help='Largest number of allowed classes in plots by class. Plots that would exceed this limit will be skipped. Accepts an `int` or "inf", for no limit.')
-    argparser.add_argument('-f', '--feature_names', default=['english'], nargs='+', help='Names of phonological features to use to projection plots.')
+    argparser.add_argument('-f', '--feature_names', default=['all'], nargs='+', help='Names of phonological features to use to projection plots.')
     argparser.add_argument('-m', '--projection_method', default='tsne', help='Embedding method to use for projections. One of ["lle", "mds", "pca", "spectral_embedding", "tsne"].')
     argparser.add_argument('-l', '--layers', default=None, nargs='+', help='IDs of layers to plot (0, ..., L). If unspecified, plots all available layers.')
     args = argparser.parse_args()
@@ -52,12 +52,12 @@ if __name__ == '__main__':
         else:
             feature_table = None
 
-        if args.feature_names == ['english']:
+        if args.feature_names.lower() == 'all' and p['feature_map_file'].startswith('eng'):
             feature_names = ['syllabic', 'consonantal', 'sonorant', 'continuant', 'delayed_release', 'approximant',
                              'nasal', 'voice', 'spread_glottis', 'labial', 'round', 'labiodental', 'coronal',
                              'anterior', 'distributed', 'strident', 'lateral', 'dorsal', 'high', 'low', 'front', 'back',
                              'tense', 'stress', 'diphthong']
-        elif args.feature_names == ['xitsonga']:
+        elif args.feature_names.lower() == 'all' and p['feature_map_file'].startswith('xit'):
             feature_names = ['syllabic', 'consonantal', 'sonorant', 'continuant', 'delayed_release', 'approximant',
                              'trill', 'nasal', 'voice', 'spread_glottis', 'constricted_glottis', 'labial', 'round',
                              'labiodental', 'coronal', 'anterior', 'distributed', 'strident', 'lateral', 'dorsal',
