@@ -33,4 +33,4 @@ if __name__ == '__main__':
             f.write(pbs_base % (args.walltime, args.memory, args.python_module, args.conda_env, os.getcwd()))
             f.write('python3 -m dnnseg.bin.train %s\n' % path)
             f.write('python3 -m dnnseg.bin.evaluate %s -b -d test\n' % path)
-            f.write('python3 -m dnnseg.bin.plot %s\n' % path)
+            # f.write('python3 -m dnnseg.bin.plot %s\n' % path)
