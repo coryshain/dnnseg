@@ -1,8 +1,14 @@
 import re
 import os
 import yaml
+import numpy as np
 import pandas as pd
 import argparse
+from matplotlib import pyplot as plt
+import seaborn as sns
+
+from dnnseg.plot import MidpointNormalize
+from dnnseg.util import sn
 
 def parse_path(path, key_map):
     out = {}
@@ -40,9 +46,37 @@ if __name__ == '__main__':
     paths = df.model_path.to_list()
     key_vals = [parse_path(x, key_map) for x in paths]
     df_new = pd.DataFrame(key_vals)
-    df = pd.concat([df, df_new], axis=1)
+    for c in df_new.columns:
+        if len(df_new[c].unique()) > 1:
+            try:
+                df[key_map[c]] = df_new[c].astype(int)
+            except ValueError:
+                df[key_map[c]] = df_new[c].astype(float)
+            except ValueError:
+                df[key_map[c]] - df_new[c]
 
-    print(df.columns)
+    columns = []
+    index = []
+    
+    for i, c in enumerate(key_order):
+        if i % 2 == 1:
+            columns.append(key_map[c])
+        else:
+            index.append(key_map[c])
 
+    values = args.measures[0]
+ 
+    pivot = df.pivot_table(index=index, columns=columns, values=values)
 
+    ax = sns.heatmap(pivot, cmap='RdBu', center=max(0., np.nanmin(pivot.values)))
+
+    if not os.path.exists(args.outdir):
+        os.makedirs(args.outdir)
+    plt.savefig(args.outdir + '/%s.png' % args.measures[0])
+    plt.close('all')
+
+    for c in [key_map[x] for x in key_order]:
+        ax = sns.barplot(x=c, y=args.measures[0], data=df, n_boot=1000)
+        plt.savefig(args.outdir + '/%s_by_%s.png' % (args.measures[0], sn(c)))
+        plt.close('all')
 
