@@ -16,7 +16,6 @@ if __name__ == '__main__':
     out = []
 
     if args.match:
-        print(args.match)
         match = re.compile(args.match)
 
 
