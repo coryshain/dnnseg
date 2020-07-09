@@ -51,9 +51,10 @@ if __name__ == '__main__':
             try:
                 df[key_map[c]] = df_new[c].astype(int)
             except ValueError:
-                df[key_map[c]] = df_new[c].astype(float)
-            except ValueError:
-                df[key_map[c]] - df_new[c]
+                try:
+                    df[key_map[c]] = df_new[c].astype(float)
+                except ValueError:
+                    df[key_map[c]] - df_new[c]
 
     columns = []
     index = []
@@ -64,19 +65,18 @@ if __name__ == '__main__':
         else:
             index.append(key_map[c])
 
-    values = args.measures[0]
- 
-    pivot = df.pivot_table(index=index, columns=columns, values=values)
+    for m in args.measures:
+        pivot = df.pivot_table(index=index, columns=columns, values=m)
 
-    ax = sns.heatmap(pivot, cmap='RdBu', center=max(0., np.nanmin(pivot.values)))
+        ax = sns.heatmap(pivot, cmap='RdBu', center=max(0., np.nanmin(pivot.values)))
 
-    if not os.path.exists(args.outdir):
-        os.makedirs(args.outdir)
-    plt.savefig(args.outdir + '/%s.png' % args.measures[0])
-    plt.close('all')
-
-    for c in [key_map[x] for x in key_order]:
-        ax = sns.barplot(x=c, y=args.measures[0], data=df, n_boot=1000)
-        plt.savefig(args.outdir + '/%s_by_%s.png' % (args.measures[0], sn(c)))
+        if not os.path.exists(args.outdir):
+            os.makedirs(args.outdir)
+        plt.savefig(args.outdir + '/%s.png' % m)
         plt.close('all')
+
+        for c in [key_map[x] for x in key_order]:
+            ax = sns.barplot(x=c, y=m, data=df, n_boot=1000)
+            plt.savefig(args.outdir + '/%s_by_%s.png' % (m, sn(c)))
+            plt.close('all')
 
