@@ -163,7 +163,7 @@ if __name__ == '__main__':
                     data_type=p['data_type']
                 )
     
-            m = load_dnnseg(p['outdir'])
+            # m = load_dnnseg(p['outdir'])
 
             if 'classification' in measures or 'segmentation' in measures or args.force_predict:
                 eval_dict = m.run_evaluation(
@@ -257,7 +257,7 @@ if __name__ == '__main__':
                                     info_dict[key] = float(label_probe_dict[x])
 
                         if 'feature_probe' in measures:
-                            if p['feature_map_file']:
+                            if p['feature_map_file'] and 'phn_label' in df.columns:
                                 feats = get_target_cols(lang)
                                 found = True
                                 for x in feats:
@@ -293,7 +293,7 @@ if __name__ == '__main__':
                                         key = key.replace('macro', 'phn_label_macro')
                                     info_dict[key] = float(feature_probe_dict[x])
 
-            info_dict['num_iter'] = int(m.global_step.eval(session=m.sess))
+            # info_dict['num_iter'] = int(m.global_step.eval(session=m.sess))
             info_dict['model_path'] = p['outdir']
 
             out = yaml.dump(info_dict)
