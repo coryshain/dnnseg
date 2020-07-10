@@ -18,6 +18,7 @@ from .util import stderr
 is_embedding_dimension = re.compile('d([0-9]+)')
 
 
+
 def binary_to_integer_np(b, int_type='int32'):
     np_int_type = getattr(np, int_type)
 
@@ -813,8 +814,12 @@ def project_matching_segments(df, method='tsne'):
     return df
 
 
-def compute_class_similarity(table, class_column_name='phn_label'):
+def compute_class_similarity(table, class_column_name='phn_label', fisher=False, return_in_out=False):
     embedding_cols = [x for x in table.columns if is_embedding_dimension.match(x)]
+    data = table[embedding_cols]
+    if fisher:
+        data = np.arctanh(data)
+    table = pd.concat([table[[class_column_name]], data], axis=1)
     gb = {x:y[embedding_cols] for x, y in table.groupby(class_column_name)}
     classes = sorted(list(gb.keys()))
     min_val = 0
@@ -829,6 +834,9 @@ def compute_class_similarity(table, class_column_name='phn_label'):
             valid_names.append(classes[i])
 
     scores = np.zeros((len(valid), len(valid)))
+
+    if return_in_out:
+        in_out = {}
 
     for i in range(len(valid)):
         for j in range(i, len(valid)):
@@ -852,7 +860,7 @@ def compute_class_similarity(table, class_column_name='phn_label'):
 
             # dist = num / np.maximum(denom, 1e-5)
             
-            dist = spatial.distance.cdist(valid[i], valid[j])
+            dist = spatial.distance.cdist(valid[i], valid[j], metric='cosine')
             
             n_cells = np.prod(dist.shape)
             if i == j:
@@ -885,9 +893,33 @@ def compute_class_similarity(table, class_column_name='phn_label'):
             scores[i, j] = score
             scores[j, i] = score
 
+            if return_in_out:
+                if not valid_names[i] in in_out:
+                    in_out[valid_names[i]] = {'in': None, 'out': []}
+                if i == j:
+                    in_out[valid_names[i]]['in'] = score
+                else:
+                    in_out[valid_names[i]]['out'].append(score)
+
+    if return_in_out:
+        in_out_df = []
+        for k in in_out:
+            in_out_df.append(
+                {
+                    'class': k,
+                    'in': in_out[k]['in'],
+                    'out': np.mean(in_out[k]['out'])
+                }
+            )
+
+        in_out_df = pd.DataFrame(in_out_df)
+
     classes = [x + '   ' for x in valid_names]
 
     scores = pd.DataFrame(scores, index=classes, columns=classes)
+
+    if return_in_out:
+        return scores, in_out_df
 
     return scores
 

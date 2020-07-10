@@ -9,7 +9,7 @@ sys.setrecursionlimit(2000)
 
 from dnnseg.config import Config
 from dnnseg.data import Dataset, cache_data
-from dnnseg.probe import probe
+from dnnseg.probe import probe, get_target_cols
 from dnnseg.util import stderr, sn, load_dnnseg
 
 
@@ -22,12 +22,12 @@ if __name__ == '__main__':
     argparser.add_argument('-N', '--names', nargs='*', help='Names for evaluation data. If empty, names are inferred. Otherwise, must have the same number of elements as ``data``.')
     argparser.add_argument('-e', '--eval_measures', nargs='+', default=['all'], help='Measures to output. One of ``["all", "segmentation", "classification", "objective", "label_probe", "feature_probe"]``. ``"segmentation"`` runs boundary and word segmentation scores for words and (if relevant) phones. ``"classification"`` creates hard labels by rounding embeddings and performs unsupervised clustering evaluation for word and (if relevant) phone categories. ``"objective"`` computes the mean value of each of the loss components over the dataset, without updating the model. ``"label_probe"`` runs a supervised MLP probe for phone labels if relevant, otherwise skipped. ``"feature_probe"`` runs a supervised MLP probe for features if relevant, otherwise skipped. ``"all"`` runs all measures.')
     argparser.add_argument('-F', '--force_predict', action='store_true', help='Force creation of segment tables. Otherwise, table-based evals like the probes will only use already existing tables')
-    argparser.add_argument('-t', '--classifier_type', default='mlp',help='Type of classifier to use. One of ``["logreg", "mlp", "random_forest"]``.')
-    argparser.add_argument('-r', '--regularization_scale', type=float, default=0.001, help='Level of regularization to use in MLR classification.')
+    argparser.add_argument('-t', '--classifier_type', default='mlr',help='Type of classifier to use. One of ``["mlr", "mlp", "random_forest"]``.')
+    argparser.add_argument('-r', '--regularization_scale', type=float, default=1, help='Level of regularization to use in MLR classification.')
     argparser.add_argument('-M', '--max_depth', type=float, default=None, help='Maximum permissible tree depth.')
     argparser.add_argument('-m', '--min_impurity_decrease', type=float, default=0., help='Minimum impurity decrease necessary to make a split.')
     argparser.add_argument('-n', '--n_estimators', type=int, default=100, help='Number of estimators (trees) in random forest.')
-    argparser.add_argument('-f', '--n_folds', type=int, default=5, help='Number of folds in cross-validation (>= 2).')
+    argparser.add_argument('-f', '--n_folds', type=int, default=2, help='Number of folds in cross-validation (>= 2).')
     argparser.add_argument('-u', '--units', default=[100], nargs='+', help='Space-delimited list of integers representing number of hidden units to use in MLP classifier.')
     argparser.add_argument('-b', '--compare_to_baseline', action='store_true', help='Whether to compute scores for a matched random baseline.')
     argparser.add_argument('-i', '--images', action='store_true', help='Dump representative images of decision trees.')
@@ -162,7 +162,7 @@ if __name__ == '__main__':
                     data_type=p['data_type']
                 )
     
-                m = load_dnnseg(p['outdir'])
+            m = load_dnnseg(p['outdir'])
 
             if 'classification' in measures or 'segmentation' in measures or args.force_predict:
                 eval_dict = m.run_evaluation(
@@ -253,6 +253,17 @@ if __name__ == '__main__':
                                     info_dict[key] = float(label_probe_dict[x])
 
                         if 'feature_probe' in measures:
+                            if p['feature_map_file']:
+                                feats = get_target_cols(lang)
+                                found = True
+                                for x in feats:
+                                    if x not in df:
+                                        found = False
+                                        break
+                                if not found:
+                                    feature_map = pd.read_csv(p['feature_map_file'])
+                                    df = pd.merge(df, feature_map, left_on=['phn_label'], right_on=['symbol'])
+
                             feature_probe_dict = probe(
                                 df,
                                 'features',
@@ -279,11 +290,11 @@ if __name__ == '__main__':
                                     info_dict[key] = float(feature_probe_dict[x])
 
             info_dict['num_iter'] = int(m.global_step.eval(session=m.sess))
-            info_dict['model_path'] = m.outdir
+            info_dict['model_path'] = p['outdir']
 
             out = yaml.dump(info_dict)
 
-            with open(m.outdir + '/eval_table_%s.yml' % name, 'w') as f:
+            with open(p['outdir'] + '/eval_table_%s.yml' % name, 'w') as f:
                 f.write(out)
 
 

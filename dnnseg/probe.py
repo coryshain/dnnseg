@@ -153,8 +153,7 @@ def probe(
                         units = [int(units)]
                     classifier = MLPClassifier(
                         units,
-                        alpha=regularization_scale,
-                        max_iter=200
+                        alpha=regularization_scale
                     )
 
                 train_select = np.ones(len(X_cur)).astype('bool')
