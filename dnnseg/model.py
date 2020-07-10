@@ -5384,6 +5384,7 @@ class DNNSeg(object):
     def run_evaluation(
             self,
             data,
+            data_name='val',
             n_plot=10,
             ix2label=None,
             training=False,
@@ -5420,6 +5421,7 @@ class DNNSeg(object):
         elif self.task != 'classifier' and evaluate_segmenter:
             eval_dict, _ = self.evaluate_segmenter(
                 data,
+                data_name=data_name,
                 segtype=segtype,
                 plot=n_plot is not None,
                 ix2label=ix2label,

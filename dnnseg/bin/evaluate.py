@@ -21,12 +21,13 @@ if __name__ == '__main__':
     argparser.add_argument('-d', '--data', nargs='+', default=['val'], help='Data to use for evaluation (space-delimited). Either one of ``["train", "val", "test"]``, or a path to a directory containing evaluation data. Each argument to this option is treated as a separate evaluation set.')
     argparser.add_argument('-N', '--names', nargs='*', help='Names for evaluation data. If empty, names are inferred. Otherwise, must have the same number of elements as ``data``.')
     argparser.add_argument('-e', '--eval_measures', nargs='+', default=['all'], help='Measures to output. One of ``["all", "segmentation", "classification", "objective", "label_probe", "feature_probe"]``. ``"segmentation"`` runs boundary and word segmentation scores for words and (if relevant) phones. ``"classification"`` creates hard labels by rounding embeddings and performs unsupervised clustering evaluation for word and (if relevant) phone categories. ``"objective"`` computes the mean value of each of the loss components over the dataset, without updating the model. ``"label_probe"`` runs a supervised MLP probe for phone labels if relevant, otherwise skipped. ``"feature_probe"`` runs a supervised MLP probe for features if relevant, otherwise skipped. ``"all"`` runs all measures.')
+    argparser.add_argument('-F', '--force_predict', action='store_true', help='Force creation of segment tables. Otherwise, table-based evals like the probes will only use already existing tables')
     argparser.add_argument('-t', '--classifier_type', default='mlp',help='Type of classifier to use. One of ``["logreg", "mlp", "random_forest"]``.')
     argparser.add_argument('-r', '--regularization_scale', type=float, default=0.001, help='Level of regularization to use in MLR classification.')
     argparser.add_argument('-M', '--max_depth', type=float, default=None, help='Maximum permissible tree depth.')
     argparser.add_argument('-m', '--min_impurity_decrease', type=float, default=0., help='Minimum impurity decrease necessary to make a split.')
     argparser.add_argument('-n', '--n_estimators', type=int, default=100, help='Number of estimators (trees) in random forest.')
-    argparser.add_argument('-f', '--n_folds', type=int, default=10, help='Number of folds in cross-validation (>= 2).')
+    argparser.add_argument('-f', '--n_folds', type=int, default=5, help='Number of folds in cross-validation (>= 2).')
     argparser.add_argument('-u', '--units', default=[100], nargs='+', help='Space-delimited list of integers representing number of hidden units to use in MLP classifier.')
     argparser.add_argument('-b', '--compare_to_baseline', action='store_true', help='Whether to compute scores for a matched random baseline.')
     argparser.add_argument('-i', '--images', action='store_true', help='Dump representative images of decision trees.')
@@ -49,18 +50,59 @@ if __name__ == '__main__':
 
         t0 = time.time()
 
-        if p['data_type'].lower() == 'acoustic':
-            data_name = 'data_%s_f%s_d%s.obj' %(p['filter_type'], p['n_coef'], p['order'])
-        else:
-            data_name = 'data.obj'
-
-        if 'objective' in measures:
-            train_data_dirs = p.train_data_dir.split()
-            datasets = args.data
-
+        if 'segmentation' in measures or 'classification' in measures or 'objective' in measures or args.force_predict:
+            if p['data_type'].lower() == 'acoustic':
+                data_name = 'data_%s_f%s_d%s.obj' %(p['filter_type'], p['n_coef'], p['order'])
+            else:
+                data_name = 'data.obj'
+    
             if 'objective' in measures:
-                data_dirs = p.train_data_dir.split(';')
-                train_data = Dataset(
+                train_data_dirs = p.train_data_dir.split()
+                datasets = args.data
+    
+                if 'objective' in measures:
+                    data_dirs = p.train_data_dir.split(';')
+                    train_data = Dataset(
+                        data_dirs,
+                        datatype=p['data_type'].lower(),
+                        filter_type=p['filter_type'].lower(),
+                        n_coef=p['n_coef'],
+                        order=p['order'],
+                        force_preprocess=False,
+                        save_preprocessed_data=True
+                    )
+                    if p['oracle_boundaries']:
+                        for x in p['oracle_boundaries'].split():
+                            if x.startswith('rnd'):
+                                length = float(x[3:])
+                                train_data.initialize_random_segmentation(length, save=True)
+    
+                    if args.verbose:
+                        stderr('=' * 50 + '\n')
+                        stderr('TRAINING DATA SUMMARY\n\n')
+                        stderr(train_data.summary(indent=2))
+                        stderr('=' * 50 + '\n\n')
+                else:
+                    train_data = None
+    
+        for i, dataset in enumerate(args.data):
+            info_dict = {}
+
+            if args.names:
+                name = args.names[i]
+            else:
+                name = sn(dataset)
+
+            if 'segmentation' in measures or 'classification' in measures or 'objective' in measures or args.force_predict:
+                if dataset.lower() == 'train':
+                    dataset = p.train_data_dir
+                elif dataset.lower() == 'val':
+                    dataset = p.val_data_dir
+                elif dataset.lower() == 'test':
+                    dataset = p.test_data_dir
+    
+                data_dirs = dataset.split(';')
+                data = Dataset(
                     data_dirs,
                     datatype=p['data_type'].lower(),
                     filter_type=p['filter_type'].lower(),
@@ -73,97 +115,59 @@ if __name__ == '__main__':
                     for x in p['oracle_boundaries'].split():
                         if x.startswith('rnd'):
                             length = float(x[3:])
-                            train_data.initialize_random_segmentation(length, save=True)
-
+                            data.initialize_random_segmentation(length, save=True)
+    
                 if args.verbose:
                     stderr('=' * 50 + '\n')
-                    stderr('TRAINING DATA SUMMARY\n\n')
-                    stderr(train_data.summary(indent=2))
+                    stderr('DATA SUMMARY\n\n')
+                    stderr(data.summary(indent=2))
                     stderr('=' * 50 + '\n\n')
-            else:
-                train_data = None
+    
+                t1 = time.time()
+    
+                stderr('Data loaded in %ds\n\n' %(t1-t0))
+                sys.stderr.flush()
+    
+                stderr('Caching data...\n')
+                sys.stderr.flush()
 
-        for i, dataset in enumerate(args.data):
-            info_dict = {}
-
-            if args.names:
-                name = args.names[i]
-            else:
-                name = sn(dataset)
-
-            if dataset.lower() == 'train':
-                dataset = p.train_data_dir
-            elif dataset.lower() == 'val':
-                dataset = p.val_data_dir
-            elif dataset.lower() == 'test':
-                dataset = p.test_data_dir
-
-            data_dirs = dataset.split(';')
-            data = Dataset(
-                data_dirs,
-                datatype=p['data_type'].lower(),
-                filter_type=p['filter_type'].lower(),
-                n_coef=p['n_coef'],
-                order=p['order'],
-                force_preprocess=False,
-                save_preprocessed_data=True
-            )
-            if p['oracle_boundaries']:
-                for x in p['oracle_boundaries'].split():
-                    if x.startswith('rnd'):
-                        length = float(x[3:])
-                        data.initialize_random_segmentation(length, save=True)
-
-            if args.verbose:
-                stderr('=' * 50 + '\n')
-                stderr('DATA SUMMARY\n\n')
-                stderr(data.summary(indent=2))
-                stderr('=' * 50 + '\n\n')
-
-            t1 = time.time()
-
-            stderr('Data loaded in %ds\n\n' %(t1-t0))
-            sys.stderr.flush()
-
-            stderr('Caching data...\n')
-            sys.stderr.flush()
-
-            if p['pad_seqs']:
-                if p['mask_padding'] and ('hmlstm' in p['encoder_type'].lower() or 'rnn' in p['encoder_type'].lower()):
-                    input_padding = 'post'
+                if p['pad_seqs']:
+                    if p['mask_padding'] and ('hmlstm' in p['encoder_type'].lower() or 'rnn' in p['encoder_type'].lower()):
+                        input_padding = 'post'
+                    else:
+                        input_padding = 'pre'
+                    target_padding = 'post'
                 else:
-                    input_padding = 'pre'
-                target_padding = 'post'
-            else:
-                input_padding = None
-                target_padding = None
+                    input_padding = None
+                    target_padding = None
+    
+                cache_data(
+                    other_data=data,
+                    streaming=p['streaming'],
+                    max_len=p['max_len'],
+                    window_len_bwd=p['window_len_bwd'],
+                    window_len_fwd=p['window_len_fwd'],
+                    segtype=p['segtype'],
+                    data_normalization=p['data_normalization'],
+                    reduction_axis=p['reduction_axis'],
+                    use_normalization_mask=p['use_normalization_mask'],
+                    predict_deltas=p['predict_deltas'],
+                    input_padding=input_padding,
+                    target_padding=target_padding,
+                    reverse_targets=p['reverse_targets'],
+                    resample_inputs=p['resample_inputs'],
+                    resample_targets_bwd=p['resample_targets_bwd'],
+                    resample_targets_fwd=p['resample_targets_fwd'],
+                    task=p['task'],
+                    data_type=p['data_type']
+                )
+    
+                m = load_dnnseg(p['outdir'])
 
-            cache_data(
-                other_data=data,
-                streaming=p['streaming'],
-                max_len=p['max_len'],
-                window_len_bwd=p['window_len_bwd'],
-                window_len_fwd=p['window_len_fwd'],
-                segtype=p['segtype'],
-                data_normalization=p['data_normalization'],
-                reduction_axis=p['reduction_axis'],
-                use_normalization_mask=p['use_normalization_mask'],
-                predict_deltas=p['predict_deltas'],
-                input_padding=input_padding,
-                target_padding=target_padding,
-                reverse_targets=p['reverse_targets'],
-                resample_inputs=p['resample_inputs'],
-                resample_targets_bwd=p['resample_targets_bwd'],
-                resample_targets_fwd=p['resample_targets_fwd'],
-                task=p['task'],
-                data_type=p['data_type']
-            )
-
-            m = load_dnnseg(p['outdir'])
-
-            if 'classification' in measures or 'segmentation' in measures or 'label_probe' in measures or 'feature_probe' in measures:
+            if 'classification' in measures or 'segmentation' in measures or args.force_predict:
                 eval_dict = m.run_evaluation(
                     data,
+                    data_name=name,
                     n_plot=None,
                     ix2label=data.ix2label(p['segtype']),
                     training=False,

@@ -101,9 +101,10 @@ def probe(
             if verbose:
                 stderr('  Variable: "%s"\n' % target_col)
 
-            perm, perm_inv = get_random_permutation(len(X))
-            fold_size = math.ceil(float(len(X)) / n_folds)
-            y = X[target_col]
+            X_cur = X[(~X[target_col].isnull()) & (~X[target_col].isin(['SIL', 'SPN']))]
+            fold_size = math.ceil(float(len(X_cur)) / n_folds)
+            perm, perm_inv = get_random_permutation(len(X_cur))
+            y = X_cur[target_col]
             if len(y.unique()) > 2:
                 avg_method = 'macro'
             else:
@@ -124,10 +125,10 @@ def probe(
             predictions = []
             gold = []
 
-            for j in range(0, len(X), fold_size):
+            for j in range(0, len(X_cur), fold_size):
                 if verbose:
                     sys.stderr.write(
-                        '\r    Fold %d/%d...' % (int(j / fold_size) + 1, math.ceil(len(X) / fold_size)))
+                        '\r    Fold %d/%d...' % (int(j / fold_size) + 1, math.ceil(len(X_cur) / fold_size)))
                     sys.stderr.flush()
                 if classifier_type.lower() == 'random_forest':
                     classifier = RandomForestClassifier(
@@ -143,7 +144,7 @@ def probe(
                         C=regularization_scale,
                         solver='lbfgs',
                         multi_class='auto',
-                        max_iter=200
+                        max_iter=100
                     )
                 elif classifier_type.lower() in ['mlp', 'neural_network']:
                     if isinstance(units, str):
@@ -156,14 +157,14 @@ def probe(
                         max_iter=200
                     )
 
-                train_select = np.ones(len(X)).astype('bool')
+                train_select = np.ones(len(X_cur)).astype('bool')
                 train_select[j:j + fold_size] = False
                 cv_select = np.logical_not(train_select)
                 train_select = train_select[perm_inv]
 
-                X_train = X[input_col_names][train_select]
+                X_train = X_cur[input_col_names][train_select]
                 y_train = y[train_select]
-                X_cv = X[input_col_names][cv_select]
+                X_cv = X_cur[input_col_names][cv_select]
                 y_cv = y[cv_select]
 
                 classifier.fit(X_train, y_train)
