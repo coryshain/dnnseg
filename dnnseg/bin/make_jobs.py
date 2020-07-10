@@ -35,7 +35,7 @@ if __name__ == '__main__':
             f.write('python3 -m dnnseg.bin.train %s\n' % path)
             if args.lang.lower().startswith('eng'):
                 f.write('python3 -m dnnseg.bin.evaluate %s -b -d ../dnnseg_data/zerospeech/english -N eng -l eng -v\n' % path)
-                f.write('python3 -m dnnseg.bin.evaluate %s -b -d ../dnnseg_data/zerospeech/xitsonga -N xit -l xi -v\n' % path)
+                f.write('python3 -m dnnseg.bin.evaluate %s -b -d ../dnnseg_data/zerospeech/xitsonga -N xit -l xit -v\n' % path)
             else:
                 f.write('python3 -m dnnseg.bin.evaluate %s -b -d ../dnnseg_data/zerospeech/xitsonga -N xit -l xit -v\n' % path)
                 f.write('python3 -m dnnseg.bin.evaluate %s -b -d ../dnnseg_data/zerospeech/english -N eng -l eng -v\n' % path)
