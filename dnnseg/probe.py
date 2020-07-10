@@ -163,6 +163,8 @@ def probe(
 
                 X_train = X_cur[input_col_names][train_select]
                 y_train = y[train_select]
+                if len(y_train.unique()) < 2:
+                    break
                 X_cv = X_cur[input_col_names][cv_select]
                 y_cv = y[cv_select]
 
@@ -172,43 +174,45 @@ def probe(
 
             predictions = np.concatenate(predictions, axis=0)
             gold = np.concatenate(gold, axis=0)
-            precision[target_col] = precision_score(gold, predictions, average=avg_method)
-            recall[target_col] = recall_score(gold, predictions, average=avg_method)
-            f1[target_col] = f1_score(gold, predictions, average=avg_method)
-            accuracy[target_col] = accuracy_score(gold, predictions)
 
-            if verbose:
-                stderr('\n    Cross-validation F1 for variable "%s": %.4f\n' % (target_col, f1[target_col]))
-
-            if compare_to_baseline:
-                predictions_baseline = np.random.choice(label_set, size=(len(gold),), p=label_probs)
-                precision_baseline[target_col] = precision_score(gold, predictions_baseline, average=avg_method)
-                recall_baseline[target_col] = recall_score(gold, predictions_baseline, average=avg_method)
-                f1_baseline[target_col] = f1_score(gold, predictions_baseline, average=avg_method)
-                accuracy_baseline[target_col] = accuracy_score(gold, predictions_baseline)
+            if len(predictions) > 0:
+                precision[target_col] = precision_score(gold, predictions, average=avg_method)
+                recall[target_col] = recall_score(gold, predictions, average=avg_method)
+                f1[target_col] = f1_score(gold, predictions, average=avg_method)
+                accuracy[target_col] = accuracy_score(gold, predictions)
 
                 if verbose:
-                    stderr('    Baseline F1 for variable "%s":         %.4f\n' % (target_col, f1_baseline[target_col]))
+                    stderr('\n    Cross-validation F1 for variable "%s": %.4f\n' % (target_col, f1[target_col]))
 
-            if dump_images and classifier_type.lower() == 'random_forest':
-                tree_ix = np.random.randint(n_estimators)
+                if compare_to_baseline:
+                    predictions_baseline = np.random.choice(label_set, size=(len(gold),), p=label_probs)
+                    precision_baseline[target_col] = precision_score(gold, predictions_baseline, average=avg_method)
+                    recall_baseline[target_col] = recall_score(gold, predictions_baseline, average=avg_method)
+                    f1_baseline[target_col] = f1_score(gold, predictions_baseline, average=avg_method)
+                    accuracy_baseline[target_col] = accuracy_score(gold, predictions_baseline)
 
-                graph = export_graphviz(
-                    classifier[tree_ix],
-                    feature_names=input_col_names,
-                    class_names=['-%s' % target_col, '+%s' % target_col],
-                    rounded=True,
-                    proportion=False,
-                    precision=2,
-                    filled=True
-                )
+                    if verbose:
+                        stderr('    Baseline F1 for variable "%s":         %.4f\n' % (target_col, f1_baseline[target_col]))
 
-                (graph,) = pydot.graph_from_dot_data(graph)
+                if dump_images and classifier_type.lower() == 'random_forest':
+                    tree_ix = np.random.randint(n_estimators)
 
-                img_str = '/%s_decision_tree_%s.png'
+                    graph = export_graphviz(
+                        classifier[tree_ix],
+                        feature_names=input_col_names,
+                        class_names=['-%s' % target_col, '+%s' % target_col],
+                        rounded=True,
+                        proportion=False,
+                        precision=2,
+                        filled=True
+                    )
 
-                outfile = outdir + img_str % (name, target_col)
-                graph.write_png(outfile)
+                    (graph,) = pydot.graph_from_dot_data(graph)
+
+                    img_str = '/%s_decision_tree_%s.png'
+
+                    outfile = outdir + img_str % (name, target_col)
+                    graph.write_png(outfile)
 
         macro_avg = {
             'precision': sum(precision[x] for x in precision) / sum(1 for _ in precision),

@@ -258,6 +258,10 @@ if __name__ == '__main__':
 
                         if 'feature_probe' in measures:
                             if p['feature_map_file'] and 'phn_label' in df.columns:
+                                if lang.lower().startswith('eng'):
+                                    feature_map_file = 'english_sampa_to_feats.csv'
+                                else:
+                                    feature_map_file = 'xitsonga_sampa_to_feats.csv'
                                 feats = get_target_cols(lang)
                                 found = True
                                 for x in feats:

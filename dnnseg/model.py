@@ -1418,6 +1418,9 @@ class DNNSeg(object):
                                     if l < self.layers_encoder - 1:
                                         encoder_features_by_seg_cur = (encoder_features_by_seg_cur + 1) / 2
                                         encoder_feature_deltas_cur = (encoder_feature_deltas_cur + 1) / 2
+                            elif activation == 'tanh':
+                                encoder_features_cur = np.atanh(encoder_features_cur * (1 - 2 * self.epsilon) + self.epsilon)
+                                encoder_features_by_seg_cur = np.atanh(encoder_features_by_seg_cur * (1 - 2 * self.epsilon) + self.epsilon)
                             encoder_features_cur *= self.X_mask[..., None]
                             encoder_embeddings_cur *= self.X_mask[..., None]
                             if l < self.layers_encoder - 1:
