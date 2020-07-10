@@ -23,6 +23,7 @@ if __name__ == '__main__':
     argparser.add_argument('-e', '--eval_measures', nargs='+', default=['all'], help='Measures to output. One of ``["all", "segmentation", "classification", "objective", "label_probe", "feature_probe"]``. ``"segmentation"`` runs boundary and word segmentation scores for words and (if relevant) phones. ``"classification"`` creates hard labels by rounding embeddings and performs unsupervised clustering evaluation for word and (if relevant) phone categories. ``"objective"`` computes the mean value of each of the loss components over the dataset, without updating the model. ``"label_probe"`` runs a supervised MLP probe for phone labels if relevant, otherwise skipped. ``"feature_probe"`` runs a supervised MLP probe for features if relevant, otherwise skipped. ``"all"`` runs all measures.')
     argparser.add_argument('-F', '--force_predict', action='store_true', help='Force creation of segment tables. Otherwise, table-based evals like the probes will only use already existing tables')
     argparser.add_argument('-t', '--classifier_type', default='mlr',help='Type of classifier to use. One of ``["mlr", "mlp", "random_forest"]``.')
+    argparser.add_argument('-l', '--language', default=None, help='Language of evaluation dataset(s). If unspecified, inferred from config file.')
     argparser.add_argument('-r', '--regularization_scale', type=float, default=1, help='Level of regularization to use in MLR classification.')
     argparser.add_argument('-M', '--max_depth', type=float, default=None, help='Maximum permissible tree depth.')
     argparser.add_argument('-m', '--min_impurity_decrease', type=float, default=0., help='Minimum impurity decrease necessary to make a split.')
@@ -219,12 +220,15 @@ if __name__ == '__main__':
 
                         df = pd.read_csv(os.path.join(p['outdir'] + '/tables/', path), sep=' ')
 
-                        if p['feature_map_file'] is not None and p['feature_map_file'].lower().startswith('eng'):
-                            lang = 'english'
-                        elif p['feature_map_file'] is not None and p['feature_map_file'].lower().startswith('xit'):
-                            lang = 'xitsonga'
+                        if args.language is None:
+                            if p['feature_map_file'] is not None and p['feature_map_file'].lower().startswith('eng'):
+                                lang = 'english'
+                            elif p['feature_map_file'] is not None and p['feature_map_file'].lower().startswith('xit'):
+                                lang = 'xitsonga'
+                            else:
+                                lang = None
                         else:
-                            lang = None
+                            lang = args.language
 
                         if 'label_probe' in measures:
                             label_probe_dict = probe(
