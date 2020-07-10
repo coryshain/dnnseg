@@ -37,7 +37,7 @@ def get_target_cols(
                                     'back',
                                     'tense', 'stress', 'diphthong']
             elif  lang.lower().startswith('xit'):
-                target_col_names = ['syllabic', 'consonantal', 'sonorant', 'continuant', 'delayed_release', 'approximant',
+                target_col_names = ['consonantal', 'sonorant', 'continuant', 'delayed_release', 'approximant',
                                     'trill', 'nasal', 'voice', 'spread_glottis', 'constricted_glottis', 'labial', 'round',
                                     'labiodental', 'coronal', 'anterior', 'distributed', 'strident', 'lateral', 'dorsal',
                                     'high', 'low', 'front', 'back', 'tense', 'implosive']
@@ -172,10 +172,9 @@ def probe(
                 predictions.append(classifier.predict(X_cv))
                 gold.append(y_cv)
 
-            predictions = np.concatenate(predictions, axis=0)
-            gold = np.concatenate(gold, axis=0)
-
             if len(predictions) > 0:
+                predictions = np.concatenate(predictions, axis=0)
+                gold = np.concatenate(gold, axis=0)
                 precision[target_col] = precision_score(gold, predictions, average=avg_method)
                 recall[target_col] = recall_score(gold, predictions, average=avg_method)
                 f1[target_col] = f1_score(gold, predictions, average=avg_method)
