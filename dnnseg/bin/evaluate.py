@@ -163,10 +163,10 @@ if __name__ == '__main__':
                     data_type=p['data_type']
                 )
     
-            # m = load_dnnseg(p['outdir'])
+            model = load_dnnseg(p['outdir'])
 
             if 'classification' in measures or 'segmentation' in measures or args.force_predict:
-                eval_dict = m.run_evaluation(
+                eval_dict = model.run_evaluation(
                     data,
                     data_name=name,
                     n_plot=None,
@@ -195,7 +195,7 @@ if __name__ == '__main__':
                                 info_dict['_'.join([seg_gold, metric, name, 'l%d' % l])] = float(layer[seg_gold][metric])
 
             if 'objective' in measures:
-                objective_dict = m.get_loss(
+                objective_dict = model.get_loss(
                     train_data,
                     verbose=args.verbose
                 )
@@ -293,7 +293,7 @@ if __name__ == '__main__':
                                         key = key.replace('macro', 'phn_label_macro')
                                     info_dict[key] = float(feature_probe_dict[x])
 
-            # info_dict['num_iter'] = int(m.global_step.eval(session=m.sess))
+            info_dict['num_iter'] = int(model.global_step.eval(session=model.sess))
             info_dict['model_path'] = p['outdir']
 
             out = yaml.dump(info_dict)
