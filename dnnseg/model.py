@@ -1403,22 +1403,22 @@ class DNNSeg(object):
                         encoder_features_by_seg = []
                         encoder_feature_deltas = []
                         for l in range(self.layers_encoder):
+                            if l == self.layers_encoder - 1:
+                                activation = self.encoder_activation
+                            else:
+                                activation = self.encoder_inner_activation
                             encoder_features_cur = encoder_features_tmp[l]
                             encoder_embeddings_cur = encoder_embeddings_tmp[l]
                             if l < self.layers_encoder - 1:
                                 encoder_features_by_seg_cur = encoder_features_by_seg_tmp[l]
                                 encoder_feature_deltas_cur = encoder_feature_deltas_tmp[l]
                             if not self.encoder_state_discretizer and not self.features_encoder[l] and self.xent_state_predictions:
-                                if l == self.layers_encoder - 1:
-                                    activation = self.encoder_activation
-                                else:
-                                    activation = self.encoder_inner_activation
                                 if activation == 'tanh':
                                     encoder_features_cur = ((encoder_features_cur + 1) / 2)
                                     if l < self.layers_encoder - 1:
                                         encoder_features_by_seg_cur = (encoder_features_by_seg_cur + 1) / 2
                                         encoder_feature_deltas_cur = (encoder_feature_deltas_cur + 1) / 2
-                            elif activation == 'tanh':
+                            elif activation == 'tanh' and self.fisher_z_states:
                                 encoder_features_cur = np.atanh(encoder_features_cur * (1 - 2 * self.epsilon) + self.epsilon)
                                 encoder_features_by_seg_cur = np.atanh(encoder_features_by_seg_cur * (1 - 2 * self.epsilon) + self.epsilon)
                             encoder_features_cur *= self.X_mask[..., None]

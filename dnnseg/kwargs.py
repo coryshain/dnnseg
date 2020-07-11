@@ -492,6 +492,12 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to convert encoder state values to probabilities and predict them using cross-entropy."
     ),
     Kwarg(
+        'fisher_z_states',
+        False,
+        bool,
+        "Whether to arctanh transform tanh-activated encodings for decoding and targets. Ignored unless ``encoder_inner_activation`` is ``tanh``."
+    ),
+    Kwarg(
         'use_mae',
         False,
         bool,
