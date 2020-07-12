@@ -279,13 +279,13 @@ def probe(
         out_dict['_'.join([name, 'macro_p'])] = macro_avg['precision']
         out_dict['_'.join([name, 'macro_r'])] = macro_avg['recall']
         out_dict['_'.join([name, 'macro_f1'])] = macro_avg['f1']
-        out_dict['_'.join([name, 'acc'])] = macro_avg['accuracy']
+        out_dict['_'.join([name, 'macro_acc'])] = macro_avg['accuracy']
 
         if compare_to_baseline:
             out_dict['_'.join([name, 'baseline_macro_p'])] = macro_avg_baseline['precision']
             out_dict['_'.join([name, 'baseline_macro_r'])] = macro_avg_baseline['recall']
             out_dict['_'.join([name, 'baseline_macro_f1'])] = macro_avg_baseline['f1']
-            out_dict['_'.join([name, 'baseline_acc'])] = macro_avg_baseline['accuracy']
+            out_dict['_'.join([name, 'baseline_macro_acc'])] = macro_avg_baseline['accuracy']
 
         if verbose:
             sys.stderr.write('\n')

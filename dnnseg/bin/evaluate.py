@@ -294,7 +294,7 @@ if __name__ == '__main__':
                                 for x in feature_probe_dict:
                                     key = x
                                     if 'macro' in key:
-                                        key = key.replace('macro', 'phn_label_macro')
+                                        key = key.replace('macro', 'phn_feature_macro')
                                     info_dict[key] = float(feature_probe_dict[x])
 
             info_dict['num_iter'] = int(model.global_step.eval(session=model.sess))
