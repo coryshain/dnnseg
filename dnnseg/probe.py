@@ -172,7 +172,7 @@ def probe(
                 predictions.append(classifier.predict(X_cv))
                 gold.append(y_cv)
 
-            if len(predictions) > 0:
+            if len(predictions):
                 predictions = np.concatenate(predictions, axis=0)
                 gold = np.concatenate(gold, axis=0)
                 precision[target_col] = precision_score(gold, predictions, average=avg_method)

@@ -94,6 +94,22 @@ if __name__ == '__main__':
             else:
                 name = sn(dataset)
 
+            if args.language is None:
+                if p['feature_map_file'] is not None and p['feature_map_file'].lower().startswith('eng'):
+                    lang = 'english'
+                elif p['feature_map_file'] is not None and p['feature_map_file'].lower().startswith('xit'):
+                    lang = 'xitsonga'
+                else:
+                    lang = None
+            else:
+                lang = args.language
+            if lang.lower().startswith('eng'):
+                feature_map_file = 'english_sampa_to_feats.csv'
+            elif lang.lower().startswith('xit'):
+                feature_map_file = 'xitsonga_sampa_to_feats.csv'
+            else:
+                feature_map_file = None
+
             if 'segmentation' in measures or 'classification' in measures or 'objective' in measures or args.force_predict:
                 if dataset.lower() == 'train':
                     dataset = p.train_data_dir
@@ -220,16 +236,6 @@ if __name__ == '__main__':
 
                         df = pd.read_csv(os.path.join(p['outdir'] + '/tables/', path), sep=' ')
 
-                        if args.language is None:
-                            if p['feature_map_file'] is not None and p['feature_map_file'].lower().startswith('eng'):
-                                lang = 'english'
-                            elif p['feature_map_file'] is not None and p['feature_map_file'].lower().startswith('xit'):
-                                lang = 'xitsonga'
-                            else:
-                                lang = None
-                        else:
-                            lang = args.language
-
                         if 'label_probe' in measures:
                             label_probe_dict = probe(
                                 df,
@@ -257,11 +263,7 @@ if __name__ == '__main__':
                                     info_dict[key] = float(label_probe_dict[x])
 
                         if 'feature_probe' in measures:
-                            if p['feature_map_file'] and 'phn_label' in df.columns:
-                                if lang.lower().startswith('eng'):
-                                    feature_map_file = 'english_sampa_to_feats.csv'
-                                else:
-                                    feature_map_file = 'xitsonga_sampa_to_feats.csv'
+                            if 'phn_label' in df.columns:
                                 feats = get_target_cols(lang)
                                 found = True
                                 for x in feats:
@@ -269,8 +271,8 @@ if __name__ == '__main__':
                                         found = False
                                         break
                                 if not found:
-                                    feature_map = pd.read_csv(p['feature_map_file'])
-                                    df = pd.merge(df, feature_map, left_on=['phn_label'], right_on=['symbol'])
+                                    feature_map = pd.read_csv(feature_map_file)
+                                    df = pd.merge(df, feature_map, how='left', left_on=['phn_label'], right_on=['symbol'])
 
                             feature_probe_dict = probe(
                                 df,

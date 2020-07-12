@@ -5126,6 +5126,7 @@ class DNNSeg(object):
             random_baseline=True,
             save_embeddings=False,
             report_classeval=False,
+            feature_map_path=None,
             plot=True,
             outdir=None,
             verbose=True
@@ -5173,9 +5174,13 @@ class DNNSeg(object):
                 padding=padding
             )
 
-            if self.feature_map is not None:
-                phn_tables = [pd.merge(x, self.feature_map, left_on=['phn_label'], right_on=['symbol']) for x in
-                              phn_tables]
+            if feature_map_path:
+                feature_map = pd.read_csv(feature_map_path)
+            else:
+                feature_map = self.feature_map
+
+            if feature_map is not None:
+                phn_tables = [pd.merge(x, feature_map, how='left', left_on=['phn_label'], right_on=['symbol']) for x in phn_tables]
             if self.label_map is not None:
                 for table in pred_tables:
                     ipa = pd.Series(table.phn_label).replace(self.label_map)
@@ -5324,6 +5329,7 @@ class DNNSeg(object):
             plot=True,
             save_embeddings=True,
             ix2label=None,
+            feature_map_path=None,
             verbose=True
     ):
         report_classeval = False
@@ -5370,6 +5376,7 @@ class DNNSeg(object):
                 random_baseline=random_baseline,
                 save_embeddings=save_embeddings,
                 report_classeval=report_classeval,
+                feature_map_path=feature_map_path,
                 plot=plot,
                 verbose=verbose
             )
@@ -5390,6 +5397,7 @@ class DNNSeg(object):
             data_name='val',
             n_plot=10,
             ix2label=None,
+            feature_map_path=None,
             training=False,
             segtype=None,
             random_baseline=True,
@@ -5428,6 +5436,7 @@ class DNNSeg(object):
                 segtype=segtype,
                 plot=n_plot is not None,
                 ix2label=ix2label,
+                feature_map_path=feature_map_path,
                 random_baseline=random_baseline,
                 save_embeddings=save_embeddings,
                 verbose=verbose
@@ -5529,6 +5538,7 @@ class DNNSeg(object):
             encoder_passthru_adversarial_losses=None,
             random_baseline=True,
             ix2label=None,
+            feature_map_path=None,
             n_plot=10,
             check_numerics=False,
             verbose=True
@@ -5554,6 +5564,7 @@ class DNNSeg(object):
                         eval_dict = self.run_evaluation(
                             data,
                             ix2label=ix2label,
+                            feature_map_path=feature_map_path,
                             segtype=self.segtype,
                             evaluate_classifier=evaluate,
                             evaluate_segmenter=evaluate,
@@ -5682,6 +5693,7 @@ class DNNSeg(object):
             data_feed,
             val_data=None,
             ix2label=None,
+            feature_map_path=None,
             n_plot=10,
             verbose=True,
             update=True
@@ -5932,6 +5944,7 @@ class DNNSeg(object):
                             encoder_passthru_adversarial_losses=[x / (i_pb + 1) for x in
                                                                  encoder_passthru_adversarial_loss_total] if self.passthru_adversarial_gradient_scale else None,
                             ix2label=ix2label,
+                            feature_map_path=feature_map_path,
                             check_numerics=False,
                             verbose=verbose_cur
                         )
@@ -6134,6 +6147,7 @@ class DNNSeg(object):
             val_data=None,
             n_iter=None,
             ix2label=None,
+            feature_map_path=None,
             n_plot=10,
             verbose=True
     ):
@@ -6211,6 +6225,7 @@ class DNNSeg(object):
                         # evaluate=True,
                         n_plot=n_plot,
                         ix2label=ix2label,
+                        feature_map_path=feature_map_path,
                         save_embeddings=True,
                         check_numerics=False,
                         verbose=verbose
@@ -6240,6 +6255,7 @@ class DNNSeg(object):
                         data_feed_train,
                         val_data=val_data,
                         ix2label=ix2label,
+                        feature_map_path=feature_map_path,
                         n_plot=n_plot,
                         verbose=verbose,
                         update=True
