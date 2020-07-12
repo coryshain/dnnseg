@@ -213,82 +213,82 @@ def probe(
                     outfile = outdir + img_str % (name, target_col)
                     graph.write_png(outfile)
 
-        macro_avg = {
-            'precision': sum(precision[x] for x in precision) / sum(1 for _ in precision),
-            'recall': sum(recall[x] for x in recall) / sum(1 for _ in recall),
-            'f1': sum(f1[x] for x in f1) / sum(1 for _ in f1),
-            'accuracy': sum(accuracy[x] for x in accuracy) / sum(1 for _ in accuracy)
-        }
-
-        if verbose:
-            stderr('    Model macro averages:\n')
-            stderr('      P:   %.4f\n' % macro_avg['precision'])
-            stderr('      R:   %.4f\n' % macro_avg['recall'])
-            stderr('      F1:  %.4f\n' % macro_avg['f1'])
-            stderr('      ACC: %.4f\n' % macro_avg['accuracy'])
-
-        if compare_to_baseline:
-            macro_avg_baseline = {
-                'precision': sum(precision_baseline[x] for x in precision_baseline) / sum(
-                    1 for _ in precision_baseline),
-                'recall': sum(recall_baseline[x] for x in recall_baseline) / sum(1 for _ in recall_baseline),
-                'f1': sum(f1_baseline[x] for x in f1_baseline) / sum(1 for _ in f1_baseline),
-                'accuracy': sum(accuracy_baseline[x] for x in accuracy_baseline) / sum(
-                    1 for _ in accuracy_baseline)
+        if len(precision):
+            macro_avg = {
+                'precision': sum(precision[x] for x in precision) / sum(1 for _ in precision),
+                'recall': sum(recall[x] for x in recall) / sum(1 for _ in recall),
+                'f1': sum(f1[x] for x in f1) / sum(1 for _ in f1),
+                'accuracy': sum(accuracy[x] for x in accuracy) / sum(1 for _ in accuracy)
             }
 
             if verbose:
-                stderr('    Baseline macro averages:\n')
-                stderr('      P:   %.4f\n' % macro_avg_baseline['precision'])
-                stderr('      R:   %.4f\n' % macro_avg_baseline['recall'])
-                stderr('      F1:  %.4f\n' % macro_avg_baseline['f1'])
-                stderr('      ACC: %.4f\n' % macro_avg_baseline['accuracy'])
+                stderr('    Model macro averages:\n')
+                stderr('      P:   %.4f\n' % macro_avg['precision'])
+                stderr('      R:   %.4f\n' % macro_avg['recall'])
+                stderr('      F1:  %.4f\n' % macro_avg['f1'])
+                stderr('      ACC: %.4f\n' % macro_avg['accuracy'])
 
-        path_str = '/%s_classifier_scores.txt'
-        outfile = outdir + path_str % name
-        with open(outfile, 'w') as f:
-            f.write('feature precision recall f1 accuracy\n')
-            for c in sorted(list(f1.keys())):
-                f.write('%s %s %s %s %s\n' % (c, precision[c], recall[c], f1[c], accuracy[c]))
-            f.write('MACRO %s %s %s %s\n' % (
-            macro_avg['precision'], macro_avg['recall'], macro_avg['f1'], macro_avg['accuracy']))
+            if compare_to_baseline:
+                macro_avg_baseline = {
+                    'precision': sum(precision_baseline[x] for x in precision_baseline) / sum(
+                        1 for _ in precision_baseline),
+                    'recall': sum(recall_baseline[x] for x in recall_baseline) / sum(1 for _ in recall_baseline),
+                    'f1': sum(f1_baseline[x] for x in f1_baseline) / sum(1 for _ in f1_baseline),
+                    'accuracy': sum(accuracy_baseline[x] for x in accuracy_baseline) / sum(
+                        1 for _ in accuracy_baseline)
+                }
 
-        if compare_to_baseline:
-            path_str = '/%s_baseline_scores.txt'
+                if verbose:
+                    stderr('    Baseline macro averages:\n')
+                    stderr('      P:   %.4f\n' % macro_avg_baseline['precision'])
+                    stderr('      R:   %.4f\n' % macro_avg_baseline['recall'])
+                    stderr('      F1:  %.4f\n' % macro_avg_baseline['f1'])
+                    stderr('      ACC: %.4f\n' % macro_avg_baseline['accuracy'])
+
+            path_str = '/%s_classifier_scores.txt'
             outfile = outdir + path_str % name
             with open(outfile, 'w') as f:
                 f.write('feature precision recall f1 accuracy\n')
                 for c in sorted(list(f1.keys())):
-                    f.write('%s %s %s %s %s\n' % (
-                    c, precision_baseline[c], recall_baseline[c], f1_baseline[c], accuracy_baseline[c]))
-                f.write('MACRO %s %s %s %s\n' % (
-                macro_avg_baseline['precision'], macro_avg_baseline['recall'], macro_avg_baseline['f1'],
-                macro_avg_baseline['accuracy']))
-
-        for c in sorted(list(f1.keys())):
-            key_base = '_'.join([name, c])
-            out_dict[key_base + '_p'] = precision[c]
-            out_dict[key_base + '_r'] = recall[c]
-            out_dict[key_base + '_f1'] = f1[c]
+                    f.write('%s %s %s %s %s\n' % (c, precision[c], recall[c], f1[c], accuracy[c]))
+                f.write('MACRO %s %s %s %s\n' % (macro_avg['precision'], macro_avg['recall'], macro_avg['f1'], macro_avg['accuracy']))
 
             if compare_to_baseline:
-                out_dict[key_base + '_baseline_p'] = precision_baseline[c]
-                out_dict[key_base + '_baseline_r'] = recall_baseline[c]
-                out_dict[key_base + '_baseline_f1'] = f1_baseline[c]
+                path_str = '/%s_baseline_scores.txt'
+                outfile = outdir + path_str % name
+                with open(outfile, 'w') as f:
+                    f.write('feature precision recall f1 accuracy\n')
+                    for c in sorted(list(f1.keys())):
+                        f.write('%s %s %s %s %s\n' % (
+                        c, precision_baseline[c], recall_baseline[c], f1_baseline[c], accuracy_baseline[c]))
+                    f.write('MACRO %s %s %s %s\n' % (
+                    macro_avg_baseline['precision'], macro_avg_baseline['recall'], macro_avg_baseline['f1'],
+                    macro_avg_baseline['accuracy']))
 
-        out_dict['_'.join([name, 'macro_p'])] = macro_avg['precision']
-        out_dict['_'.join([name, 'macro_r'])] = macro_avg['recall']
-        out_dict['_'.join([name, 'macro_f1'])] = macro_avg['f1']
-        out_dict['_'.join([name, 'macro_acc'])] = macro_avg['accuracy']
+            for c in sorted(list(f1.keys())):
+                key_base = '_'.join([name, c])
+                out_dict[key_base + '_p'] = precision[c]
+                out_dict[key_base + '_r'] = recall[c]
+                out_dict[key_base + '_f1'] = f1[c]
 
-        if compare_to_baseline:
-            out_dict['_'.join([name, 'baseline_macro_p'])] = macro_avg_baseline['precision']
-            out_dict['_'.join([name, 'baseline_macro_r'])] = macro_avg_baseline['recall']
-            out_dict['_'.join([name, 'baseline_macro_f1'])] = macro_avg_baseline['f1']
-            out_dict['_'.join([name, 'baseline_macro_acc'])] = macro_avg_baseline['accuracy']
+                if compare_to_baseline:
+                    out_dict[key_base + '_baseline_p'] = precision_baseline[c]
+                    out_dict[key_base + '_baseline_r'] = recall_baseline[c]
+                    out_dict[key_base + '_baseline_f1'] = f1_baseline[c]
 
-        if verbose:
-            sys.stderr.write('\n')
-            sys.stderr.flush()
+            out_dict['_'.join([name, 'macro_p'])] = macro_avg['precision']
+            out_dict['_'.join([name, 'macro_r'])] = macro_avg['recall']
+            out_dict['_'.join([name, 'macro_f1'])] = macro_avg['f1']
+            out_dict['_'.join([name, 'macro_acc'])] = macro_avg['accuracy']
+
+            if compare_to_baseline:
+                out_dict['_'.join([name, 'baseline_macro_p'])] = macro_avg_baseline['precision']
+                out_dict['_'.join([name, 'baseline_macro_r'])] = macro_avg_baseline['recall']
+                out_dict['_'.join([name, 'baseline_macro_f1'])] = macro_avg_baseline['f1']
+                out_dict['_'.join([name, 'baseline_macro_acc'])] = macro_avg_baseline['accuracy']
+
+            if verbose:
+                sys.stderr.write('\n')
+                sys.stderr.flush()
 
     return out_dict
