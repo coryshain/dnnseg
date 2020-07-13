@@ -103,115 +103,116 @@ def probe(
 
             X_cur = X[(~X[target_col].isnull()) & (~X[target_col].isin(['SIL', 'SPN']))]
             fold_size = math.ceil(float(len(X_cur)) / n_folds)
-            perm, perm_inv = get_random_permutation(len(X_cur))
-            y = X_cur[target_col]
-            if len(y.unique()) > 2:
-                avg_method = 'macro'
-            else:
-                avg_method = 'binary'
-                if y.sum() > len(y) / 2: # Majority class is positive, flip
-                    y = 1 - y
+            if fold_size:
+                perm, perm_inv = get_random_permutation(len(X_cur))
+                y = X_cur[target_col]
+                if len(y.unique()) > 2:
+                    avg_method = 'macro'
+                else:
+                    avg_method = 'binary'
+                    if y.sum() > len(y) / 2: # Majority class is positive, flip
+                        y = 1 - y
 
-            label_set, label_counts = np.unique(y.values, return_counts=True)
-            label_probs = label_counts / label_counts.sum()
-
-            if verbose:
-                sys.stderr.write('\r    Label proportions:\n')
-                sys.stderr.flush()
-                for level, prob in zip(label_set, label_probs):
-                    sys.stderr.write('\r      %s: %s\n' % (level, prob))
-                    sys.stderr.flush()
-
-            predictions = []
-            gold = []
-
-            for j in range(0, len(X_cur), fold_size):
-                if verbose:
-                    sys.stderr.write(
-                        '\r    Fold %d/%d...' % (int(j / fold_size) + 1, math.ceil(len(X_cur) / fold_size)))
-                    sys.stderr.flush()
-                if classifier_type.lower() == 'random_forest':
-                    classifier = RandomForestClassifier(
-                        n_estimators=n_estimators,
-                        criterion='entropy',
-                        class_weight='balanced',
-                        max_depth=max_depth,
-                        min_impurity_decrease=min_impurity_decrease
-                    )
-                elif classifier_type.lower() in ['mlr', 'logreg', 'logistic_regression']:
-                    classifier = LogisticRegression(
-                        class_weight='balanced',
-                        C=regularization_scale,
-                        solver='lbfgs',
-                        multi_class='auto',
-                        max_iter=100
-                    )
-                elif classifier_type.lower() in ['mlp', 'neural_network']:
-                    if isinstance(units, str):
-                        units = [int(x) for x in units.split()]
-                    if not (isinstance(units, list) or isinstance(units, tuple)):
-                        units = [int(units)]
-                    classifier = MLPClassifier(
-                        units,
-                        alpha=regularization_scale
-                    )
-
-                train_select = np.ones(len(X_cur)).astype('bool')
-                train_select[j:j + fold_size] = False
-                cv_select = np.logical_not(train_select)
-                train_select = train_select[perm_inv]
-
-                X_train = X_cur[input_col_names][train_select]
-                y_train = y[train_select]
-                if len(y_train.unique()) < 2:
-                    break
-                X_cv = X_cur[input_col_names][cv_select]
-                y_cv = y[cv_select]
-
-                classifier.fit(X_train, y_train)
-                predictions.append(classifier.predict(X_cv))
-                gold.append(y_cv)
-
-            if len(predictions):
-                predictions = np.concatenate(predictions, axis=0)
-                gold = np.concatenate(gold, axis=0)
-                precision[target_col] = precision_score(gold, predictions, average=avg_method)
-                recall[target_col] = recall_score(gold, predictions, average=avg_method)
-                f1[target_col] = f1_score(gold, predictions, average=avg_method)
-                accuracy[target_col] = accuracy_score(gold, predictions)
+                label_set, label_counts = np.unique(y.values, return_counts=True)
+                label_probs = label_counts / label_counts.sum()
 
                 if verbose:
-                    stderr('\n    Cross-validation F1 for variable "%s": %.4f\n' % (target_col, f1[target_col]))
+                    sys.stderr.write('\r    Label proportions:\n')
+                    sys.stderr.flush()
+                    for level, prob in zip(label_set, label_probs):
+                        sys.stderr.write('\r      %s: %s\n' % (level, prob))
+                        sys.stderr.flush()
 
-                if compare_to_baseline:
-                    predictions_baseline = np.random.choice(label_set, size=(len(gold),), p=label_probs)
-                    precision_baseline[target_col] = precision_score(gold, predictions_baseline, average=avg_method)
-                    recall_baseline[target_col] = recall_score(gold, predictions_baseline, average=avg_method)
-                    f1_baseline[target_col] = f1_score(gold, predictions_baseline, average=avg_method)
-                    accuracy_baseline[target_col] = accuracy_score(gold, predictions_baseline)
+                predictions = []
+                gold = []
+
+                for j in range(0, len(X_cur), fold_size):
+                    if verbose:
+                        sys.stderr.write(
+                            '\r    Fold %d/%d...' % (int(j / fold_size) + 1, math.ceil(len(X_cur) / fold_size)))
+                        sys.stderr.flush()
+                    if classifier_type.lower() == 'random_forest':
+                        classifier = RandomForestClassifier(
+                            n_estimators=n_estimators,
+                            criterion='entropy',
+                            class_weight='balanced',
+                            max_depth=max_depth,
+                            min_impurity_decrease=min_impurity_decrease
+                        )
+                    elif classifier_type.lower() in ['mlr', 'logreg', 'logistic_regression']:
+                        classifier = LogisticRegression(
+                            class_weight='balanced',
+                            C=regularization_scale,
+                            solver='lbfgs',
+                            multi_class='auto',
+                            max_iter=100
+                        )
+                    elif classifier_type.lower() in ['mlp', 'neural_network']:
+                        if isinstance(units, str):
+                            units = [int(x) for x in units.split()]
+                        if not (isinstance(units, list) or isinstance(units, tuple)):
+                            units = [int(units)]
+                        classifier = MLPClassifier(
+                            units,
+                            alpha=regularization_scale
+                        )
+
+                    train_select = np.ones(len(X_cur)).astype('bool')
+                    train_select[j:j + fold_size] = False
+                    cv_select = np.logical_not(train_select)
+                    train_select = train_select[perm_inv]
+
+                    X_train = X_cur[input_col_names][train_select]
+                    y_train = y[train_select]
+                    if len(y_train.unique()) < 2:
+                        break
+                    X_cv = X_cur[input_col_names][cv_select]
+                    y_cv = y[cv_select]
+
+                    classifier.fit(X_train, y_train)
+                    predictions.append(classifier.predict(X_cv))
+                    gold.append(y_cv)
+
+                if len(predictions):
+                    predictions = np.concatenate(predictions, axis=0)
+                    gold = np.concatenate(gold, axis=0)
+                    precision[target_col] = precision_score(gold, predictions, average=avg_method)
+                    recall[target_col] = recall_score(gold, predictions, average=avg_method)
+                    f1[target_col] = f1_score(gold, predictions, average=avg_method)
+                    accuracy[target_col] = accuracy_score(gold, predictions)
 
                     if verbose:
-                        stderr('    Baseline F1 for variable "%s":         %.4f\n' % (target_col, f1_baseline[target_col]))
+                        stderr('\n    Cross-validation F1 for variable "%s": %.4f\n' % (target_col, f1[target_col]))
 
-                if dump_images and classifier_type.lower() == 'random_forest':
-                    tree_ix = np.random.randint(n_estimators)
+                    if compare_to_baseline:
+                        predictions_baseline = np.random.choice(label_set, size=(len(gold),), p=label_probs)
+                        precision_baseline[target_col] = precision_score(gold, predictions_baseline, average=avg_method)
+                        recall_baseline[target_col] = recall_score(gold, predictions_baseline, average=avg_method)
+                        f1_baseline[target_col] = f1_score(gold, predictions_baseline, average=avg_method)
+                        accuracy_baseline[target_col] = accuracy_score(gold, predictions_baseline)
 
-                    graph = export_graphviz(
-                        classifier[tree_ix],
-                        feature_names=input_col_names,
-                        class_names=['-%s' % target_col, '+%s' % target_col],
-                        rounded=True,
-                        proportion=False,
-                        precision=2,
-                        filled=True
-                    )
+                        if verbose:
+                            stderr('    Baseline F1 for variable "%s":         %.4f\n' % (target_col, f1_baseline[target_col]))
 
-                    (graph,) = pydot.graph_from_dot_data(graph)
+                    if dump_images and classifier_type.lower() == 'random_forest':
+                        tree_ix = np.random.randint(n_estimators)
 
-                    img_str = '/%s_decision_tree_%s.png'
+                        graph = export_graphviz(
+                            classifier[tree_ix],
+                            feature_names=input_col_names,
+                            class_names=['-%s' % target_col, '+%s' % target_col],
+                            rounded=True,
+                            proportion=False,
+                            precision=2,
+                            filled=True
+                        )
 
-                    outfile = outdir + img_str % (name, target_col)
-                    graph.write_png(outfile)
+                        (graph,) = pydot.graph_from_dot_data(graph)
+
+                        img_str = '/%s_decision_tree_%s.png'
+
+                        outfile = outdir + img_str % (name, target_col)
+                        graph.write_png(outfile)
 
         if len(precision):
             macro_avg = {
