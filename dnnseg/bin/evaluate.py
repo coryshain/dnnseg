@@ -104,11 +104,14 @@ if __name__ == '__main__':
             else:
                 lang = args.language
             if lang.lower().startswith('eng'):
-                feature_map_file = 'english_sampa_to_feats.csv'
+                label_map_path = 'english_sampa_to_ipa.csv'
+                feature_map_path = 'english_sampa_to_feats.csv'
             elif lang.lower().startswith('xit'):
-                feature_map_file = 'xitsonga_sampa_to_feats.csv'
+                label_map_path = 'xitsonga_sampa_to_ipa.csv'
+                feature_map_path = 'xitsonga_sampa_to_feats.csv'
             else:
-                feature_map_file = None
+                label_map_path = None
+                feature_map_path = None
 
             if 'segmentation' in measures or 'classification' in measures or 'objective' in measures or args.force_predict:
                 if dataset.lower() == 'train':
@@ -187,6 +190,8 @@ if __name__ == '__main__':
                     data_name=name,
                     n_plot=None,
                     ix2label=data.ix2label(p['segtype']),
+                    label_map_path=label_map_path,
+                    feature_map_path=feature_map_path,
                     training=False,
                     segtype=p['segtype'],
                     random_baseline=True,
@@ -263,17 +268,6 @@ if __name__ == '__main__':
                                     info_dict[key] = float(label_probe_dict[x])
 
                         if 'feature_probe' in measures:
-                            if 'phn_label' in df.columns:
-                                feats = get_target_cols(lang)
-                                found = True
-                                for x in feats:
-                                    if x not in df:
-                                        found = False
-                                        break
-                                if not found:
-                                    feature_map = pd.read_csv(feature_map_file)
-                                    df = pd.merge(df, feature_map, how='left', left_on=['phn_label'], right_on=['symbol'])
-
                             feature_probe_dict = probe(
                                 df,
                                 'features',

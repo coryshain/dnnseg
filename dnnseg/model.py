@@ -5126,11 +5126,22 @@ class DNNSeg(object):
             random_baseline=True,
             save_embeddings=False,
             report_classeval=False,
+            label_map_path=None,
             feature_map_path=None,
             plot=True,
             outdir=None,
             verbose=True
     ):
+        if label_map_path:
+            label_map = pd.read_csv(feature_map_path)
+        else:
+            label_map = self.label_map
+
+        if feature_map_path:
+            feature_map = pd.read_csv(feature_map_path)
+        else:
+            feature_map = self.feature_map
+
         summary = ''
 
         if verbose:
@@ -5174,20 +5185,17 @@ class DNNSeg(object):
                 padding=padding
             )
 
-            if feature_map_path:
-                feature_map = pd.read_csv(feature_map_path)
-            else:
-                feature_map = self.feature_map
-
             if feature_map is not None:
                 phn_tables = [pd.merge(x, feature_map, how='left', left_on=['phn_label'], right_on=['symbol']) for x in phn_tables]
-            if self.label_map is not None:
+                pred_tables = [pd.merge(x, feature_map, how='left', left_on=['phn_label'], right_on=['symbol']) for x in pred_tables]
+            if label_map is not None:
                 for table in pred_tables:
-                    ipa = pd.Series(table.phn_label).replace(self.label_map)
+                    ipa = pd.Series(table.phn_label).replace(label_map)
                     table['IPA'] = ipa
                 for table in phn_tables:
-                    ipa = pd.Series(table.phn_label).replace(self.label_map)
+                    ipa = pd.Series(table.phn_label).replace(label_map)
                     table['IPA'] = ipa
+            pred_tables = [x.sort_values(['speaker', 'fileID', 'start']) for x in pred_tables]
             phn_tables = [x.sort_values(['speaker', 'fileID', 'start']) for x in phn_tables]
         else:
             phn_tables = None
@@ -5329,6 +5337,7 @@ class DNNSeg(object):
             plot=True,
             save_embeddings=True,
             ix2label=None,
+            label_map_path=None,
             feature_map_path=None,
             verbose=True
     ):
@@ -5376,6 +5385,7 @@ class DNNSeg(object):
                 random_baseline=random_baseline,
                 save_embeddings=save_embeddings,
                 report_classeval=report_classeval,
+                label_map_path=label_map_path,
                 feature_map_path=feature_map_path,
                 plot=plot,
                 verbose=verbose
@@ -5398,6 +5408,7 @@ class DNNSeg(object):
             n_plot=10,
             ix2label=None,
             feature_map_path=None,
+            label_map_path=None,
             training=False,
             segtype=None,
             random_baseline=True,
@@ -5437,6 +5448,7 @@ class DNNSeg(object):
                 plot=n_plot is not None,
                 ix2label=ix2label,
                 feature_map_path=feature_map_path,
+                label_map_path=label_map_path,
                 random_baseline=random_baseline,
                 save_embeddings=save_embeddings,
                 verbose=verbose
@@ -5538,6 +5550,7 @@ class DNNSeg(object):
             encoder_passthru_adversarial_losses=None,
             random_baseline=True,
             ix2label=None,
+            label_map_path=None,
             feature_map_path=None,
             n_plot=10,
             check_numerics=False,
@@ -5564,6 +5577,7 @@ class DNNSeg(object):
                         eval_dict = self.run_evaluation(
                             data,
                             ix2label=ix2label,
+                            label_map_path=label_map_path,
                             feature_map_path=feature_map_path,
                             segtype=self.segtype,
                             evaluate_classifier=evaluate,
@@ -5944,6 +5958,7 @@ class DNNSeg(object):
                             encoder_passthru_adversarial_losses=[x / (i_pb + 1) for x in
                                                                  encoder_passthru_adversarial_loss_total] if self.passthru_adversarial_gradient_scale else None,
                             ix2label=ix2label,
+                            label_map_path=label_map_path,
                             feature_map_path=feature_map_path,
                             check_numerics=False,
                             verbose=verbose_cur
@@ -6225,6 +6240,7 @@ class DNNSeg(object):
                         # evaluate=True,
                         n_plot=n_plot,
                         ix2label=ix2label,
+                        label_map_path=label_map_path,
                         feature_map_path=feature_map_path,
                         save_embeddings=True,
                         check_numerics=False,
