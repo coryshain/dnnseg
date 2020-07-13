@@ -5715,6 +5715,7 @@ class DNNSeg(object):
             data_feed,
             val_data=None,
             ix2label=None,
+            label_map_path=None,
             feature_map_path=None,
             n_plot=10,
             verbose=True,
