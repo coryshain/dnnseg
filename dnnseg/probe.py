@@ -106,7 +106,7 @@ def probe(
             if fold_size:
                 perm, perm_inv = get_random_permutation(len(X_cur))
                 y = X_cur[target_col]
-                if len(y.unique()) > 2:
+                if pd.api.types.is_string_dtype(y) or len(y.unique()) > 2:
                     avg_method = 'macro'
                 else:
                     avg_method = 'binary'
