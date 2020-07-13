@@ -5319,6 +5319,14 @@ class DNNSeg(object):
                         tol=0.02
                     )
                     matched_phn.rename(columns={'label': 'phn_label'}, inplace=True)
+
+                    if feature_map is not None:
+                        matched_phn = pd.merge(matched_phn, feature_map, how='left', left_on=['phn_label'], right_on=['symbol'])
+                    if label_map is not None:
+                        ipa = pd.Series(matched_phn.phn_label).replace(label_map)
+                        matched_phn['IPA'] = ipa
+                    matched_phn = matched_phn.sort_values(['speaker', 'fileID', 'start'])
+
                     matched_phn.to_csv(
                         outdir + '/tables/embeddings_matched_phn_segs_%s_l%d.csv' % (data_name, l),
                         sep=' ',

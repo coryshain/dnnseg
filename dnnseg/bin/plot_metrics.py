@@ -128,7 +128,7 @@ if __name__ == '__main__':
                 pivot.dropna(axis=1, how='all', inplace=True)
 
                 if args.dump_data:
-                    pivot.to_csv(outpath + '/%s.csv' % m, sep=' ', na_rep='NaN')
+                    pivot.to_csv(outpath + '/%s_%s.csv' % (eval_name, m), sep=' ', na_rep='NaN')
 
                 if args.heatmap:
                     levels = {c: list(pivot.index.get_level_values(c).unique()) for c in pivot.index.names}
@@ -229,7 +229,7 @@ if __name__ == '__main__':
 
                 fig.tight_layout()
 
-                fig.savefig(outpath + '/%s.png' % m)
+                fig.savefig(outpath + '/%s_%s.png' % (eval_name, m))
                 plt.close('all')
 
                 if args.plot_marginals:
