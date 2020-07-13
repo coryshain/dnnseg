@@ -5133,7 +5133,7 @@ class DNNSeg(object):
             verbose=True
     ):
         if label_map_path:
-            label_map = pd.read_csv(feature_map_path)
+            label_map = pd.read_csv(label_map_path)
         else:
             label_map = self.label_map
 
