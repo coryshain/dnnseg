@@ -216,7 +216,7 @@ if __name__ == '__main__':
                                 info_dict['_'.join([seg_gold, metric, name, 'l%d' % l])] = float(layer[seg_gold][metric])
 
             if 'objective' in measures:
-                objective_dict = model.get_loss(
+                objective_dict = model.evaluate_loss(
                     train_data,
                     verbose=args.verbose
                 )

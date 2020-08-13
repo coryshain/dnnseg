@@ -498,10 +498,10 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Whether to arctanh transform tanh-activated encodings for decoding and targets. Ignored unless ``encoder_inner_activation`` is ``tanh``."
     ),
     Kwarg(
-        'use_mae',
-        False,
-        bool,
-        "Whether to use mean absolute error (rather than the default mean squared error) for regression-based targetss."
+        'error_fn',
+        'l2',
+        str,
+        "Function to compute errors for regression targets. One of ``l1`` (MAE), ``l2`` (MSE), or ``l1_l2`` (MAE + MSE). Used only for regression-based (continuous) targets."
     ),
 
     # Correspondence AE
@@ -822,7 +822,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'encoder_activation',
-        None,
+        'tanh',
         [str, None],
         "Name of activation to use at the output of the encoder",
     ),
@@ -1591,7 +1591,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     Kwarg(
         'learning_rate',
         0.001,
-        [float, str],
+        float,
         "Initial value for the learning rate."
     ),
     Kwarg(
@@ -1599,6 +1599,18 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         0.,
         float,
         "Minimum value for the learning rate."
+    ),
+    Kwarg(
+        'layerwise_lr_factor',
+        1,
+        [float, str],
+        "Factor (or space-delimited list of factors by layer) by which to multiply the learning rate into each layer."
+    ),
+    Kwarg(
+        'decoder_lr_factor',
+        1,
+        float,
+        "Factor by which to multiply the learning rate into the decoder."
     ),
     Kwarg(
         'lr_decay_family',
@@ -1671,12 +1683,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         None,
         [float, None],
         "Ratio of encoder training steps to decoder training steps. If ``None``, or ``0``, jointly trained."
-    ),
-    Kwarg(
-        'loss_normalization',
-        None,
-        [str, None],
-        "Loss normalization method. If ``'layer'``, normalizes by layer. If ``'cell'``, renormalizes by cell. If ``None``, no renormalization."
     ),
 
     # Checkpoint
