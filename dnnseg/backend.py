@@ -565,8 +565,10 @@ def get_regularizer(init, scale=None, session=None):
             elif isinstance(init, str):
                 if init.lower() == 'l1_regularizer':
                     out = lambda x, scale=scale: tf.abs(x) * scale
-                if init.lower() == 'l2_regularizer':
+                elif init.lower() == 'l2_regularizer':
                     out = lambda x, scale=scale: x**2 * scale
+                elif init.lower() == 'l1_l2_regularizer':
+                    out = getattr(tf.contrib.layers, init)(scale, scale)
                 else:
                     out = getattr(tf.contrib.layers, init)(scale=scale)
             elif isinstance(init, float):
