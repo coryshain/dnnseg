@@ -18,9 +18,9 @@ For this reason, repository states associated with previous results are saved in
 To reproduce those results, checkout the relevant branch and follow the instructions in the `README`.
 Current reproduction branches are:
 
- - `naacl19`
+ - `NAACL19`
 
-Thus, to reproduce results from NAACL19 (Shain & Elsner, 2019), for example, run `git checkout naacl19` from the repository root, and follow instructions in the `README` file.
+Thus, to reproduce results from NAACL19 (Shain & Elsner, 2019), for example, run `git checkout NAACL19` from the repository root, and follow instructions in the `README` file.
 
 Published results depend on both (1) datasets and (2) models as defined in experiment-specific configuration files.
 We do not distribute data with this repository.

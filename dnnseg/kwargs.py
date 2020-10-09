@@ -1236,7 +1236,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'boundary_prob_extremeness_regularizer_scale',
         None,
         [float, None],
-        "Scale of penalty on extreme boundary probs (very low or very high). If ``None``, no boundary prob extremeness penalty."
+        "Scale of penalty on extreme mean boundary probs (very low or very high). If ``None``, no boundary prob extremeness penalty."
     ),
     Kwarg(
         'boundary_prob_extremeness_regularizer_shape',
