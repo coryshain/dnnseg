@@ -1498,7 +1498,7 @@ class AcousticEncoderDecoder(object):
                 for l in range(len(segment_tables)):
                     embeddings_cur = []
                     for f in data.fileIDs:
-                        embeddings_cur.append(segment_tables[l][f][['d%d' %u for u in range(n_units[l])]].as_matrix())
+                        embeddings_cur.append(segment_tables[l][f][['d%d' %u for u in range(n_units[l])]].values)
                     embeddings.append(np.concatenate(embeddings_cur, axis=0)[keep_ix[l]])
 
                 return embeddings, y
@@ -1631,7 +1631,7 @@ class AcousticEncoderDecoder(object):
             labels_cv = cv_data.labels(one_hot=False, segment_type=segtype)
 
             if self.speaker_emb_dim:
-                speaker = cv_data.segments(segtype).speaker.as_matrix()
+                speaker = cv_data.segments(segtype).speaker.values
             with self.sess.as_default():
                 with self.sess.graph.as_default():
                     self.set_predict_mode(True)
@@ -1895,7 +1895,7 @@ class AcousticEncoderDecoder(object):
         labels_cv = cv_data.labels(one_hot=False, segment_type=segtype)
 
         if self.speaker_emb_dim:
-            speaker = cv_data.segments(segtype).speaker.as_matrix()
+            speaker = cv_data.segments(segtype).speaker.values
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
@@ -2260,7 +2260,7 @@ class AcousticEncoderDecoder(object):
             n_iter = self.n_iter
 
         if self.speaker_emb_dim:
-            speaker = train_data.segments(self.segtype).speaker.as_matrix()
+            speaker = train_data.segments(self.segtype).speaker.values
 
         if verbose:
             sys.stderr.write('*' * 100 + '\n')

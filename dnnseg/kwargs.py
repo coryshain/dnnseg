@@ -151,7 +151,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'segtype',
-        'vad',
+        'phn',
         str,
         'Utterance-level segmentation type used to chunk audio input (one of ["vad", "wrd", "phn"]).'
     ),

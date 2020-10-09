@@ -1274,7 +1274,7 @@ class AcousticDatafile(object):
 
         out_start = []
         out_end = []
-        for x in parent_segments[['start', 'end']].as_matrix():
+        for x in parent_segments[['start', 'end']].values:
             s_p, e_p = x
             s = s_p
             e = s
@@ -1323,8 +1323,8 @@ class AcousticDatafile(object):
 
         out = []
 
-        parent_starts = parent_segs.start.as_matrix()
-        parent_ends = parent_segs.end.as_matrix()
+        parent_starts = parent_segs.start.values
+        parent_ends = parent_segs.end.values
 
         n_layers = len(segmentation_probs)
 

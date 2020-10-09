@@ -314,6 +314,7 @@ def plot_label_heatmap(labels, preds, title=None, label_map=None, cmap='Blues', 
     df = pd.crosstab(labels, preds)
 
     df = pd.DataFrame(np.array(df) / np.array(df).sum(axis=0, keepdims=True), index=df.index, columns=df.columns)
+
     if label_map is not None:
         index = pd.Series(df.index).replace(label_map)
     else:
