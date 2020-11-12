@@ -75,4 +75,4 @@ which will submit all jobs concurrently.
 
 
 ## References
-* Shain, Cory and Elsner, Micha (2020). Acquiring language from speech by learning to remember and predict. _NAACL19_.
+* Shain, Cory and Elsner, Micha (2020). Acquiring language from speech by learning to remember and predict. _CoNLL20_.
