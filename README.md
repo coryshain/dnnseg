@@ -77,4 +77,5 @@ Once you have defined an `*.ini` config file, fit the model by running the follo
 * Elsner, Micha and Shain, Cory (2017). Speech segmentation with a neural encoder model of working memory. _EMNLP17_.
 * Shain, Cory and Elsner, Micha (2019). Measuring the perceptual availability of phonological features during language
   acquisition using unsupervised binary stochastic autoencoders. _NAACL19_.
+* Shain, Cory and Elsner, Micha (2020). Acquiring language from speech by learning to remember and predict. _CoNLL20_.
 * Singer, Yosef; Teramoto, Yayoi; Willmore, Ben D B; Schnupp, Jan W H; King, Andrew J; Harper, Nicol S. Sensory cortex is optimized for prediction of future input. _eLife_.
