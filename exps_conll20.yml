@@ -1,0 +1,28 @@
+wb:
+  lm_order_bwd:
+    - 0
+    - 5
+    - 25
+    - 50
+wf:
+  lm_order_fwd:
+    - 0
+    - 1
+    - 5
+    - 10
+s:
+  names:
+    - 128
+  n_units_encoder:
+    - 128
+l:
+  n_layers_encoder:
+    - 2
+    - 3
+    - 4
+L:
+  learning_rate:
+    - 0.01
+r:
+  replicate:
+    - 1
