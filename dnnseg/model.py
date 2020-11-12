@@ -1343,7 +1343,7 @@ class DNNSeg(object):
                     self.segmentation_probs = self.segmenter_output.boundary_probs(as_logits=False, mask=self.X_mask)
                     self.encoder_segmentations = self.segmenter_output.boundary(mask=self.X_mask)
                     self.mean_segmentation_prob = tf.reduce_sum(self.segmentation_probs) / (tf.reduce_sum(self.X_mask) + self.epsilon)
-                    fixed_boundaries = self.fixed_boundaries_placeholder
+                    non_fixed_boundaries = self.fixed_boundaries_placeholder
 
                     if (not self.encoder_boundary_discretizer) or self.segment_at_peaks or self.boundary_prob_discretization_threshold:
                         self.segmentation_probs_smoothed = []
@@ -1374,10 +1374,10 @@ class DNNSeg(object):
                                 # Enforce known boundaries
                                 if not self.streaming:  # Ensure that the final timestep is a boundary
                                     if self.input_padding == 'pre':
-                                        fixed_boundaries = tf.concat(
+                                        non_fixed_boundaries = tf.concat(
                                             [self.fixed_boundaries_placeholder[:, :-1],
                                              tf.ones([tf.shape(self.fixed_boundaries_placeholder)[0], 1])],
-                                            # [tf.zeros_like(self.fixed_boundaries[:, :-1]), tf.ones([tf.shape(self.fixed_boundaries)[0], 1])],
+                                            # [tf.zeros_like(self.non_fixed_boundaries[:, :-1]), tf.ones([tf.shape(self.non_fixed_boundaries)[0], 1])],
                                             axis=1
                                         )
                                     else:
@@ -1392,9 +1392,9 @@ class DNNSeg(object):
                                             updates,
                                             shape
                                         )
-                                        fixed_boundaries = fixed_boundaries + right_boundary_marker
+                                        non_fixed_boundaries = non_fixed_boundaries + right_boundary_marker
 
-                                segmentations = tf.clip_by_value(segmentations + fixed_boundaries, 0., 1.)
+                                segmentations = tf.clip_by_value(segmentations + non_fixed_boundaries, 0., 1.)
                                 self.segmentations[l] = segmentations
 
                     # Post-process encoder outputs
@@ -1519,12 +1519,12 @@ class DNNSeg(object):
                             self._add_regularization(mean_bitwise_features, self.encoder_bitwise_feature_regularizer)
                             self._add_regularization(mean_bitwise_feature_at_segs, self.feature_rate_extremeness_regularizer)
 
-                        fixed_boundaries = 1. - self.fixed_boundaries_placeholder
-                        denom_lm1 = tf.reduce_sum(mask_cur * fixed_boundaries)
+                        non_fixed_boundaries = 1. - self.fixed_boundaries_placeholder
+                        denom_lm1 = tf.reduce_sum(mask_cur * non_fixed_boundaries)
                         if l < (self.layers_encoder - 1):
-                            mean_seg_probs = tf.reduce_sum(seg_probs * fixed_boundaries) / tf.maximum(denom_lm1, e)
+                            mean_seg_probs = tf.reduce_sum(seg_probs * non_fixed_boundaries) / tf.maximum(denom_lm1, e)
                             # mean_seg_probs = tf.Print(mean_seg_probs, ['l%d' % l, mean_seg_probs])
-                            mean_segs = tf.reduce_sum(segs * fixed_boundaries) / tf.maximum(denom_lm1, e)
+                            mean_segs = tf.reduce_sum(segs * non_fixed_boundaries) / tf.maximum(denom_lm1, e)
                             self.encoder_segmentation_rate.append(mean_segs)
                             # mean_segs = tf.Print(mean_segs, ['boundaries l%d' % l, mean_segs])
                             self._add_regularization(tf.boolean_mask(seg_probs, mask_cur), self.entropy_regularizer)
