@@ -1,0 +1,17 @@
+name: dnnseg
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - pandas
+  - pyyaml
+  - scikit-learn
+  - scipy
+  - seaborn
+  - tensorflow=1.9
+  - pip:
+    - audioread==2.1.8
+    - librosa==0.7.0
+    - pycochleagram==0.1
+    - soundfile==0.10.2
+

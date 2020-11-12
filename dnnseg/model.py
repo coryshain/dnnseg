@@ -6087,7 +6087,7 @@ class DNNSeg(object):
                     if self.streaming:
                         save = True
                         s = self.global_step.eval(session=self.sess)
-                        if self.incremental_eval and s % 5 == 0 and s >= self.n_pretrain_steps:
+                        if self.incremental_eval and s % 1 == 0 and s >= self.n_pretrain_steps:
                             evaluate = True
                         else:
                             evaluate = False

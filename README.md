@@ -2,9 +2,9 @@
 
 DNNSeg implements deep neural sequence models for unsupervised speech processing and for testing hypotheses
 about human language acquisition from raw speech. DNNSeg is an elaboration on the model described in
-Elsner & Shain (2017; see [implementation](https://github.com/melsner/neural-segmentation)), and a constrained variant
-of the DNNSeg model has been used to study the acquisition of phonological categories and features from speech 
-(Shain & Elsner, 2019). In its full form, DNNSeg infers hierarchically organized segment boundaries and category
+Elsner & Shain (2017; see [implementation](https://github.com/melsner/neural-segmentation)), and variants
+have been used to study the acquisition of phonological categories and features from speech 
+(Shain & Elsner, 2019; Shain & Elsner, 2020). In its full form, DNNSeg infers hierarchically organized segment boundaries and category
 labels through end-to-end optimization of cognitively-inspired proxy objectives for compression (Baddeley et al., 1998)
 and predictive coding (Singer et al., 2018), using a special type of segmental recurrent unit (Chung et al., 2017).
 DNNSeg is thus based on the hypothesis that linguistic representations (e.g. phonemes, words, and possibly constituents)
@@ -18,9 +18,10 @@ For this reason, repository states associated with previous results are saved in
 To reproduce those results, checkout the relevant branch and follow the instructions in the `README`.
 Current reproduction branches are:
 
- - `naacl19`
+ - `NAACL19`
+ - `CoNLL20`
 
-Thus, to reproduce results from NAACL19 (Shain & Elsner, 2019), for example, run `git checkout naacl19` from the repository root, and follow instructions in the `README` file.
+Thus, to reproduce results from CoNLL20 (Shain & Elsner, 2020), for example, run `git checkout CoNLL20` from the repository root, and follow instructions in the `README` file.
 
 Published results depend on both (1) datasets and (2) models as defined in experiment-specific configuration files.
 We do not distribute data with this repository.
@@ -35,7 +36,12 @@ library by running the following in the repository root:
     git clone https://github.com/mcdermottLab/pycochleagram.git;
     cd pycochleagram;
     python setup.py install
-    
+
+Use [conda](https://www.anaconda.com/) to set up the software environment, like so:
+
+    conda env create -f conda_dnnseg.yml
+    conda activate dnnseg
+ 
 
 ## Data Setup
 
