@@ -96,13 +96,6 @@ class DNNSeg(object):
         self.regularizer_map = {}
         self.print_learning_rate = False
         
-        if isinstance(self.learning_rate, str):
-            lr = self.learning_rate.split()
-            lr = [float(x) for x in lr]
-            self.learning_rates = lr
-        else:
-            self.learning_rates = [self.learning_rate]
-        
         if self.n_units_input_projection:
             self.project_inputs = True
             if isinstance(self.n_units_input_projection, str):
@@ -402,6 +395,22 @@ class DNNSeg(object):
             else:
                 self.n_timesteps_output_fwd = self.window_len_fwd
 
+        layerwise_lr_factor = self._get_layerwise_scalar(self.layerwise_lr_factor)
+        decoder_lr_factor = self.decoder_lr_factor
+        optim_grid = []
+        lr_factors = set()
+        for l, layer_lr in enumerate(layerwise_lr_factor):
+            enc_lr = layer_lr
+            dec_lr = layer_lr * decoder_lr_factor
+            optim_grid.append({
+                'encoder': enc_lr,
+                'decoder': dec_lr
+            })
+            lr_factors.add(enc_lr)
+            lr_factors.add(dec_lr)
+        self.optim_grid = optim_grid
+        self.lr_factors = lr_factors
+
         self.lm_loss_scale = self._get_layerwise_scalar(self.lm_loss_scale)
         assert len(self.lm_loss_scale) == self.layers_encoder, 'Misalignment in number of layers between lm_loss_scale and n_units_encoder.' 
 
@@ -649,8 +658,8 @@ class DNNSeg(object):
     def _get_layerwise_scalar(self, s):
         if isinstance(s, str):
             if s.startswith('exp'):
-                base = int(s[3:])
-                s = [1 / (base**l) for l in range(self.layers_encoder)]
+                base = float(s[3:])
+                s = [base**l for l in range(self.layers_encoder)]
             else:
                 s = [float(x) for x in s.split()]
                 if len(s) == 1:
@@ -1334,7 +1343,7 @@ class DNNSeg(object):
                     self.segmentation_probs = self.segmenter_output.boundary_probs(as_logits=False, mask=self.X_mask)
                     self.encoder_segmentations = self.segmenter_output.boundary(mask=self.X_mask)
                     self.mean_segmentation_prob = tf.reduce_sum(self.segmentation_probs) / (tf.reduce_sum(self.X_mask) + self.epsilon)
-                    fixed_boundaries = self.fixed_boundaries_placeholder
+                    non_fixed_boundaries = self.fixed_boundaries_placeholder
 
                     if (not self.encoder_boundary_discretizer) or self.segment_at_peaks or self.boundary_prob_discretization_threshold:
                         self.segmentation_probs_smoothed = []
@@ -1365,10 +1374,10 @@ class DNNSeg(object):
                                 # Enforce known boundaries
                                 if not self.streaming:  # Ensure that the final timestep is a boundary
                                     if self.input_padding == 'pre':
-                                        fixed_boundaries = tf.concat(
+                                        non_fixed_boundaries = tf.concat(
                                             [self.fixed_boundaries_placeholder[:, :-1],
                                              tf.ones([tf.shape(self.fixed_boundaries_placeholder)[0], 1])],
-                                            # [tf.zeros_like(self.fixed_boundaries[:, :-1]), tf.ones([tf.shape(self.fixed_boundaries)[0], 1])],
+                                            # [tf.zeros_like(self.non_fixed_boundaries[:, :-1]), tf.ones([tf.shape(self.non_fixed_boundaries)[0], 1])],
                                             axis=1
                                         )
                                     else:
@@ -1383,9 +1392,9 @@ class DNNSeg(object):
                                             updates,
                                             shape
                                         )
-                                        fixed_boundaries = fixed_boundaries + right_boundary_marker
+                                        non_fixed_boundaries = non_fixed_boundaries + right_boundary_marker
 
-                                segmentations = tf.clip_by_value(segmentations + fixed_boundaries, 0., 1.)
+                                segmentations = tf.clip_by_value(segmentations + non_fixed_boundaries, 0., 1.)
                                 self.segmentations[l] = segmentations
 
                     # Post-process encoder outputs
@@ -1510,12 +1519,12 @@ class DNNSeg(object):
                             self._add_regularization(mean_bitwise_features, self.encoder_bitwise_feature_regularizer)
                             self._add_regularization(mean_bitwise_feature_at_segs, self.feature_rate_extremeness_regularizer)
 
-                        fixed_boundaries = 1. - self.fixed_boundaries_placeholder
-                        denom_lm1 = tf.reduce_sum(mask_cur * fixed_boundaries)
+                        non_fixed_boundaries = 1. - self.fixed_boundaries_placeholder
+                        denom_lm1 = tf.reduce_sum(mask_cur * non_fixed_boundaries)
                         if l < (self.layers_encoder - 1):
-                            mean_seg_probs = tf.reduce_sum(seg_probs * fixed_boundaries) / tf.maximum(denom_lm1, e)
+                            mean_seg_probs = tf.reduce_sum(seg_probs * non_fixed_boundaries) / tf.maximum(denom_lm1, e)
                             # mean_seg_probs = tf.Print(mean_seg_probs, ['l%d' % l, mean_seg_probs])
-                            mean_segs = tf.reduce_sum(segs * fixed_boundaries) / tf.maximum(denom_lm1, e)
+                            mean_segs = tf.reduce_sum(segs * non_fixed_boundaries) / tf.maximum(denom_lm1, e)
                             self.encoder_segmentation_rate.append(mean_segs)
                             # mean_segs = tf.Print(mean_segs, ['boundaries l%d' % l, mean_segs])
                             self._add_regularization(tf.boolean_mask(seg_probs, mask_cur), self.entropy_regularizer)
@@ -3175,77 +3184,47 @@ class DNNSeg(object):
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                lrs = None
-                if isinstance(self.weight_update_mode, str) and \
-                        (self.weight_update_mode.lower().startswith('boundary_state') or
-                         self.weight_update_mode.lower().startswith('encoder_decoder') or
-                         self.weight_update_mode.lower().startswith('asymmetric_encoder_decoder')):
-                    lrs = [tf.constant(x, dtype=self.FLOAT_TF) for x in self.learning_rates[:2]]
-                    if self.weight_update_mode.lower().startswith('asymmetric_encoder_decoder'):
-                        assert len(lrs) == 2, 'When using asymmetric_encoder_decoder, you must supply exactly two learning rates, the first for the encoder and the second for the decoder.'
-                    expand_lrs = len(lrs) == 1
-                    if expand_lrs:
-                        lrs = [lrs[0], lrs[0]]
-                    if self.weight_update_mode.lower() == 'boundary_state':
-                        self.print_learning_rate = expand_lrs
-                        lr = tf.cond(tf.equal(self.update_mode, 'boundary'), lambda: lrs[0], lambda: lrs[1])
-                    elif self.weight_update_mode.lower() == 'encoder_decoder':
-                        self.print_learning_rate = expand_lrs
-                        lr = tf.cond(tf.equal(self.update_mode, 'encoder'), lambda: lrs[0], lambda: lrs[1])
+                lr = tf.constant(self.learning_rate)
+                if self.lr_decay_family is not None:
+                    self.print_learning_rate = True
+                    lr_decay_steps = tf.constant(self.lr_decay_steps, dtype=self.INT_TF)
+                    lr_decay_rate = tf.constant(self.lr_decay_rate, dtype=self.FLOAT_TF)
+                    lr_decay_staircase = self.lr_decay_staircase
+
+                    if self.lr_decay_iteration_power != 1:
+                        t = tf.cast(self.step, dtype=self.FLOAT_TF) ** self.lr_decay_iteration_power
                     else:
-                        lr = None
-                else:
-                    lr = tf.constant(self.learning_rates[0], dtype=self.FLOAT_TF)
-                if name is None:
-                    self.lr = lr
-                    return None
-                if lr is not None:
-                    lrs = [lr]
+                        t = self.step
 
-                for i, lr in enumerate(lrs):
-                    if self.lr_decay_family is not None:
-                        self.print_learning_rate = True
-                        lr_decay_steps = tf.constant(self.lr_decay_steps, dtype=self.INT_TF)
-                        lr_decay_rate = tf.constant(self.lr_decay_rate, dtype=self.FLOAT_TF)
-                        lr_decay_staircase = self.lr_decay_staircase
-
-                        if self.lr_decay_iteration_power != 1:
-                            t = tf.cast(self.step, dtype=self.FLOAT_TF) ** self.lr_decay_iteration_power
+                    if self.lr_decay_family.lower() == 'linear_decay':
+                        if lr_decay_staircase:
+                            decay = tf.floor(t / lr_decay_steps)
                         else:
-                            t = self.step
+                            decay = t / lr_decay_steps
+                        decay *= lr_decay_rate
+                        self.lr = lr - decay
+                    else:
+                        lr = getattr(tf.train, self.lr_decay_family)(
+                            lr,
+                            t,
+                            lr_decay_steps,
+                            lr_decay_rate,
+                            staircase=lr_decay_staircase,
+                            name='learning_rate'
+                        )
+                    if np.isfinite(self.learning_rate_min):
+                        lr_min = tf.constant(self.learning_rate_min, dtype=self.FLOAT_TF)
+                        INF_TF = tf.constant(np.inf, dtype=self.FLOAT_TF)
+                        lr = tf.clip_by_value(self.lr, lr_min, INF_TF)
 
-                        if self.lr_decay_family.lower() == 'linear_decay':
-                            if lr_decay_staircase:
-                                decay = tf.floor(t / lr_decay_steps)
-                            else:
-                                decay = t / lr_decay_steps
-                            decay *= lr_decay_rate
-                            self.lr = lr - decay
-                        else:
-                            lr = getattr(tf.train, self.lr_decay_family)(
-                                lr,
-                                t,
-                                lr_decay_steps,
-                                lr_decay_rate,
-                                staircase=lr_decay_staircase,
-                                name='learning_rate'
-                            )
-                        if np.isfinite(self.learning_rate_min):
-                            lr_min = tf.constant(self.learning_rate_min, dtype=self.FLOAT_TF)
-                            INF_TF = tf.constant(np.inf, dtype=self.FLOAT_TF)
-                            lr = tf.clip_by_value(self.lr, lr_min, INF_TF)
-                    lrs[i] = lr
+                self.lr = lr
 
-                if len(lrs) > 1:
-                    self.lr = lrs
-                else:
-                    self.lr = lrs[0]
+                optim = {}
 
-                clip = self.max_global_gradient_norm
+                for lr_factor in self.lr_factors:
+                    clip = self.max_global_gradient_norm
 
-                optimizers = []
-                for lr in lrs:
-                    optimizer_args = [lr]
+                    optimizer_args = [lr * lr_factor]
                     optimizer_kwargs = {}
                     if name == 'momentum':
                         optimizer_args += [0.9]
@@ -3270,17 +3249,15 @@ class DNNSeg(object):
 
                     if use_jtps:
                         optimizer_class = get_JTPS_optimizer_class(optimizer_class, session=self.sess)
-                        optimizer_kwargs['meta_learning_rate'] = None
+                        optimizer_kwargs['meta_learning_rate'] = 1
                     if name.lower() == 'adam0':
                         optimizer_kwargs['beta1'] = 0.
 
-                    optim = optimizer_class(*optimizer_args, **optimizer_kwargs)
-                    optimizers.append(optim)
+                    optim_cur = optimizer_class(*optimizer_args, **optimizer_kwargs)
 
-                if len(optimizers) == 1:
-                    optimizers = optimizers[0]
+                    optim[lr_factor] = optim_cur
 
-                self.optim = optimizers
+                self.optim = optim
 
     def _initialize_logging(self):
         with self.sess.as_default():
@@ -3395,7 +3372,7 @@ class DNNSeg(object):
                         targets[..., None],
                         preds[..., None],
                         gamma,
-                        distance_func='l1norm',
+                        distance_fn='l1norm',
                         dtw_distance=False
                     )
                 else:
@@ -3509,7 +3486,7 @@ class DNNSeg(object):
 
                 return out
 
-    def _soft_dtw(self, targets, preds, gamma, mask=None, weights_targets=None, weights_preds=None, distance_func='norm', dtw_distance=False):
+    def _soft_dtw(self, targets, preds, gamma, mask=None, weights_targets=None, weights_preds=None, distance_fn='norm', dtw_distance=False):
         # Outer scan over n target timesteps
         # Inner scan over m pred timesteps
 
@@ -3522,7 +3499,7 @@ class DNNSeg(object):
                     end = tf.cast(tf.reduce_sum(mask, axis=-1), dtype=self.INT_TF)
 
                 # Compute distance matrix
-                D = self._pairwise_distances(targets, preds, distance_func=distance_func, dtw_distance=dtw_distance)
+                D = self._pairwise_distances(targets, preds, distance_func=distance_fn, dtw_distance=dtw_distance)
 
                 # Rescale distances by target weights
                 if weights_targets is not None:
@@ -3814,11 +3791,11 @@ class DNNSeg(object):
                         mask=mask
                     )
 
-                loss_left = self._get_loss(targ_left, pred_left, distance_func=log_loss)
+                loss_left = self._get_loss(targ_left, pred_left, distance_fn=log_loss)
                 loss_left /= self.window_len_bwd
 
                 targ_right = targets[cur + 1:right + 1]
-                loss_right = self._get_loss(targ_right, pred_right, distance_func=log_loss)
+                loss_right = self._get_loss(targ_right, pred_right, distance_fn=log_loss)
                 loss_right /= self.window_len_fwd
 
                 loss = loss_left + loss_right
@@ -4311,7 +4288,7 @@ class DNNSeg(object):
                                     targets,
                                     preds,
                                     use_dtw=self.use_dtw,
-                                    distance_func=distance_func,
+                                    distance_fn=distance_func,
                                     reduce=False
                                 )
 
@@ -4324,7 +4301,7 @@ class DNNSeg(object):
                                     targets,
                                     preds,
                                     use_dtw=self.use_dtw,
-                                    distance_func=distance_func,
+                                    distance_fn=distance_func,
                                     reduce=False
                                 )
 
@@ -4345,7 +4322,7 @@ class DNNSeg(object):
                                     targets,
                                     preds,
                                     use_dtw=self.use_dtw,
-                                    distance_func=distance_func,
+                                    distance_fn=distance_func,
                                     reduce=False
                                 )
 
@@ -4382,7 +4359,7 @@ class DNNSeg(object):
             targets,
             preds,
             use_dtw=False,
-            distance_func='l2norm',
+            distance_fn='l2',
             weights=None,
             reduce=True,
             name=None
@@ -4390,7 +4367,7 @@ class DNNSeg(object):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 if use_dtw:
-                    assert distance_func.lower() in ['norm', 'l2norm', 'mse'], 'Only l2norm distance is currently supported for DTW'
+                    assert distance_fn.lower() in ['mse', 'l2'], 'Only l2norm distance is currently supported for DTW'
                     if weights is not None:
                         n_cells_weights = tf.reduce_prod(tf.shape(weights))
                         n_cells_losses = tf.reduce_prod(tf.shape(preds))
@@ -4408,7 +4385,7 @@ class DNNSeg(object):
                         mask=weights,
                         # weights_targets=weights[0],
                         # weights_preds=weights[1],
-                        distance_func=distance_func
+                        distance_fn=distance_fn
                     )
 
                     if reduce:
@@ -4419,7 +4396,7 @@ class DNNSeg(object):
                 else:
                     if weights is not None:
                         n_cells_weights = tf.reduce_prod(tf.shape(weights))
-                        if distance_func.lower() in ['softmax_xent', 'cosine', 'arc']:
+                        if distance_fn.lower() in ['softmax_xent', 'cosine', 'arc']:
                             n_cells_losses = tf.reduce_prod(tf.shape(preds)[:-1])
                             target_len = len(preds.shape) - 1
                         else:
@@ -4429,26 +4406,28 @@ class DNNSeg(object):
                         while len(weights.shape) < target_len:
                             weights = weights[..., None]
 
-                    if distance_func.lower() == 'binary_xent':
+                    if distance_fn.lower() == 'binary_xent':
                         loss = tf.nn.sigmoid_cross_entropy_with_logits(
                             labels=targets,
                             logits=preds
                         )
-                    elif distance_func.lower() == 'softmax_xent':
+                    elif distance_fn.lower() == 'softmax_xent':
                         loss = tf.nn.softmax_cross_entropy_with_logits_v2(
                             labels=targets,
                             logits=preds
                         )
-                    elif distance_func.lower() in ['mae', 'l1norm']:
+                    elif distance_fn.lower() in ['mae', 'l1']:
                         loss = tf.abs(targets - preds)
-                    elif distance_func.lower() in ['mse', 'l2norm']:
+                    elif distance_fn.lower() in ['mse', 'l2']:
                         loss = (targets - preds) ** 2
-                    elif distance_func.lower() == 'cosine':
+                    elif distance_fn.lower() in ['mae_mse', 'l1_l2']:
+                        loss = (targets - preds) ** 2 + tf.abs(targets - preds)
+                    elif distance_fn.lower() == 'cosine':
                         loss = 1 - tf.reduce_sum(targets * preds, axis=-1)
-                    elif distance_func.lower() == 'arc':
+                    elif distance_fn.lower() == 'arc':
                         loss = tf.acos(tf.reduce_sum(targets * preds, axis=-1))
                     else:
-                        raise ValueError('Unrecognized value for distance_func: %s' % distance_func)
+                        raise ValueError('Unrecognized value for distance_func: %s' % distance_fn)
 
                     if weights is not None:
                         loss *= weights
@@ -5930,9 +5909,10 @@ class DNNSeg(object):
                             pb_update_vector.append(('rate L%d' % (l + 1), seg_rate_cur[l]))
                         if self.use_jtps:
                             pb_update_vector.append(('l', info_dict['jtps_lambda_mean']))
+                            # pb_update_vector.append(('l sd', info_dict['jtps_lambda_sd']))
+                            # pb_update_vector.append(('l min', info_dict['jtps_lambda_min']))
+                            # pb_update_vector.append(('l max', info_dict['jtps_lambda_max']))
                         pb.update(i_pb + 1, values=pb_update_vector)
-
-                    self.check_numerics()
 
                     if self.streaming and update:
                         evaluate = (self.eval_freq > 0) \
@@ -6286,7 +6266,7 @@ class DNNSeg(object):
                         update=True
                     )
 
-    def get_loss(
+    def evaluate_loss(
             self,
             data,
             verbose=True
@@ -6891,8 +6871,6 @@ class DNNSeg(object):
                     update_mode = 'decoder'
                 else:
                     update_mode = 'encoder'
-            elif self.weight_update_mode.lower().startswith('asymmetric_encoder_decoder'):
-                update_mode = 'all'
             else:
                 raise ValueError('Unrecognized update mode %s' % self.weight_update_mode)
 
@@ -7127,23 +7105,21 @@ class DNNSegMLE(DNNSeg):
                     discrete_state = False
 
                 if l == 0 and self.data_type.lower() == 'text':
-                    distance_func = 'softmax_xent'
+                    distance_fn = 'softmax_xent'
                 elif discrete_state:
                     if self.encoder_state_discretizer and self.encoder_state_discretizer.lower() == 'csn':
-                        distance_func = 'softmax_xent'
+                        distance_fn = 'softmax_xent'
                     else:
-                        distance_func = 'binary_xent'
+                        distance_fn = 'binary_xent'
                 elif self.l2_normalize_targets:
-                    # distance_func = 'arc'
-                    distance_func = 'cosine'
+                    # distance_fn = 'arc'
+                    distance_fn = 'cosine'
                 elif l > 0 and (self.encoder_l2_normalize_states or self.encoder_use_outer_product_memory):
-                    distance_func = 'cosine'
-                elif self.use_mae:
-                    distance_func = 'mae'
+                    distance_fn = 'cosine'
                 else:
-                    distance_func = 'mse'
+                    distance_fn = self.error_fn
 
-                return distance_func
+                return distance_fn
 
     def _apply_dtw(self, l):
         out = False
@@ -7196,7 +7172,7 @@ class DNNSegMLE(DNNSeg):
                         targets,
                         preds,
                         use_dtw=self.use_dtw,
-                        distance_func=distance_func,
+                        distance_fn=distance_func,
                         weights=weights,
                         reduce=False
                     )
@@ -7210,11 +7186,7 @@ class DNNSegMLE(DNNSeg):
 
                     self.loss_reconstruction = loss_reconstruction_reduced
 
-                    if self.loss_normalization == 'cell':
-                        loss.append(loss_reconstruction)
-                    else:
-                        loss.append(loss_reconstruction_reduced)
-                        reduction_weights.append(1.)
+                    loss.append(loss_reconstruction)
 
                 if self.streaming and self.predict_forward:
                     targets = self.y_fwd
@@ -7241,7 +7213,7 @@ class DNNSegMLE(DNNSeg):
                         targets,
                         preds,
                         use_dtw=self.use_dtw,
-                        distance_func=distance_func,
+                        distance_fn=distance_func,
                         weights=weights,
                         reduce=False
                     )
@@ -7255,11 +7227,7 @@ class DNNSegMLE(DNNSeg):
 
                     self.loss_prediction = loss_prediction_reduced
 
-                    if self.loss_normalization == 'cell':
-                        loss.append(loss_prediction)
-                    else:
-                        loss.append(loss_prediction_reduced)
-                        reduction_weights.append(1.)
+                    loss.append(loss_prediction)
 
                 if self.use_correspondence_loss:
                     self.correspondence_losses = []
@@ -7567,7 +7535,7 @@ class DNNSegMLE(DNNSeg):
                                         correspondence_targets,
                                         correspondence_logits,
                                         use_dtw=use_dtw,
-                                        distance_func=distance_func,
+                                        distance_fn=distance_func,
                                         reduce=True,
                                         weights=correspondence_weights,
                                         name='cae_loss_L%d' % l
@@ -7575,11 +7543,8 @@ class DNNSegMLE(DNNSeg):
 
                                 self.correspondence_losses.append(cae_loss)
 
-                                if self.loss_normalization == 'cell':
-                                    loss.append(cae_loss)
-                                else:
-                                    loss.append(cae_loss)
-                                    reduction_weights.append(1.)
+                                loss.append(cae_loss)
+                                reduction_weights.append(1.)
 
                 if self.use_lm_loss:
                     assert not self.residual_targets, 'residual_targets is currently broken. Do not use.'
@@ -7621,7 +7586,7 @@ class DNNSegMLE(DNNSeg):
                                     targets_bwd,
                                     logits_bwd,
                                     use_dtw=self._apply_dtw(l),
-                                    distance_func=self._lm_distance_func(l),
+                                    distance_fn=self._lm_distance_func(l),
                                     weights=weights_bwd,
                                     reduce=True,
                                     name='lm_bwd_loss_L%d' % l
@@ -7661,7 +7626,7 @@ class DNNSegMLE(DNNSeg):
                                     targets_fwd,
                                     logits_fwd,
                                     use_dtw=self._apply_dtw(l),
-                                    distance_func=self._lm_distance_func(l),
+                                    distance_fn=self._lm_distance_func(l),
                                     weights=weights_fwd,
                                     reduce=True,
                                     name='lm_fwd_loss_L%d' % l
@@ -7751,7 +7716,7 @@ class DNNSegMLE(DNNSeg):
                             passthru_targets,
                             passthru_preds,
                             use_dtw=False,
-                            distance_func='mse',
+                            distance_fn='mse',
                             reduce=True
                         )
 
@@ -7767,21 +7732,6 @@ class DNNSegMLE(DNNSeg):
                 else:
                     self.regularizer_loss_total = tf.constant(0., dtype=self.FLOAT_TF)
 
-                if self.loss_normalization:
-                    reduction_weights = 'normalize'
-
-                # self.loss = reduce_losses(
-                #     loss,
-                #     reduction_weights,
-                #     epsilon=self.epsilon,
-                #     session=self.sess
-                # )
-
-                # loss =  tf.convert_to_tensor(loss)
-                # w = loss / tf.reduce_max(loss)
-                # loss *= w ** 10
-                # loss = tf.reduce_sum(loss)
-
                 loss = tf.add_n(loss)
 
                 self.loss = loss
@@ -7793,67 +7743,134 @@ class DNNSegMLE(DNNSeg):
                 self._initialize_optimizer()
 
                 boundary_var_re = re.compile('boundary')
-                state_var_re = re.compile('hmlstm_encoder/(bias|bottomup|recurrent|topdown|featurizer)')
+                layer_re = re.compile('_l(\d+)')
                 
                 trainable_variables = tf.trainable_variables()
 
-                varset = {
-                    'boundary': [x for x in trainable_variables if not state_var_re.search(x.name)],
-                    'state': [x for x in trainable_variables if not boundary_var_re.search(x.name)],
-                    'encoder': [x for x in trainable_variables if not 'ecoder' in x.name],
-                    'decoder': [x for x in trainable_variables if 'ecoder' in x.name]
-                }
-
-                layer_matcher = re.compile('\_l([0-9]+)')
-
+                varset = []
                 for l in range(self.layers_encoder):
-                    varset['l%d' % l] = set()
-
-                for x in trainable_variables:
-                    match = layer_matcher.search(x.name)
-                    if match:
-                        l = int(match.group(1))
-                        if l < self.layers_encoder:
-                            varset['l%d' % l].add(x)
-                    else:
-                        varset['l0'].add(x)
-
-                for l in range(self.layers_encoder):
-                    varset['l%d' % l] = sorted(list(varset['l%d' % l]), key=str)
+                    vars_l = [x for x in trainable_variables if int(layer_re.search(x.name).group(1)) == l]
+                    if l == 0:
+                        vars_l += [x for x in trainable_variables if not layer_re.search(x.name)]
+                    varset.append({
+                        'encoder': [x for x in vars_l if not 'ecoder' in x.name],
+                        'decoder': [x for x in vars_l if 'ecoder' in x.name]
+                    })
+                    varset[l]['boundary'] = [x for x in varset[l]['encoder'] if boundary_var_re.search(x.name)]
+                    varset[l]['state'] = [x for x in varset[l]['encoder'] if not boundary_var_re.search(x.name)]
 
                 train_ops = {}
-                if self.n_pretrain_steps:
-                    train_ops['decoder'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['decoder'])
-                if self.weight_update_mode.lower() == 'all':
-                    train_ops['all'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step)
-                elif self.weight_update_mode.lower() == 'boundary':
-                    train_ops['boundary'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary'])
-                elif self.weight_update_mode.lower() == 'state':
-                    train_ops['state'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
-                elif self.weight_update_mode.lower().startswith('boundary_state'):
-                    train_ops['boundary'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
-                    train_ops['state'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
-                elif self.weight_update_mode.lower().startswith('layerwise'):
+
+                try:
+                    float(self.weight_update_mode.lower())
+                    weight_update_is_float = True
+                except ValueError:
+                    weight_update_is_float = False
+
+                if self.weight_update_mode.lower().startswith('encoder_decoder') or weight_update_is_float:
+                    ops = {}
+                    for l, x in enumerate(varset):
+                        lr = self.optim_grid[l]['encoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['encoder']
+                    train_ops['encoder'] = ops
+                if self.n_pretrain_steps or self.weight_update_mode.lower().startswith('encoder_decoder') or weight_update_is_float:
+                    ops = {}
+                    for l, x in enumerate(varset):
+                        lr = self.optim_grid[l]['decoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['decoder']
+                    train_ops['decoder'] = ops
+                if self.weight_update_mode.lower() in ['boundary', 'boundary_state']:
+                    ops = {}
+                    for l, x in enumerate(varset):
+                        lr = self.optim_grid[l]['encoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['boundary']
+
+                        lr = self.optim_grid[l]['decoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['decoder']
+
+                    train_ops['boundary'] = ops
+                if self.weight_update_mode.lower() in ['state', 'boundary_state']:
+                    ops = {}
+                    for l, x in enumerate(varset):
+                        lr = self.optim_grid[l]['encoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['state']
+
+                        lr = self.optim_grid[l]['decoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['decoder']
+
+                    train_ops['boundary'] = ops
+                if self.weight_update_mode.lower().startswith('layerwise'):
                     for l in range(self.layers_encoder):
-                        train_ops[str(l)] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['l%d' % l])
-                elif self.weight_update_mode.lower().startswith('encoder_decoder'):
-                    train_ops['encoder'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['encoder']),
-                    train_ops['decoder'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['decoder'])
-                elif self.weight_update_mode.lower().startswith('asymmetric_encoder_decoder'):
-                    train_ops['all'] = tf.group(
-                        self.optim[0].minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['encoder']),
-                        self.optim[1].minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['decoder'])
-                    )
-                else:
-                    float(self.weight_update_mode)
-                    train_ops['boundary'] =self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['boundary']),
-                    train_ops['state'] = self.optim.minimize(self.full_loss, global_step=self.global_batch_step, var_list=varset['state'])
+                        ops = {}
+                        lr = self.optim_grid[l]['encoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['encoder']
+
+                        lr = self.optim_grid[l]['decoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['decoder']
+
+                        train_ops[str(l)] = ops
+                if self.weight_update_mode.lower().startswith('all'):
+                    ops = {}
+                    for l, x in enumerate(varset):
+                        lr = self.optim_grid[l]['encoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['encoder']
+
+                        lr = self.optim_grid[l]['decoder']
+                        if not lr in ops:
+                            ops[lr] = []
+                        ops[lr] += x['decoder']
+
+                    train_ops['all'] = ops
+
+                for x in train_ops:
+                    if len(train_ops[x]) == 1:
+                        k = list(train_ops[x].keys())[0]
+                        train_ops[x] = self.optim[k].minimize(
+                            self.full_loss,
+                            global_step=self.global_batch_step,
+                            var_list=train_ops[x][k],
+                            colocate_gradients_with_ops=True
+                        )
+                    else:
+                        ops = []
+                        for k in train_ops[x]:
+                            ops.append(
+                                self.optim[k].minimize(
+                                    self.full_loss,
+                                    global_step=self.global_batch_step,
+                                    var_list=train_ops[x][k],
+                                    colocate_gradients_with_ops=True
+                                )
+                            )
+                        train_ops[x] = tf.group(ops)
 
                 if self.use_jtps:
-                    self.jtps_lambda = self.optim.get_flattened_lambdas()
+                    jtps_lambda = []
+                    for lr in self.optim:
+                        jtps_lambda.append(self.optim[lr].get_flattened_lambdas())
+                    self.jtps_lambda = tf.concat(jtps_lambda, axis=0)
                     self.jtps_lambda_min = tf.reduce_min(self.jtps_lambda)
                     self.jtps_lambda_max = tf.reduce_max(self.jtps_lambda)
-                    self.jtps_lambda_mean = tf.reduce_mean(self.jtps_lambda)
+                    self.jtps_lambda_mean, jtps_lambda_var = tf.nn.moments(self.jtps_lambda, [0])
+                    self.jtps_lambda_sd = tf.sqrt(jtps_lambda_var)
 
                 self.train_ops = train_ops
 
@@ -7961,8 +7978,8 @@ class DNNSegMLE(DNNSeg):
                         [to_run_names.append('correspondence_seg_feats_l%d' %i) for i in range(len(self.correspondence_feats))]
                         [to_run_names.append('correspondence_seg_feats_mask_l%d' %i) for i in range(len(self.correspondence_mask))]
                     if self.use_jtps:
-                        to_run.append(self.jtps_lambda_mean)
-                        to_run_names.append('jtps_lambda_mean')
+                        to_run += [self.jtps_lambda_mean, self.jtps_lambda_min, self.jtps_lambda_max, self.jtps_lambda_sd]
+                        to_run_names += ['jtps_lambda_mean', 'jtps_lambda_min', 'jtps_lambda_max', 'jtps_lambda_sd']
 
                     output = self.sess.run(to_run, feed_dict=feed_dict)
 

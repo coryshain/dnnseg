@@ -565,8 +565,10 @@ def get_regularizer(init, scale=None, session=None):
             elif isinstance(init, str):
                 if init.lower() == 'l1_regularizer':
                     out = lambda x, scale=scale: tf.abs(x) * scale
-                if init.lower() == 'l2_regularizer':
+                elif init.lower() == 'l2_regularizer':
                     out = lambda x, scale=scale: x**2 * scale
+                elif init.lower() == 'l1_l2_regularizer':
+                    out = getattr(tf.contrib.layers, init)(scale, scale)
                 else:
                     out = getattr(tf.contrib.layers, init)(scale=scale)
             elif isinstance(init, float):
@@ -3869,133 +3871,153 @@ class DenseLayer(object):
                 if self.activation is not None:
                     H = self.activation(H)
 
-                return H
+                    return H
 
 
-class DenseResidualLayer(object):
+    class DenseResidualLayer(object):
 
-    def __init__(
-            self,
-            training=True,
-            units=None,
-            use_bias=True,
-            kernel_initializer='glorot_uniform_initializer',
-            bias_initializer='zeros_initializer',
-            kernel_regularizer=None,
-            bias_regularizer=None,
-            layers_inner=3,
-            activation_inner=None,
-            activation=None,
-            sample_at_train=False,
-            sample_at_eval=False,
-            batch_normalization_decay=0.9,
-            project_inputs=False,
-            normalize_weights=False,
-            reuse=None,
-            session=None,
-            name=None
-    ):
-        self.session = get_session(session)
+        def __init__(
+                self,
+                training=True,
+                units=None,
+                use_bias=True,
+                kernel_initializer='glorot_uniform_initializer',
+                bias_initializer='zeros_initializer',
+                kernel_regularizer=None,
+                bias_regularizer=None,
+                layers_inner=3,
+                activation_inner=None,
+                activation=None,
+                sample_at_train=False,
+                sample_at_eval=False,
+                batch_normalization_decay=0.9,
+                project_inputs=False,
+                normalize_weights=False,
+                reuse=None,
+                session=None,
+                name=None
+        ):
+            self.session = get_session(session)
 
-        self.training = training
-        self.units = units
-        self.use_bias = use_bias
+            self.training = training
+            self.units = units
+            self.use_bias = use_bias
 
-        self.layers_inner = layers_inner
-        self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
-        if bias_initializer is None:
-            bias_initializer = 'zeros_initializer'
-        self.bias_initializer = get_initializer(bias_initializer, session=self.session)
-        self.kernel_regularizer = get_regularizer(kernel_regularizer, session=self.session)
-        self.bias_regularizer = get_regularizer(bias_regularizer, session=self.session)
-        self.activation_inner = get_activation(
-            activation_inner,
-            session=self.session,
-            training=self.training,
-            from_logits=True,
-            sample_at_train=sample_at_train,
-            sample_at_eval=sample_at_eval
-        )
-        self.activation = get_activation(
-            activation,
-            session=self.session,
-            training=self.training,
-            from_logits=True,
-            sample_at_train=sample_at_train,
-            sample_at_eval=sample_at_eval
-        )
-        self.batch_normalization_decay = batch_normalization_decay
-        self.project_inputs = project_inputs
-        self.normalize_weights = normalize_weights
-        self.reuse = reuse
-        self.name = name
+            self.layers_inner = layers_inner
+            self.kernel_initializer = get_initializer(kernel_initializer, session=self.session)
+            if bias_initializer is None:
+                bias_initializer = 'zeros_initializer'
+            self.bias_initializer = get_initializer(bias_initializer, session=self.session)
+            self.kernel_regularizer = get_regularizer(kernel_regularizer, session=self.session)
+            self.bias_regularizer = get_regularizer(bias_regularizer, session=self.session)
+            self.activation_inner = get_activation(
+                activation_inner,
+                session=self.session,
+                training=self.training,
+                from_logits=True,
+                sample_at_train=sample_at_train,
+                sample_at_eval=sample_at_eval
+            )
+            self.activation = get_activation(
+                activation,
+                session=self.session,
+                training=self.training,
+                from_logits=True,
+                sample_at_train=sample_at_train,
+                sample_at_eval=sample_at_eval
+            )
+            self.batch_normalization_decay = batch_normalization_decay
+            self.project_inputs = project_inputs
+            self.normalize_weights = normalize_weights
+            self.reuse = reuse
+            self.name = name
 
-        self.dense_layers = None
-        self.projection = None
+            self.dense_layers = None
+            self.projection = None
 
-        self.built = False
+            self.built = False
 
-    def build(self, inputs):
-        if not self.built:
+        def build(self, inputs):
+            if not self.built:
+                with self.session.as_default():
+                    with self.session.graph.as_default():
+                        if self.units is None:
+                            out_dim = inputs.shape[-1]
+                        else:
+                            out_dim = self.units
+
+                        self.dense_layers = []
+
+                        for i in range(self.layers_inner):
+                            if self.name:
+                                name = self.name + '_i%d' % i
+                            else:
+                                name = None
+
+                            l = tf.layers.Dense(
+                                out_dim,
+                                use_bias=self.use_bias,
+                                kernel_initializer=self.kernel_initializer,
+                                bias_initializer=self.bias_initializer,
+                                kernel_regularizer=self.kernel_regularizer,
+                                bias_regularizer=self.bias_regularizer,
+                                _reuse=self.reuse,
+                                name=name
+                            )
+                            self.dense_layers.append(l)
+
+                        if self.project_inputs:
+                            if self.name:
+                                name = self.name + '_projection'
+                            else:
+                                name = None
+
+                            self.projection = tf.layers.Dense(
+                                out_dim,
+                                use_bias=self.use_bias,
+                                kernel_initializer=self.kernel_initializer,
+                                bias_initializer=self.bias_initializer,
+                                kernel_regularizer=self.kernel_regularizer,
+                                bias_regularizer=self.bias_regularizer,
+                                _reuse=self.reuse,
+                                name=name
+                            )
+
+                self.built = True
+
+        def __call__(self, inputs):
+            if not self.built:
+                self.build(inputs)
+
             with self.session.as_default():
                 with self.session.graph.as_default():
-                    if self.units is None:
-                        out_dim = inputs.shape[-1]
-                    else:
-                        out_dim = self.units
 
-                    self.dense_layers = []
+                    F = inputs
+                    for i in range(self.layers_inner - 1):
+                        F = self.dense_layers[i](F)
+                        if self.batch_normalization_decay:
+                            if self.name:
+                                name = self.name + '_i%d' % i
+                            else:
+                                name = None
+                            F = tf.contrib.layers.batch_norm(
+                                F,
+                                decay=self.batch_normalization_decay,
+                                center=True,
+                                scale=True,
+                                zero_debias_moving_mean=True,
+                                is_training=self.training,
+                                updates_collections=None,
+                                reuse=self.reuse,
+                                scope=name
+                            )
+                        if self.activation_inner is not None:
+                            F = self.activation_inner(F)
 
-                    for i in range(self.layers_inner):
-                        if self.name:
-                            name = self.name + '_i%d' % i
-                        else:
-                            name = None
-
-                        l = tf.layers.Dense(
-                            out_dim,
-                            use_bias=self.use_bias,
-                            kernel_initializer=self.kernel_initializer,
-                            bias_initializer=self.bias_initializer,
-                            kernel_regularizer=self.kernel_regularizer,
-                            bias_regularizer=self.bias_regularizer,
-                            _reuse=self.reuse,
-                            name=name
-                        )
-                        self.dense_layers.append(l)
-
-                    if self.project_inputs:
-                        if self.name:
-                            name = self.name + '_projection'
-                        else:
-                            name = None
-
-                        self.projection = tf.layers.Dense(
-                            out_dim,
-                            use_bias=self.use_bias,
-                            kernel_initializer=self.kernel_initializer,
-                            bias_initializer=self.bias_initializer,
-                            kernel_regularizer=self.kernel_regularizer,
-                            bias_regularizer=self.bias_regularizer,
-                            _reuse=self.reuse,
-                            name=name
-                        )
-
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-
-                F = inputs
-                for i in range(self.layers_inner - 1):
-                    F = self.dense_layers[i](F)
+                    F = self.dense_layers[-1](F)
                     if self.batch_normalization_decay:
                         if self.name:
-                            name = self.name + '_i%d' % i
+                            name = self.name + '_i%d' % (self.layers_inner - 1)
                         else:
                             name = None
                         F = tf.contrib.layers.batch_norm(
@@ -4009,38 +4031,18 @@ class DenseResidualLayer(object):
                             reuse=self.reuse,
                             scope=name
                         )
-                    if self.activation_inner is not None:
-                        F = self.activation_inner(F)
 
-                F = self.dense_layers[-1](F)
-                if self.batch_normalization_decay:
-                    if self.name:
-                        name = self.name + '_i%d' % (self.layers_inner - 1)
+                    if self.project_inputs:
+                        x = self.projection(inputs)
                     else:
-                        name = None
-                    F = tf.contrib.layers.batch_norm(
-                        F,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None,
-                        reuse=self.reuse,
-                        scope=name
-                    )
+                        x = inputs
 
-                if self.project_inputs:
-                    x = self.projection(inputs)
-                else:
-                    x = inputs
+                    H = F + x
 
-                H = F + x
+                    if self.activation is not None:
+                        H = self.activation(H)
 
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
+                    return H
 
 
 class Conv1DLayer(object):
@@ -4594,6 +4596,16 @@ class MultiRNNLayer(object):
                     )
 
             self.built = True
+
+    def regularize(self, var, regularizer):
+        if regularizer is not None:
+            with self.session.as_default():
+                with self.session.graph.as_default():
+                    reg = tf.contrib.layers.apply_regularization(regularizer, [var])
+                    self.regularizer_losses.append(reg)
+
+    def get_regularizer_losses(self):
+        return self.regularizer_losses[:]
 
     def __call__(self, inputs, mask=None):
         if not self.built:
@@ -5360,7 +5372,6 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 if self.keys is not None or self.gaussian_attn:
                     if self.gaussian_attn:
                         q_units = 1
-                        self.attn_step_size = self.add_variable('attn_step_size', shape=[], initializer=tf.zeros_initializer)
                     else:
                         q_units = self.num_query_units
                     q_kernel = [
@@ -5419,6 +5430,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                 h_prev = state.h
                 c_prev = state.c
                 a_prev = state.a
+                a_prev = state.a
                 y_prev = state.y
                 mu_prev = state.mu
 
@@ -5433,8 +5445,7 @@ class AttentionalLSTMDecoderCell(LayerRNNCell):
                         a = tf.exp(-(mu-ix)**2/ tf.maximum(sigma2, self.epsilon)) * self.key_val_mask
                         a /= tf.maximum(tf.reduce_sum(a, axis=1, keepdims=True), self.epsilon)
                         context_vector = tf.reduce_sum(self.values * a[..., None], axis=1)
-                        # mu += tf.abs(self.attn_step_size) * tf.sigmoid(q)
-                        mu += tf.abs(q)
+                        mu += tf.abs(tf.tanh(q))
                     else:
                         q = self.q_kernel(h_prev)
                         k = self.k_kernel(self.keys)

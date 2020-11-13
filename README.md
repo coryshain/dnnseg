@@ -1,11 +1,39 @@
 # DNNSeg: Shain & Elsner '20 Reproduction Branch
 
+<<<<<<< HEAD
 This is the reproduction branch for Shain & Elsner (2020). For the current version of the model, run:
+=======
+DNNSeg implements deep neural sequence models for unsupervised speech processing and for testing hypotheses
+about human language acquisition from raw speech. DNNSeg is an elaboration on the model described in
+Elsner & Shain (2017; see [implementation](https://github.com/melsner/neural-segmentation)), and variants
+have been used to study the acquisition of phonological categories and features from speech 
+(Shain & Elsner, 2019; Shain & Elsner, 2020). In its full form, DNNSeg infers hierarchically organized segment boundaries and category
+labels through end-to-end optimization of cognitively-inspired proxy objectives for compression (Baddeley et al., 1998)
+and predictive coding (Singer et al., 2018), using a special type of segmental recurrent unit (Chung et al., 2017).
+DNNSeg is thus based on the hypothesis that linguistic representations (e.g. phonemes, words, and possibly constituents)
+make the speech signal both easier to remember and easier to predict than non-linguistic ones, and it exploits this
+signal to extract linguistic generalizations from speech without supervision.
+>>>>>>> 40f19b24d3aa82e37124d144ebe527b6cb3643b0
 
     git checkout master
 
+<<<<<<< HEAD
 Shain & Elsner (2020) used DNNSeg to test existing hypotheses about the roles of memory and
 prediction in child phoneme acquisition.
+=======
+This repository is under active development, and reproducibility of previously published results is not guaranteed from the master branch.
+For this reason, repository states associated with previous results are saved in Git branches.
+To reproduce those results, checkout the relevant branch and follow the instructions in the `README`.
+Current reproduction branches are:
+
+ - `NAACL19`
+ - `CoNLL20`
+
+Thus, to reproduce results from CoNLL20 (Shain & Elsner, 2020), for example, run `git checkout CoNLL20` from the repository root, and follow instructions in the `README` file.
+
+Published results depend on both (1) datasets and (2) models as defined in experiment-specific configuration files.
+We do not distribute data with this repository.
+>>>>>>> 40f19b24d3aa82e37124d144ebe527b6cb3643b0
 
 ## Installation
 
@@ -17,7 +45,12 @@ library by running the following in the repository root:
     git clone https://github.com/mcdermottLab/pycochleagram.git;
     cd pycochleagram;
     python setup.py install
-    
+
+Use [conda](https://www.anaconda.com/) to set up the software environment, like so:
+
+    conda env create -f conda_dnnseg.yml
+    conda activate dnnseg
+ 
 
 ## Data Setup
 
@@ -76,3 +109,4 @@ which will submit all jobs concurrently.
 
 ## References
 * Shain, Cory and Elsner, Micha (2020). Acquiring language from speech by learning to remember and predict. _CoNLL20_.
+

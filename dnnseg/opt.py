@@ -52,7 +52,7 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
     with session.as_default():
         with session.graph.as_default():
             class JTPSOptimizer(base_optimizer_class):
-                def __init__(self, *args, meta_learning_rate=None, granularity='global', linking_fn='softplus', **kwargs):
+                def __init__(self, *args, meta_learning_rate=None, granularity='cell', constraint_fn='softplus', **kwargs):
                     super(JTPSOptimizer, self).__init__(*args, **kwargs)
                     if meta_learning_rate is None:
                         if len(args) > 0:
@@ -62,9 +62,10 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                         self._meta_learning_rate = learning_rate
                     else:
                         self._meta_learning_rate = meta_learning_rate
+
                     self.granularity = granularity.lower()
                     self.global_lambda = None
-                    self.linking_fn = linking_fn
+                    self.constraint_fn = constraint_fn
                     self._delta_prev = None
                     self._delta_prev_t = None
                     self._lambda = None
@@ -79,8 +80,8 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                         kwargs['learning_rate'] = self._meta_learning_rate
                     self.lambda_optimizer = self._lambda_optimizer_class(*args, **kwargs)
 
-                def get_linking_fn(self):
-                    fn = self.linking_fn
+                def get_constraint_fn(self):
+                    fn = self.constraint_fn
                     if isinstance(fn, str):
                         if fn.lower() == 'identity':
                             out = tf.identity
@@ -89,7 +90,7 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                             out = tf.nn.softplus
                             inv = tf.contrib.distributions.softplus_inverse
                         else:
-                            raise ValueError('Unrecognized linking function "%s"' % fn)
+                            raise ValueError('Unrecognized constraint function "%s"' % fn)
                     else:
                         out, inv = fn
 
@@ -104,7 +105,7 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                     raise ValueError('Unrecognized value for parameter ``granularity``: "%s"' % self.granularity)
 
                 def get_flattened_lambdas(self, var_list=None):
-                    fn, _ = self.get_linking_fn()
+                    fn, _ = self.get_constraint_fn()
 
                     if var_list is None:
                         var_list = tf.trainable_variables()
@@ -113,12 +114,12 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                         lambdas = self.global_lambda
                     elif self.granularity == 'variable':
                         lambdas = tf.stack(
-                            [self.get_lambda(var) for var in var_list],
+                            [self.get_lambda(var) for var in var_list if self.get_lambda(var) is not None],
                             axis=0
                         )
                     else:
                         lambdas = tf.concat(
-                            [tf.reshape(self.get_lambda(var), [-1]) for var in var_list],
+                            [tf.reshape(self.get_lambda(var), [-1]) for var in var_list if self.get_lambda(var) is not None],
                             axis=0
                         )
 
@@ -127,12 +128,12 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                     return lambdas
 
                 def _create_slots(self, var_list):
-                    _, fn_inv = self.get_linking_fn()
+                    _, fn_inv = self.get_constraint_fn()
 
                     if self.granularity == 'global':
                         self.global_lambda = tf.Variable(
                             fn_inv(1.).eval(session=session),
-                            trainable=False,
+                            trainable=True,
                             name='JTPS_lambda'
                         )
 
@@ -213,7 +214,7 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                     )
 
                     with tf.control_dependencies([base_update_op]):
-                        fn, _ = self.get_linking_fn()
+                        fn, _ = self.get_constraint_fn()
                         lambda_update_op = []
 
                         if self.granularity == 'global':
@@ -224,8 +225,8 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                                     v_cur = self.get_slot(v, 'theta')
                                     lambda_v = self.get_lambda(v)
 
-                                    var_fn = v_cur + fn(lambda_v) * delta_prev
-                                    lambda_grad_cur = g * tf.gradients(var_fn, lambda_v)[0]
+                                    v_cur_from_prev = v_cur + fn(lambda_v) * delta_prev
+                                    lambda_grad_cur = g * tf.gradients(v_cur_from_prev, lambda_v)[0]
                                     lambda_grad += tf.reduce_sum(lambda_grad_cur)
 
                             lambda_update_op.append(
@@ -238,12 +239,13 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
                                     v_cur = self.get_slot(v, 'theta')
                                     lambda_v = self.get_lambda(v)
 
-                                    var_fn = v_cur + fn(lambda_v) * delta_prev
-                                    lambda_grad_cur = g * tf.gradients(var_fn, lambda_v)[0]
+                                    v_cur_from_prev = v_cur + fn(lambda_v) * delta_prev
+                                    lambda_grad_cur = g * tf.gradients(v_cur_from_prev, lambda_v)[0]
                                     if self.granularity == 'variable':
                                         lambda_grad_cur = tf.reduce_sum(lambda_grad_cur)
                                     else:
                                         assert self.granularity == 'cell', 'Unrecognized granularity type "%s"' % self.granularity
+
                                     lambda_update_op += [
                                         self.lambda_optimizer._apply_dense(lambda_grad_cur, lambda_v),
                                     ]
@@ -265,7 +267,6 @@ def get_JTPS_optimizer_class(base_optimizer_class, session=None):
 
                                     update_op += [
                                         state_ops.assign(v, v_new),
-
                                     ]
 
                             update_op = control_flow_ops.group(*update_op)
