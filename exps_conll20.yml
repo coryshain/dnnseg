@@ -22,7 +22,5 @@ l:
     - 4
 L:
   learning_rate:
-    - 0.01
-r:
-  replicate:
-    - 1
+    - 0.001
+
