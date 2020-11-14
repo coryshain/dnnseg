@@ -1,8 +1,8 @@
 default:
-	python -m dnnseg.bin.make_jobs eng.ini exps_conll20.yml -o conll20
-	python -m dnnseg.bin.make_jobs eng_baseline.ini exps_conll20.yml -o conll20
-	python -m dnnseg.bin.make_jobs xit.ini exps_conll20.yml -o conll20
-	python -m dnnseg.bin.make_jobs xit_baseline.ini exps_conll20.yml -o conll20
+	python -m dnnseg.bin.grid_search eng.ini exps_conll20.yml -o conll20
+	python -m dnnseg.bin.grid_search eng_baseline.ini exps_conll20.yml -o conll20
+	python -m dnnseg.bin.grid_search xit.ini exps_conll20.yml -o conll20
+	python -m dnnseg.bin.grid_search xit_baseline.ini exps_conll20.yml -o conll20
 	rm conll20/*wb0_wf0*ini
 
 pbs:
