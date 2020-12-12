@@ -9,6 +9,7 @@ dependencies:
   - scipy
   - seaborn
   - tensorflow=1.9
+  - numba=0.45
   - pip:
     - audioread==2.1.8
     - librosa==0.7.0

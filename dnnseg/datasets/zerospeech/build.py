@@ -73,9 +73,14 @@ if args.bsc is not None:
 
     for fileID in sample_files:
         subject = fileID[:3]
-        in_path = args.bsc + '/' + subject + '/' + fileID + '/' + fileID + '.wav'
-        out_path = args.outdir + '/sample/' + fileID + '.wav'
-        shutil.copy2(in_path, out_path)
+        try:
+            in_path = args.bsc + '/' + subject + '/' + fileID + '/' + fileID + '.wav'
+            out_path = args.outdir + '/sample/' + fileID + '.wav'
+            shutil.copy2(in_path, out_path)
+        except:
+            in_path = args.bsc + '/' + subject + '/' + fileID + '.wav'
+            out_path = args.outdir + '/sample/' + fileID + '.wav'
+            shutil.copy2(in_path, out_path)
 
         to_print = sample_vad[sample_vad.fileID == fileID]
         to_print['speaker'] = subject
@@ -94,9 +99,14 @@ if args.bsc is not None:
 
     for fileID in english_files:
         subject = fileID[:3]
-        in_path = args.bsc + '/' + subject + '/' + fileID + '/' + fileID + '.wav'
-        out_path = args.outdir + '/english/' + fileID + '.wav'
-        shutil.copy2(in_path, out_path)
+        try:
+            in_path = args.bsc + '/' + subject + '/' + fileID + '/' + fileID + '.wav'
+            out_path = args.outdir + '/english/' + fileID + '.wav'
+            shutil.copy2(in_path, out_path)
+        except:
+            in_path = args.bsc + '/' + subject + '/' + fileID + '.wav'
+            out_path = args.outdir + '/english/' + fileID + '.wav'
+            shutil.copy2(in_path, out_path)
 
         to_print = english_vad[english_vad.fileID == fileID]
         to_print['speaker'] = subject
