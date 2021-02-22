@@ -2,9 +2,9 @@
 
 DNNSeg implements deep neural sequence models for unsupervised speech processing and for testing hypotheses
 about human language acquisition from raw speech. DNNSeg is an elaboration on the model described in
-Elsner & Shain (2017; see [implementation](https://github.com/melsner/neural-segmentation)), and a constrained variant
-of the DNNSeg model has been used to study the acquisition of phonological categories and features from speech 
-(Shain & Elsner, 2019). In its full form, DNNSeg infers hierarchically organized segment boundaries and category
+Elsner & Shain (2017; see [implementation](https://github.com/melsner/neural-segmentation)), and variants
+have been used to study the acquisition of phonological categories and features from speech 
+(Shain & Elsner, 2019; Shain & Elsner, 2020). In its full form, DNNSeg infers hierarchically organized segment boundaries and category
 labels through end-to-end optimization of cognitively-inspired proxy objectives for compression (Baddeley et al., 1998)
 and predictive coding (Singer et al., 2018), using a special type of segmental recurrent unit (Chung et al., 2017).
 DNNSeg is thus based on the hypothesis that linguistic representations (e.g. phonemes, words, and possibly constituents)
@@ -19,8 +19,9 @@ To reproduce those results, checkout the relevant branch and follow the instruct
 Current reproduction branches are:
 
  - `NAACL19`
+ - `CoNLL20`
 
-Thus, to reproduce results from NAACL19 (Shain & Elsner, 2019), for example, run `git checkout NAACL19` from the repository root, and follow instructions in the `README` file.
+Thus, to reproduce results from CoNLL20 (Shain & Elsner, 2020), for example, run `git checkout CoNLL20` from the repository root, and follow instructions in the `README` file.
 
 Published results depend on both (1) datasets and (2) models as defined in experiment-specific configuration files.
 We do not distribute data with this repository.
@@ -30,7 +31,7 @@ We do not distribute data with this repository.
 Install DNNSeg by cloning this repository.
 To install python dependencies, install [anaconda](https://www.anaconda.com/), then run the following commands from this repository root to create a new conda environment:
 
-    conda env create -f conda_cdr.yml
+    conda env create -f conda_dnnseg.yml
     
 In addition, for models using cochleagram-based acoustic representations, you will need to install the pycochleagram
 library by first activating the `dnnseg` environment
@@ -79,4 +80,5 @@ Once you have defined an `*.ini` config file, fit the model by running the follo
 * Elsner, Micha and Shain, Cory (2017). Speech segmentation with a neural encoder model of working memory. _EMNLP17_.
 * Shain, Cory and Elsner, Micha (2019). Measuring the perceptual availability of phonological features during language
   acquisition using unsupervised binary stochastic autoencoders. _NAACL19_.
+* Shain, Cory and Elsner, Micha (2020). Acquiring language from speech by learning to remember and predict. _CoNLL20_.
 * Singer, Yosef; Teramoto, Yayoi; Willmore, Ben D B; Schnupp, Jan W H; King, Andrew J; Harper, Nicol S. Sensory cortex is optimized for prediction of future input. _eLife_.
