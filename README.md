@@ -27,15 +27,23 @@ We do not distribute data with this repository.
 
 ## Installation
 
-Install DNNSeg by cloning this repository. In addition, DNNSeg requires the Python libraries tensorflow, pandas,
-scpiy, scikit-learn, librosa, and seaborn, along with their dependencies. These can be installed using pip or conda.
-Furthermore, for models using cochleagram-based acoustic representations, you will need to install the pycochleagram
-library by running the following in the repository root:
+Install DNNSeg by cloning this repository.
+To install python dependencies, install [anaconda](https://www.anaconda.com/), then run the following commands from this repository root to create a new conda environment:
+
+    conda env create -f conda_cdr.yml
+    
+In addition, for models using cochleagram-based acoustic representations, you will need to install the pycochleagram
+library by first activating the `dnnseg` environment
+
+    conda activate dnnseg 
+ 
+and running the following in the repository root:
 
     git clone https://github.com/mcdermottLab/pycochleagram.git;
     cd pycochleagram;
     python setup.py install
-    
+
+The `dnnseg` environment needs to be activated (as above) before running DNNSeg.
 
 ## Data Setup
 

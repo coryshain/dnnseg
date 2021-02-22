@@ -1,0 +1,16 @@
+name: dnnseg
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - audioread
+  - graphviz
+  - numpy
+  - pandas
+  - pip
+  - pyyaml
+  - scikit-learn
+  - scipy
+  - seaborn
+  - tensorflow=1.9.0
+  - yaml
