@@ -133,11 +133,12 @@ class AcousticEncoderDecoder(object):
 
         if self.resample_inputs:
             if self.max_len < self.resample_inputs:
-                self.n_timestamps_input = self.max_len
+                self.n_timesteps_input = self.max_len
             else:
-                self.n_timestamps_input = self.resample_inputs
+                self.n_timesteps_input = self.resample_inputs
         else:
-            self.n_timestamps_input = self.max_len
+            self.n_timesteps_input = self.max_len
+        assert self.n_timesteps_input, 'Must specify either max_len or resample_inputs'
 
         if self.resample_outputs:
             if self.max_len < self.resample_outputs:
@@ -146,6 +147,7 @@ class AcousticEncoderDecoder(object):
                 self.n_timesteps_output = self.resample_outputs
         else:
             self.n_timesteps_output = self.max_len
+        assert self.n_timesteps_input, 'Must specify either max_len or resample_outputs'
 
         with self.sess.as_default():
             with self.sess.graph.as_default():

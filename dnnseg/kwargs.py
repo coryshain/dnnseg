@@ -455,18 +455,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Smoothing parameter to use for soft-DTW objective. If ``Nonw``, do not use soft-DTW."
     ),
     Kwarg(
-        'n_timesteps_input',
-        None,
-        [int, None],
-        "Number of timesteps present in the input data. If ``None``, inferred from data, possibly with different values between batches."
-    ),
-    Kwarg(
-        'n_timesteps_output',
-        None,
-        [int, None],
-        "Number of timesteps present in the target data. If ``None``, inferred from data, possibly with different values between batches."
-    ),
-    Kwarg(
         'mask_padding',
         True,
         bool,
